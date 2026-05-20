@@ -20,8 +20,8 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class EagleCudaGraphManagerBase(CudaGraphManager):
-    """Base CudaGraphManager for Eagle with a dedicated graph pool."""
+class SpeculatorCudaGraphManagerBase(CudaGraphManager):
+    """Base CudaGraphManager for draft models with a dedicated graph pool."""
 
     def __init__(
         self,
@@ -32,16 +32,13 @@ class EagleCudaGraphManagerBase(CudaGraphManager):
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 
-        # Use a dedicated pool for Eagle to avoid memory overlap with the main
-        # model's cudagraph. The base class uses a shared global pool, but Eagle's
-        # internal allocations (e.g., gumbel_sample temporaries) can conflict with
-        # the main model's allocations when sharing the same pool.
+        # Keep draft-model graph allocations isolated from the target model.
         if cudagraph_mode:
             self.pool = torch.cuda.graph_pool_handle()
 
 
-class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
-    """Eagle CudaGraphManager for prefill, using pre-built attention states
+class PrefillSpeculatorCudaGraphManager(SpeculatorCudaGraphManagerBase):
+    """CudaGraphManager for draft prefill, using pre-built attention states
     from the target model's capture."""
 
     def capture(
@@ -77,9 +74,8 @@ class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
         super().capture(create_forward_fn, progress_bar_desc)
 
 
-class DecodeEagleCudaGraphManager(EagleCudaGraphManagerBase):
-    """Eagle CudaGraphManager for decode draft generation, building its own
-    attention metadata from scratch."""
+class DecodeSpeculatorCudaGraphManager(SpeculatorCudaGraphManagerBase):
+    """CudaGraphManager for draft decode, building its own attention metadata."""
 
     def capture(
         self,
