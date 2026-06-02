@@ -939,7 +939,7 @@ sqlalchemy==2.0.41
     #   optuna
 sqlitedict==2.1.0
     # via lm-eval
-starlette==0.50.0
+starlette==1.2.1
     # via
     #   fastapi
     #   schemathesis
