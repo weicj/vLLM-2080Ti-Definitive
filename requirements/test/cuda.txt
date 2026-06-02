@@ -134,7 +134,7 @@ cuda-pathfinder==1.3.3
     # via cuda-bindings
 cuda-toolkit==13.0.2
     # via torch
-cupy-cuda12x==13.6.0
+cupy-cuda12x==14.1.1
     # via ray
 cycler==0.12.1
     # via matplotlib
