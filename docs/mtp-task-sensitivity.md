@@ -33,26 +33,26 @@ This sweep uses three Chinese long-generation prompts with about 4096 prompt
 tokens and up to 1024 generated tokens each. Cold start, model load, graph
 capture, and first-request JIT are excluded.
 
-### Qwen3.6 27B
+### Qwen3.6-27B-GPTQ-INT4
 
-Qwen shows clear MTP scaling and then a plateau. MTP3 is the conservative
-deployment point; MTP5 is only slightly faster on this specific sweep.
+This GPTQ-INT4 Qwen-family route has the stronger noMTP baseline in the same
+LongGen3 TTFT test. It still shows clear MTP scaling, but the useful plateau
+starts around MTP3/MTP4.
 
 | MTP | Decode tok/s | Relative to noMTP |
 |---|---:|---:|
-| noMTP | 32.26 | 1.00x |
-| MTP1 | 44.30 | 1.37x |
-| MTP2 | 49.49 | 1.53x |
-| MTP3 | 54.14 | 1.68x |
-| MTP4 | 55.02 | 1.71x |
-| MTP5 | 55.20 | 1.71x |
+| noMTP | 43.59 | 1.00x |
+| MTP1 | 42.94 | 0.99x |
+| MTP2 | 49.11 | 1.13x |
+| MTP3 | 60.62 | 1.39x |
+| MTP4 | 60.77 | 1.39x |
+| MTP5 | 59.55 | 1.37x |
 
-Per-case behavior at the top end is close: MTP5 reached `54.99 tok/s` on code,
-`61.65 tok/s` on science, and `50.14 tok/s` on prose. MTP3 was slightly better
-on prose in this run, which is why MTP3 remains the safer mixed-workload
-default.
+Per-case behavior at the top end is close: MTP4 reached `63.10 tok/s` on code
+and `64.57 tok/s` on science, while MTP3 was faster on prose at `58.14 tok/s`.
+This is why MTP3 remains the safer mixed-workload default.
 
-### Gemma4 31B
+### Gemma4-31B-GPTQ-INT4
 
 Gemma also benefits from MTP, but the gain is smaller and more workload
 sensitive. MTP7 was numerically best in this sweep, while MTP8 was the first
@@ -60,110 +60,108 @@ decline.
 
 | MTP | Decode tok/s | Relative to noMTP |
 |---|---:|---:|
-| noMTP | 30.67 | 1.00x |
-| MTP1 | 21.06 | 0.69x |
-| MTP2 | 27.06 | 0.88x |
-| MTP3 | 31.19 | 1.02x |
-| MTP4 | 33.81 | 1.10x |
-| MTP5 | 35.81 | 1.17x |
-| MTP6 | 36.71 | 1.20x |
-| MTP7 | 37.68 | 1.23x |
-| MTP8 | 36.81 | 1.20x |
+| noMTP | 31.65 | 1.00x |
+| MTP1 | 21.47 | 0.68x |
+| MTP2 | 28.92 | 0.91x |
+| MTP3 | 33.71 | 1.07x |
+| MTP4 | 36.64 | 1.16x |
+| MTP5 | 39.06 | 1.23x |
+| MTP6 | 40.26 | 1.27x |
+| MTP7 | 41.19 | 1.30x |
+| MTP8 | 39.11 | 1.24x |
+| MTP9 | 38.12 | 1.20x |
+| MTP10 | 38.56 | 1.22x |
 
 The overall gain is real, but it is far from a universal 2x decode multiplier.
 Gemma high-K MTP should be treated as a tuned profile, not a default rule.
 
-## Three-Task 1024-Token Long-Output Probe
+## LongGen3 Per-Task Split
 
-This probe used three shorter prompts capped near 1024 output tokens:
+This is the complete LongGen3 4096/1024 TTFT-split sweep. Each row excludes
+cold start, model load, graph capture, and first-request JIT. `Prefill TTFT` is
+prompt tokens divided by TTFT; `Decode` is completion tokens divided by decode
+time after TTFT.
 
-- a simple Python program,
-- a Chinese romance story,
-- a scientific-computing analysis.
+The three task columns are per-case decode tok/s:
 
-The goal was to check whether higher MTP remains useful on realistic long
-outputs rather than only synthetic repeated-token tests.
+- `Code`: simple Python program generation.
+- `Science`: scientific-computing analysis.
+- `Prose`: Chinese romance/natural prose generation.
 
-### Task 1: Simple Program
+### Qwen3.6-27B-GPTQ-INT4
 
-Code generation is the most MTP-friendly of the three tasks. The output has
-strong local structure: imports, functions, loops, comments, and indentation are
-easy for a draft path to predict. Higher K can therefore keep helping after the
-mixed-task aggregate has already flattened.
+| MTP | Prefill TTFT tok/s | Decode tok/s | Code | Science | Prose |
+|---|---:|---:|---:|---:|---:|
+| noMTP | 1788.36 | 43.59 | 43.27 | 44.11 | 43.27 |
+| MTP1 | 1740.58 | 42.94 | 44.05 | 46.35 | 38.98 |
+| MTP2 | 1735.05 | 49.11 | 48.01 | 55.19 | 45.04 |
+| MTP3 | 1729.25 | 60.62 | 59.95 | 63.87 | 58.14 |
+| MTP4 | 1738.42 | 60.77 | 63.10 | 64.57 | 55.31 |
+| MTP5 | 1732.00 | 59.55 | 61.16 | 66.67 | 52.41 |
 
-| Model | noMTP | MTP1 | MTP2 | MTP3 | MTP4 | MTP5 | MTP6 | MTP8 | Best observed |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Qwen3.6 27B | - | - | 50.76 | 61.81 | 63.54 | 58.50 | - | 44.82 | MTP4, `63.54 tok/s` |
-| Gemma4 31B | 8.10 | 49.20 | - | 79.51 | - | 97.56 | 109.33 | 73.12 | MTP6, `109.33 tok/s` |
+This GPTQ-INT4 Qwen-family route keeps noMTP decode above `40 tok/s` in this
+test. MTP3 and MTP4 are effectively tied on aggregate decode, but MTP3 has the
+better prose row and is therefore the conservative mixed-workload default.
 
-Interpretation:
+### Gemma4-31B-GPTQ-INT4
 
-- Qwen improves sharply up to MTP3/MTP4, then higher K stops helping.
-- Gemma benefits more on code than its aggregate result suggests; MTP6 was the
-  fastest code row after warmup/JIT was excluded.
-- MTP8 is not automatically better. It regressed for both models on this task
-  despite being able to produce high synthetic numbers.
+| MTP | Prefill TTFT tok/s | Decode tok/s | Code | Science | Prose |
+|---|---:|---:|---:|---:|---:|
+| noMTP | 1626.98 | 31.65 | 31.55 | 31.77 | 31.54 |
+| MTP1 | 1635.45 | 21.47 | 22.89 | 21.11 | 20.42 |
+| MTP2 | 1637.95 | 28.92 | 32.99 | 28.35 | 26.07 |
+| MTP3 | 1635.95 | 33.71 | 41.70 | 33.36 | 28.20 |
+| MTP4 | 1609.10 | 36.64 | 46.97 | 35.94 | 29.99 |
+| MTP5 | 1634.69 | 39.06 | 52.79 | 39.57 | 29.68 |
+| MTP6 | 1640.97 | 40.26 | 56.87 | 41.25 | 30.00 |
+| MTP7 | 1629.21 | 41.19 | 55.11 | 42.53 | 31.88 |
+| MTP8 | 1625.00 | 39.11 | 57.37 | 39.39 | 28.82 |
+| MTP9 | 1624.51 | 38.12 | 55.59 | 39.17 | 27.64 |
+| MTP10 | 1616.40 | 38.56 | 56.99 | 38.81 | 28.15 |
 
-### Task 2: Romance Story / Natural Prose
+Gemma benefits more gradually. Code and science keep improving into higher K,
+while prose remains weak and tops out around MTP7 in this sweep. The practical
+lesson is that Gemma MTP should be selected by workload: higher K can help
+structured output, but it is not a universal natural-language speedup.
 
-Natural prose is the weakest MTP case. The model has many acceptable ways to
-continue a sentence, choose adjectives, vary rhythm, or change phrasing. That
-higher entropy reduces draft acceptance, so increasing K can waste draft work
-instead of improving final decode speed.
+## Acceptance Evidence
 
-| Model | noMTP | MTP1 | MTP2 | MTP3 | MTP4 | MTP5 | MTP6 | MTP8 | Best observed |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Qwen3.6 27B | - | - | 47.57 | 48.38 | 45.04 | 45.69 | - | 38.50 | MTP3, `48.38 tok/s` |
-| Gemma4 31B | 33.07 | 42.33 | - | 49.56 | - | 48.62 | 46.52 | 42.64 | MTP3, `49.56 tok/s` |
+The benchmark JSON records request timing and token counts, but vLLM reports
+speculative acceptance in server-side `SpecDecoding metrics` windows. The table
+below maps those log windows back to the sequential LongGen3 requests. Treat
+these values as log-window evidence for the scored run, not as a separate field
+emitted by the benchmark runner.
 
-Interpretation:
+### Qwen3.6-27B-GPTQ-INT4
 
-- This is the main reason mixed workloads should not blindly use very high K.
-- Qwen's prose row peaks around MTP3 and declines after that.
-- Gemma's prose row also peaks around MTP3; MTP5/MTP6 are better for code and
-  science, but not for story-like output.
+| MTP | Accepted | Drafted | Weighted accept | Decode tok/s |
+|---|---:|---:|---:|---:|
+| MTP1 | 1525 | 1752 | 87.0% | 42.94 |
+| MTP2 | 2061 | 2668 | 77.2% | 49.11 |
+| MTP3 | 2317 | 3411 | 67.9% | 60.62 |
+| MTP4 | 2430 | 4212 | 57.7% | 60.77 |
+| MTP5 | 2468 | 4810 | 51.3% | 59.55 |
 
-### Task 3: Scientific / Technical Analysis
+### Gemma4-31B-GPTQ-INT4
 
-Scientific and technical analysis sits between code and prose. It has natural
-language, but also repeated structure: definitions, equations, steps, examples,
-and summary bullets. In this probe it behaved much closer to code than to
-romance prose.
+| MTP | Accepted | Drafted | Weighted accept | Decode tok/s |
+|---|---:|---:|---:|---:|
+| MTP1 | 1394 | 1715 | 81.3% | 21.47 |
+| MTP2 | 1872 | 2620 | 71.5% | 28.92 |
+| MTP3 | 2034 | 3201 | 63.5% | 33.71 |
+| MTP4 | 2100 | 3736 | 56.2% | 36.64 |
+| MTP5 | 2229 | 4580 | 48.7% | 39.06 |
+| MTP6 | 2265 | 5226 | 43.3% | 40.26 |
+| MTP7 | 2424 | 6139 | 39.5% | 41.19 |
+| MTP8 | 2350 | 6768 | 34.7% | 39.11 |
+| MTP9 | 2386 | 7641 | 31.2% | 38.12 |
+| MTP10 | 2259 | 7550 | 29.9% | 38.56 |
 
-| Model | noMTP | MTP1 | MTP2 | MTP3 | MTP4 | MTP5 | MTP6 | MTP8 | Best observed |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Qwen3.6 27B | - | - | 51.74 | 66.69 | 66.02 | 69.07 | - | 64.24 | MTP5, `69.07 tok/s` |
-| Gemma4 31B | 33.77 | 53.31 | - | 83.41 | - | 103.85 | 104.79 | 102.37 | MTP6, `104.79 tok/s` |
-
-Interpretation:
-
-- Qwen keeps improving through MTP5 on this specific task, but MTP3 is already
-  close enough to be the safer mixed default.
-- Gemma's science row scales very well through MTP5/MTP6 and remains strong at
-  MTP8, unlike the prose row.
-- This task class is a good example of why MTP should be selected by workload,
-  not by a single global K value.
-
-### Aggregate View
-
-The aggregate result is still useful, but only after looking at the task split.
-It answers "what should the default mixed profile be?" rather than "which K is
-best for every task?"
-
-| Model | noMTP | MTP1 | MTP2 | MTP3 | MTP4 | MTP5 | MTP6 | MTP8 | Practical default |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Qwen3.6 27B | 36.92 | 44.56 | 49.96 | 57.87 | 56.51 | 56.12 | - | 46.99 | MTP3 |
-| Gemma4 31B | 16.09 | 48.02 | - | 67.05 | - | 76.65 | 74.88 | 66.02 | MTP5 |
-
-Qwen MTP8 produced much higher synthetic PP4096/TG128 numbers, but it regressed
-on these realistic long-output prompts. The draft path did more work, yet
-natural text did not accept enough draft tokens to justify the extra depth.
-
-Gemma MTP5/MTP6 was very strong on code and scientific analysis. The same runs
-were much weaker on natural prose: the romance/story row stayed around the
-high-40 tok/s range because draft acceptance dropped. This is the clearest
-example that MTP speed follows acceptance, not just the configured number of
-draft tokens.
+This is the main reason the speed table should not be read as "larger K is
+always better." Both models show falling acceptance as K increases. Qwen reaches
+its practical plateau around MTP3/MTP4, while Gemma keeps gaining until MTP7
+because the larger draft depth still offsets the lower acceptance on this
+LongGen3 mix.
 
 ## Deployment Guidance
 

@@ -69,7 +69,7 @@ controls, and native MTP with CUDAGraph for decode.
 
 | Feature | FP16 KV | INT8 KV | TQ4NC KV |
 |---|---|---|---|
-| Marlin weight route | 🟢 AWQ/GPTQ | 🟢 AWQ/GPTQ | 🟢 AWQ/GPTQ |
+| Marlin weight route | 🟢 FP8/AWQ/GPTQ | 🟢 FP8/AWQ/GPTQ | 🟢 FP8/AWQ/GPTQ |
 | Native MTP3 decoding | 🟢 short-context speed route | 🟢 capacity + speed route | 🟢 compressed-capacity route |
 | Native 262K context | 🟢 noMTP real prompt supported | 🟡 capacity/speed candidate | 🟢 real prompt/service supported |
 | YaRN 524K extension | ⚪ not the target route | 🟢 supported capacity route | 🟡 capacity candidate |
@@ -77,49 +77,6 @@ controls, and native MTP with CUDAGraph for decode.
 | Fast prefill path | 🟢 FlashInfer / FA2 | 🟢 FlashInfer / INT8 path | 🟢 TurboQuant FlashInfer path |
 | Multimodal image serving | 🟢 default-KV route | 🔴 output corruption observed | 🟢 recommended image route |
 | Peak MTP3 PP4096/TG128 | 🟢 1747.52 / 100.98 tok/s | 🟢 1744.06 / 81.12 tok/s | 🟢 1746.32 / 85.94 tok/s |
-
-Larger MTP values can produce higher synthetic throughput-only numbers: Qwen3.6
-TQ4NC reached `90.75 tok/s` in a stable MTP5 row and `100.61 tok/s` in an
-earlier candidate row. MTP3 is the practical deployment reference because it
-balances acceptance rate and real workload throughput.
-
-For interactive single-user chat, non-TQ FP16/default KV + native MTP5 is also
-kept as a convenient speed-feel profile; it is useful for manual latency checks,
-but it does not replace MTP3 as the conservative deployment reference.
-
-Recommended Qwen profiles:
-
-| Use case | KV precision | Context | Spec decoding | Message type | Concurrency limit |
-|---|---|---|---|---|---|
-| High-quality native-context route | FP16 | 262K native | None | text | 1 request |
-| Peak short-context speed route | FP16 | 8K-16K | Native MTP3 | text | 1 request |
-| High-compression route | TQ4NC | 262K native | Native MTP3 | text | 1 request / queued |
-| Ultra-long context | INT8 | 524K YaRN | Native MTP3 | text | 1 offline request |
-| Multi-workspace | INT8 or TQ4NC | 64K-262K caps | Native MTP3 | text | 4 x 64K queued / 2 x 262K queued |
-| Multimodal | TQ4NC | 262K native | Native MTP3 | text + image | 1 request |
-
-Qwen limits:
-
-- INT8 KV is a text-serving capacity route. It is not recommended for image
-  serving because the validated multimodal runs reached READY but produced
-  corrupted punctuation/output instead of stable image answers.
-- FP16/default KV has a real `PP262000/TG1` pass only in noMTP mode. The MTP3
-  262K service can start, but the real 262K prompt OOMs during prefill, so MTP3
-  stays a short-context speed route for FP16.
-- The multi-workspace profile is for queued workspace isolation, not true
-  parallel long-prefill throughput. This TP=2 runtime still serializes heavy
-  long-context work in practice.
-- YaRN 524K is an offline capacity profile. The native 262K profiles remain the
-  default for normal interactive serving.
-
-Common Qwen launcher presets:
-
-- `qwen27-awq-mtp3`: regular Qwen-family FP16/default KV + native MTP3 route.
-- `qwen27-awq-mtp3-peak`: short-context peak-speed text route.
-- `qwen27-awq-mtp3-tq4nc-fi`: TQ4NC compressed-capacity route.
-- `qwen27-awq-mtp3-int8kv`: INT8 KV capacity / YaRN route.
-- `qwen27-awq-mm-*` and `heretic27-gptq-mm-*`: image-serving experiment
-  presets for Qwen-family model variants.
 
 ### Gemma4 31B Experimental Route
 
@@ -141,63 +98,26 @@ assistant MTP is compatible but more workload-sensitive.
 | Multimodal image serving | 🟢 default-KV route | ⚪ not supported | ⚪ not supported |
 | Peak PP4096/TG128 | 🟢 MTP5 1655.65 / 99.64 tok/s | 🔴 not a serving profile | 🟡 noMTP 1596.15 / 31.70 tok/s |
 
-Recommended Gemma profiles:
-
-| Use case | KV precision | Context | Spec decoding | Message type | Concurrency limit |
-|---|---|---|---|---|---|
-| High-quality route | FP16 | 16K validated text service; 105K estimate only | Assistant MTP5 | text | 1 request |
-| Fast compressed route | TQ4NC | 43K real-prompt practical edge | None | text | 1 request |
-| Long-context route | INT8 | 262K native, slow offline | None | text | 1 slow offline request |
-| Multimodal compatibility | FP16 | 8K image validated | Assistant MTP3 compatible | text + image | 1 request |
-
-Gemma limits:
-
-- Gemma4 uses head_dim=512 with heterogeneous/GQA attention. On SM75, the
-  compressed-KV path does not have a validated FlashAttention/FlashInfer fast
-  prefill route; the 262K INT8 path currently falls back to SDPA/GQA and is
-  much slower than the FP16/default-KV route.
-- The practical Gemma context window is much smaller than Qwen on the same dual
-  22GB hardware. The combination of head_dim=512, GQA/heterogeneous attention,
-  and less efficient compressed-KV grouping means that starting a compressed-KV
-  profile is not the same as getting an efficient full-262K service profile.
-- FP16/default KV is the best speed and quality route, but it cannot reach the
-  full native 262K context on dual 22GB cards. The validated service profile is
-  16K; the `105216` text and `97152` image figures are startup estimates from
-  failed 262K probes, not proven practical request limits.
-- TQ4NC is kept as a fast compressed short-context route. The useful real-prompt
-  edge is about `43K`: a `43005`-token prompt passed, while `43505`/`44005`
-  failed admission. `64K` is READY-only evidence, not a proven long-prompt pass.
-- Gemma multimodal is kept on default KV. INT8/TQ4NC multimodal routes are not
-  recommended because the heterogeneous-head multimodal backend rejects or
-  breaks those compressed KV paths.
-
-Common Gemma launcher presets:
-
-- `gemma4-gptq-tq4nc-mtp3`: TQ4NC compatibility route with assistant MTP3.
-- `gemma4-gptq-tq4nc-nomtp`: TQ4NC no-MTP short-context route.
-- `gemma4-gptq-mm-nomtp`: default-KV image-serving compatibility route.
-- `gemma4-gptq-mm-mtp3`: default-KV image-serving route with assistant MTP3.
-
 ## 🧪 Tested Model Checkpoints
 
 This section records checkpoint-level validation. It is intentionally stricter
 than "vLLM can load it": a supported checkpoint can start and generate, while a
 recommended checkpoint also has a useful speed/context tradeoff on dual 2080 Ti.
 
-| Checkpoint family | Weight route | Role | Validated KV/context evidence | Status |
-|---|---|---|---|---|
-| Qwopus3.6 27B v2 | AWQ Marlin | Main Qwen quality route | FP16/default KV reaches native 262K in noMTP real-prompt testing; TQ4NC is the recommended compressed 262K route; INT8 KV is usable for capacity / YaRN experiments. | 🟢 Recommended |
-| Qwen3.6 27B Heretic | GPTQ Marlin | Low-refusal Qwen route | 8K MTP and quality/refusal tests passed; use the same Qwen-family runtime profiles, with long-context profiles to be rechecked per checkpoint before production. | 🟢 Recommended variant |
-| Qwen3.6 27B original AWQ | AWQ Marlin | Baseline Qwen route | Stable and compatible with the Qwen-family runtime. LongGen3 TTFT sweep reached about 1738.12 / 60.30 tok/s at MTP5, but it did not beat Qwopus on quality or speed. | 🟡 Validated, retired |
-| Gemma4 31B | GPTQ Marlin + assistant draft | Secondary Gemma route | FP16/default KV is the useful speed route; TQ4NC is a short-context compressed route around the 43K real-prompt edge; INT8 262K is a slow offline compatibility path, not an interactive route. | 🟡 Experimental |
-| Qwen3.6 27B AutoRound W8A16 GS128 | INT8 AutoRound / GPTQMarlin | INT8 weight experiment | noMTP KV cache: 31,597 tokens; INT8 KV + MTP3 KV cache: 14,108 tokens; PP4096/TG128 MTP3: 1610.56 / 68.44 tok/s. | 🟡 Supported, not recommended |
-| Qwen3.6 27B AutoRound main | INT8 AutoRound / GPTQMarlin | INT8 weight experiment | Requires tokenizer/processor files copied from the GS128 branch; noMTP KV cache: 52,662 tokens; INT8 KV + MTP3 KV cache: 29,582 tokens; PP4096/TG128 MTP3: 1551.29 / 51.11 tok/s. | 🟡 Supported, not recommended |
+| Model route | Weight quantization | Model cards | Status |
+|---|---|---|---|
+| Qwen3.6 27B FP8 | FP8 | [Jackrong/Qwopus3.6-27B-v2-FP8](https://huggingface.co/Jackrong/Qwopus3.6-27B-v2-FP8) | 🟢 Recommended |
+| Qwen3.6 27B AWQ | AWQ-INT4 | [mconcat/Qwopus3.6-27B-v2-AWQ-4bit](https://huggingface.co/mconcat/Qwopus3.6-27B-v2-AWQ-4bit)<br>[QuantTrio/Qwen3.6-27B-AWQ](https://huggingface.co/QuantTrio/Qwen3.6-27B-AWQ) | 🟢 Recommended |
+| Qwen3.6 27B GPTQ | GPTQ-INT4 | [llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GPTQ-Int4](https://huggingface.co/llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GPTQ-Int4) | 🟢 Recommended |
+| Qwen3.6 27B AutoRound | AutoRound INT8 | [Minachist/Qwen3.6-27B-INT8-AutoRound W8A16-GS128](https://huggingface.co/Minachist/Qwen3.6-27B-INT8-AutoRound/tree/W8A16-GS128) | 🟡 Supported |
+| Gemma4 31B GPTQ | GPTQ-INT4 + assistant draft | [ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ](https://huggingface.co/ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ) | 🟡 Supported |
 
-AutoRound INT8 conclusion: both tested INT8 checkpoints are useful compatibility
-evidence for this fork, but neither is a practical production route on dual
-2080 Ti. GS128 has too little KV capacity; the main branch improves capacity but
-loses too much speculative-decode speed. The recommended Qwen route remains
-4-bit AWQ/GPTQ Marlin plus the validated KV profile for the target use case.
+FP8 and AutoRound INT8 conclusion: FP8 is the recommended high-quality 8-bit
+Qwen route when quality is prioritized over maximum 4-bit throughput. It uses
+weight-only FP8 on SM75 instead of native FP8 compute, so 4-bit AWQ/GPTQ remains
+the default performance/capacity route. AutoRound GS128 has too little KV
+capacity; the main branch improves capacity but loses too much speculative-decode
+speed, so only GS128 is kept in the tested-model list.
 The original Qwen3.6 AWQ checkpoint remains a useful baseline and can be
 downloaded again for regression checks, but Qwopus replaces it as the preferred
 quality route.
@@ -214,7 +134,7 @@ quality route.
   need profile validation for VRAM capacity, P2P/NVLink behavior, model
   head_dim, KV dtype, and CUDAGraph/MTP settings.
 
-## 🚀 MTP Is Acceptance-Bound
+## 🚀 MTP And KV Precision
 
 MTP/speculative decoding is not a fixed multiplier. Its speedup depends on how
 many drafted tokens the target model accepts, so the best `MTP_K` changes with
@@ -222,10 +142,28 @@ task type. In our sweeps, code and scientific-analysis prompts benefited much
 more than natural prose; very high K values could win synthetic throughput tests
 but regress on realistic long-generation prompts.
 
+KV precision changes the same decode path in a different way. With MTP enabled,
+FP16/default KV keeps the best long-context decode speed. Without MTP, FP16 and
+INT8 KV do not show a clear decode-speed drop in the current Qwen3.6 sweep.
+TurboQuant KV remains fast in short-context tests, but it falls off clearly at
+long context and should be used when the priority is larger KV capacity rather
+than maximum long-context decode speed.
+
 For the current stable profiles, Qwen3.6 uses MTP3 as the conservative mixed
 agent default, while Gemma4 uses higher MTP values only for specific FP16
 speed-oriented profiles. See [MTP Task Sensitivity](docs/mtp-task-sensitivity.md)
-for the measured Qwen/Gemma sweep tables.
+for task acceptance data, and
+[Qwen3.6 KV Throughput Sweep](docs/qwen36-kv-throughput-sweep.md) for the FP8
+and GPTQ-INT4 KV precision A/B tables.
+
+## 🧭 Profiles
+
+Production profile selection is documented separately in
+[docs/model-profile-routes.md](docs/model-profile-routes.md). Use it as the
+single entry point for route limits, recommended Qwen/Gemma profiles, KV
+precision choices, context-window targets, MTP settings, multimodal constraints,
+concurrency assumptions, and the launcher aliases expected by
+`bench_tools/stable_profile.sh`.
 
 ## 🚀 How To Use
 
@@ -244,6 +182,8 @@ host, not as a drop-in `pip install vllm` replacement.
 
    ```text
    $MODEL_ROOT/qwen-family-27b-awq
+   $MODEL_ROOT/qwen-family-27b-gptq-int4
+   $MODEL_ROOT/qwen-family-27b-fp8
    $MODEL_ROOT/gemma4-family-31b-gptq
    $MODEL_ROOT/gemma4-family-assistant
    ```
@@ -269,14 +209,6 @@ host, not as a drop-in `pip install vllm` replacement.
    ```bash
    curl http://127.0.0.1:8000/v1/models
    ```
-
-Common profiles:
-
-- `qwen27-awq-mtp3-peak`: Qwen-family FP16/default KV peak-speed text route.
-- `qwen27-awq-mtp3-tq4nc-fi`: Qwen-family TQ4NC compressed-capacity route.
-- `qwen27-awq-mtp3-int8kv`: Qwen-family INT8 KV capacity/YaRN route.
-- `gemma4-gptq-tq4nc-mtp3`: Gemma4 TQ4NC compatibility route.
-- `gemma4-gptq-tq4nc-nomtp`: Gemma4 TQ4NC no-MTP short-context route.
 
 ## ❓ Hardware Q&A
 

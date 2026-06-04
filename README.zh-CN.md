@@ -70,7 +70,7 @@ head_dim=256 路线完整保留，decode 侧使用 Native MTP + CUDAGraph 策略
 
 | 功能 | FP16 KV | INT8 KV | TQ4NC KV |
 |---|---|---|---|
-| Marlin 权重路线 | 🟢 AWQ/GPTQ | 🟢 AWQ/GPTQ | 🟢 AWQ/GPTQ |
+| Marlin 权重路线 | 🟢 FP8/AWQ/GPTQ | 🟢 FP8/AWQ/GPTQ | 🟢 FP8/AWQ/GPTQ |
 | Native MTP3 解码 | 🟢 短上下文速度路线 | 🟢 容量 + 速度路线 | 🟢 压缩容量路线 |
 | 原生 262K 上下文 | 🟢 noMTP 真实 prompt 已通过 | 🟡 容量/速度候选 | 🟢 真实 prompt / service 已通过 |
 | YaRN 524K 扩展 | ⚪ 非目标路线 | 🟢 容量路线 | 🟡 容量候选 |
@@ -78,45 +78,6 @@ head_dim=256 路线完整保留，decode 侧使用 Native MTP + CUDAGraph 策略
 | 快速 prefill 路线 | 🟢 FlashInfer / FA2 | 🟢 FlashInfer / INT8 path | 🟢 TurboQuant FlashInfer path |
 | 图像多模态 | 🟢 default-KV 路线 | 🔴 已观察到输出退化 | 🟢 推荐图像路线 |
 | Peak MTP3 PP4096/TG128 | 🟢 1747.52 / 100.98 tok/s | 🟢 1744.06 / 81.12 tok/s | 🟢 1746.32 / 85.94 tok/s |
-
-实际测试中，更大的 MTP 可以在纯吞吐测试里得到更高速度：Qwen3.6 TQ4NC
-在 stable MTP5 行达到 `90.75 tok/s`，早期 candidate 行达到 `100.61 tok/s`。
-但 MTP3 是接受率和真实任务总体吞吐率更平衡的实际参数，更具部署参考性。
-
-对于单用户交互聊天，非 TQ 的 FP16/default KV + Native MTP5 也保留为一个
-方便的体感测速 profile；它适合手动检查延迟和流式速度，但不替代 MTP3 作为
-更保守的部署参考。
-
-推荐 Qwen profile：
-
-| 使用场景 | KV 精度 | 上下文大小 | 投机解码 | 消息类型 | 并发上限 |
-|---|---|---|---|---|---|
-| 高质量原生上下文路线 | FP16 | 原生 262K | 无 | 纯文本 | 1 请求 |
-| 短上下文峰值速度路线 | FP16 | 8K-16K | Native MTP3 | 纯文本 | 1 请求 |
-| 高压缩路线 | TQ4NC | 原生 262K | Native MTP3 | 纯文本 | 1 请求 / 排队 |
-| 超长上下文 | INT8 | 524K YaRN | Native MTP3 | 纯文本 | 1 离线请求 |
-| 多工作区 | INT8 或 TQ4NC | 64K-262K caps | Native MTP3 | 纯文本 | 4 x 64K 排队 / 2 x 262K 排队 |
-| 多模态 | TQ4NC | 原生 262K | Native MTP3 | 文本 + 图像 | 1 请求 |
-
-Qwen 限制条件：
-
-- INT8 KV 是纯文本容量路线，不推荐用于图像多模态。已验证的多模态
-  INT8 路线可以 READY，但输出会退化成标点或异常文本重复，而不是稳定图像回答。
-- FP16/default KV 只有 noMTP 模式真实通过了 `PP262000/TG1`。MTP3 的 262K
-  服务可以 READY，但真实 262K prompt 会在 prefill 阶段 OOM，所以 FP16 下
-  MTP3 仍然只作为短上下文速度路线。
-- 多工作区 profile 用于排队式工作区隔离，不代表真正并行长 prefill 吞吐；
-  在这个 TP=2 runtime 下，重型长上下文任务实际仍会被串行化。
-- YaRN 524K 是离线容量 profile。正常低延迟交互服务仍以原生 262K 路线为默认。
-
-常用 Qwen launcher 预设：
-
-- `qwen27-awq-mtp3`：常规 Qwen 系 FP16/default KV + Native MTP3 路线。
-- `qwen27-awq-mtp3-peak`：短上下文峰值速度文本路线。
-- `qwen27-awq-mtp3-tq4nc-fi`：TQ4NC 压缩容量路线。
-- `qwen27-awq-mtp3-int8kv`：INT8 KV 容量 / YaRN 路线。
-- `qwen27-awq-mm-*` 和 `heretic27-gptq-mm-*`：Qwen 系模型变体的图像多模态
-  实验预设。
 
 ### Gemma4 31B 实验路线
 
@@ -138,58 +99,25 @@ Gemma4 31B 保留为第二路线和实验路线。FP16/default KV 路线速度�
 | 图像多模态 | 🟢 default-KV 路线 | ⚪ 不支持 | ⚪ 不支持 |
 | Peak PP4096/TG128 | 🟢 MTP5 1655.65 / 99.64 tok/s | 🔴 非服务 profile | 🟡 noMTP 1596.15 / 31.70 tok/s |
 
-推荐 Gemma profile：
-
-| 使用场景 | KV 精度 | 上下文大小 | 投机解码 | 消息类型 | 并发上限 |
-|---|---|---|---|---|---|
-| 高质量路线 | FP16 | 16K 已验证文本服务；105K 仅估算 | Assistant MTP5 | 纯文本 | 1 请求 |
-| 快速压缩路线 | TQ4NC | 43K 真实 prompt 实用边界 | 无 | 纯文本 | 1 请求 |
-| 长上下文路线 | INT8 | 原生 262K，慢速离线 | 无 | 纯文本 | 1 个慢速离线请求 |
-| 多模态兼容 | FP16 | 8K 图像已验 | Assistant MTP3 兼容 | 文本 + 图像 | 1 请求 |
-
-Gemma 限制条件：
-
-- Gemma4 是 head_dim=512 且带异构/GQA attention。在 SM75 上，压缩 KV
-  路线暂时没有已验证的 FlashAttention/FlashInfer 快速 prefill；262K INT8
-  目前回落到 SDPA/GQA，明显慢于 FP16/default KV。
-- 在同样双 22GB 显存下，Gemma 的实际可用上下文明显小于 Qwen。head_dim=512、
-  GQA/异构 attention，以及压缩 KV 分组效率不足，会让“能启动压缩 KV”不等于
-  “能得到高效的 262K 满血服务 profile”。
-- FP16/default KV 是速度和质量最好的路线，但双 22GB 卡无法支撑完整原生
-  262K 上下文。已验证服务 profile 是 16K；`105216` 文本和 `97152` 图像
-  只是 262K 失败探针里的启动估算值，不是真实请求通过的实用上限。
-- TQ4NC 保留为快速压缩短上下文路线：真实 prompt 实用边界约 `43K`，
-  `43005`-token prompt 通过，`43505`/`44005` admission 失败。`64K` 只是
-  READY 证据，不是真实长 prompt 通过证据。
-- Gemma 多模态保留在 default KV。INT8/TQ4NC 多模态不推荐，因为异构 head
-  的多模态后端会拒绝或破坏这些压缩 KV 路线。
-
-常用 Gemma launcher 预设：
-
-- `gemma4-gptq-tq4nc-mtp3`：TQ4NC + assistant MTP3 兼容路线。
-- `gemma4-gptq-tq4nc-nomtp`：TQ4NC no-MTP 短上下文路线。
-- `gemma4-gptq-mm-nomtp`：default-KV 图像多模态兼容路线。
-- `gemma4-gptq-mm-mtp3`：default-KV + assistant MTP3 图像多模态路线。
-
 ## 🧪 已测试模型权重
 
 这一节记录 checkpoint 级别的验证结果。这里的标准比“vLLM 能加载”更严格：
 支持表示可以启动并生成；推荐表示在双 2080 Ti 上同时具备有意义的速度 /
 上下文权衡。
 
-| Checkpoint 系列 | 权重路线 | 定位 | 已验证 KV / 上下文证据 | 状态 |
-|---|---|---|---|---|
-| Qwopus3.6 27B v2 | AWQ Marlin | Qwen 质量主线 | FP16/default KV 在 noMTP 真实 prompt 下通过原生 262K；TQ4NC 是推荐压缩 262K 路线；INT8 KV 可用于容量 / YaRN 实验。 | 🟢 推荐 |
-| Qwen3.6 27B Heretic | GPTQ Marlin | 低拒答 Qwen 路线 | 8K MTP、质量和拒答率测试已通过；可使用同一套 Qwen-family runtime profile，长上下文 profile 生产前需要按 checkpoint 复测。 | 🟢 推荐变体 |
-| Qwen3.6 27B 原版 AWQ | AWQ Marlin | Qwen 基线路线 | 已验证可以稳定兼容 Qwen-family runtime。LongGen3 TTFT sweep 在 MTP5 达到约 1738.12 / 60.30 tok/s，但质量和速度都没有超过 Qwopus。 | 🟡 已验证，已退役 |
-| Gemma4 31B | GPTQ Marlin + assistant draft | Gemma 第二路线 | FP16/default KV 是实用速度路线；TQ4NC 是约 43K 真实 prompt 边界的短上下文压缩路线；INT8 262K 是慢速离线兼容路线，不适合交互服务。 | 🟡 实验路线 |
-| Qwen3.6 27B AutoRound W8A16 GS128 | INT8 AutoRound / GPTQMarlin | INT8 权重实验 | noMTP KV cache：31,597 tokens；INT8 KV + MTP3 KV cache：14,108 tokens；PP4096/TG128 MTP3：1610.56 / 68.44 tok/s。 | 🟡 支持但不推荐 |
-| Qwen3.6 27B AutoRound main | INT8 AutoRound / GPTQMarlin | INT8 权重实验 | 需要从 GS128 分支补 tokenizer/processor 文件；noMTP KV cache：52,662 tokens；INT8 KV + MTP3 KV cache：29,582 tokens；PP4096/TG128 MTP3：1551.29 / 51.11 tok/s。 | 🟡 支持但不推荐 |
+| 模型路线 | 权重量化 | 模型卡 | 状态 |
+|---|---|---|---|
+| Qwen3.6 27B FP8 | FP8 | [Jackrong/Qwopus3.6-27B-v2-FP8](https://huggingface.co/Jackrong/Qwopus3.6-27B-v2-FP8) | 🟢 推荐 |
+| Qwen3.6 27B AWQ | AWQ-INT4 | [mconcat/Qwopus3.6-27B-v2-AWQ-4bit](https://huggingface.co/mconcat/Qwopus3.6-27B-v2-AWQ-4bit)<br>[QuantTrio/Qwen3.6-27B-AWQ](https://huggingface.co/QuantTrio/Qwen3.6-27B-AWQ) | 🟢 推荐 |
+| Qwen3.6 27B GPTQ | GPTQ-INT4 | [llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GPTQ-Int4](https://huggingface.co/llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GPTQ-Int4) | 🟢 推荐 |
+| Qwen3.6 27B AutoRound | AutoRound INT8 | [Minachist/Qwen3.6-27B-INT8-AutoRound W8A16-GS128](https://huggingface.co/Minachist/Qwen3.6-27B-INT8-AutoRound/tree/W8A16-GS128) | 🟡 支持 |
+| Gemma4 31B GPTQ | GPTQ-INT4 + assistant draft | [ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ](https://huggingface.co/ebircak/gemma-4-31B-it-4bit-W4A16-GPTQ) | 🟡 支持 |
 
-AutoRound INT8 结论：这两个 INT8 checkpoint 都可以作为本 fork 的兼容性证据，
-但都不适合作为双 2080 Ti 的生产路线。GS128 的 KV 容量太低；main 分支容量
-更好，但 speculative decode 速度损失过大。Qwen 推荐路线仍然是 4-bit
-AWQ/GPTQ Marlin，再按目标场景选择已经验证的 KV profile。
+FP8 和 AutoRound INT8 结论：FP8 是追求质量时推荐的高质量 8bit Qwen 路线。
+它在 SM75 上走的是 weight-only FP8，不是原生 FP8 compute，所以 4-bit
+AWQ/GPTQ 仍然是默认性能 / 容量路线。AutoRound GS128 的 KV 容量太低，main
+分支容量更好但 speculative decode 速度损失过大，所以测试模型列表只保留
+GS128。
 Qwen3.6 原版 AWQ 仍然是有价值的 baseline，后续回归测试可以重新下载；
 但质量路线已经由 Qwopus 取代。
 
@@ -205,16 +133,32 @@ Qwen3.6 原版 AWQ 仍然是有价值的 baseline，后续回归测试可以重�
   P2P/NVLink 行为、模型 head_dim、KV dtype、CUDAGraph/MTP 设置重新验证
   profile。
 
-## 🚀 MTP 加速取决于接受率
+## 🚀 MTP 与 KV 精度
 
 MTP / speculative decoding 不是固定倍率加速。它的收益取决于 target model
 最终接受了多少 draft token，所以最佳 `MTP_K` 会随任务类型变化。我们的 sweep
 里，代码生成和科学计算分析的加速更明显；文学/自然文长输出的接受率更容易下降，
 高 K 反而可能在真实长输出里回退。
 
+KV 精度会从另一个方向影响同一条 decode 路线。开启 MTP 时，FP16/default KV
+保持最佳长上下文 decode 速度；未开启 MTP 时，当前 Qwen3.6 sweep 中 FP16 和
+INT8 KV 没有体现出明显 decode 速度下降。TurboQuant KV 在短上下文测速中仍然
+很快，但长上下文下会明显掉速，因此更适合在优先追求更大 KV 容量时使用，而不是
+作为最大长上下文 decode 速度路线。
+
 当前稳定 profile 中，Qwen3.6 以 MTP3 作为更保守的混合 agent 默认值；Gemma4
 只在特定 FP16 速度 profile 里使用更高 MTP。详细实测表见
-[MTP 任务敏感性](docs/mtp-task-sensitivity.md)。
+[MTP 任务敏感性](docs/mtp-task-sensitivity.md)；FP8 和 GPTQ-INT4 下不同 KV
+精度的 A/B 数据见
+[Qwen3.6 KV 吞吐 Sweep](docs/qwen36-kv-throughput-sweep.zh-CN.md)。
+
+## 🧭 Profile 与推荐路线
+
+生产 profile 选择单独维护在
+[docs/model-profile-routes.zh-CN.md](docs/model-profile-routes.zh-CN.md)。
+这里统一说明路线限制、Qwen/Gemma 推荐 profile、KV 精度选择、上下文窗口目标、
+MTP 设置、多模态限制、并发假设，以及 `bench_tools/stable_profile.sh` 使用的
+launcher alias。
 
 ## 🚀 如何使用
 
@@ -231,6 +175,8 @@ MTP / speculative decoding 不是固定倍率加速。它的收益取决于 targ
 
    ```text
    $MODEL_ROOT/qwen-family-27b-awq
+   $MODEL_ROOT/qwen-family-27b-gptq-int4
+   $MODEL_ROOT/qwen-family-27b-fp8
    $MODEL_ROOT/gemma4-family-31b-gptq
    $MODEL_ROOT/gemma4-family-assistant
    ```
@@ -256,14 +202,6 @@ MTP / speculative decoding 不是固定倍率加速。它的收益取决于 targ
    ```bash
    curl http://127.0.0.1:8000/v1/models
    ```
-
-常用 profile：
-
-- `qwen27-awq-mtp3-peak`：Qwen 系 FP16/default KV 峰值速度文本路线。
-- `qwen27-awq-mtp3-tq4nc-fi`：Qwen 系 TQ4NC 压缩容量路线。
-- `qwen27-awq-mtp3-int8kv`：Qwen 系 INT8 KV 容量 / YaRN 路线。
-- `gemma4-gptq-tq4nc-mtp3`：Gemma4 TQ4NC 兼容路线。
-- `gemma4-gptq-tq4nc-nomtp`：Gemma4 TQ4NC no-MTP 短上下文路线。
 
 ## ❓ 硬件 Q&A
 
