@@ -739,6 +739,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         )()
         or "auto"
     ).lower(),
+    # Allow hybrid Mamba/GDN speculative decode to keep full decode CUDA
+    # graphs. This is unsafe for production because accepted speculative
+    # lengths can change recurrent state update patterns, but it is useful for
+    # opt-in peak-throughput experiments.
+    "VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH": lambda: bool(
+        int(os.getenv("VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH", "0"))
+    ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.

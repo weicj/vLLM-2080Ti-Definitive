@@ -11,6 +11,9 @@ import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -28,7 +31,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -38,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -1426,6 +1430,141 @@ def test_is_uniform_decode() -> None:
         num_reqs=15,
         force_uniform_decode=False,
     )
+
+
+def test_mamba_spec_decode_downgrades_full_cudagraph_to_piecewise():
+    comp_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        splitting_ops=["vllm.unified_attention"],
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["model.layers.0.mixer"],
+                kv_cache_spec=MambaSpec(
+                    block_size=16,
+                    shapes=((1, 16),),
+                    dtypes=(torch.float16,),
+                ),
+            )
+        ],
+    )
+
+    mode = comp_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.UNIFORM_BATCH,
+        min_cg_attn_backend="FLASHINFER",
+        uniform_decode_query_len=4,
+        kv_cache_config=kv_cache_config,
+    )
+
+    assert mode == CUDAGraphMode.PIECEWISE
+    assert comp_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_non_mamba_spec_decode_keeps_supported_full_cudagraph():
+    comp_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        splitting_ops=["vllm.unified_attention"],
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["model.layers.0.self_attn.attn"],
+                kv_cache_spec=AttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
+
+    mode = comp_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.UNIFORM_BATCH,
+        min_cg_attn_backend="FLASHINFER",
+        uniform_decode_query_len=4,
+        kv_cache_config=kv_cache_config,
+    )
+
+    assert mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert comp_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+def test_mamba_spec_decode_downgrades_full_only_cudagraph_to_none():
+    comp_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        splitting_ops=["vllm.unified_attention"],
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["model.layers.0.mixer"],
+                kv_cache_spec=MambaSpec(
+                    block_size=16,
+                    shapes=((1, 16),),
+                    dtypes=(torch.float16,),
+                ),
+            )
+        ],
+    )
+
+    mode = comp_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.UNIFORM_BATCH,
+        min_cg_attn_backend="FLASHINFER",
+        uniform_decode_query_len=4,
+        kv_cache_config=kv_cache_config,
+    )
+
+    assert mode == CUDAGraphMode.NONE
+    assert comp_config.cudagraph_mode == CUDAGraphMode.NONE
+
+
+def test_mamba_spec_decode_allows_full_cudagraph_with_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "vllm.config.compilation.envs.VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH",
+        True,
+    )
+    comp_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        splitting_ops=["vllm.unified_attention"],
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["model.layers.0.mixer"],
+                kv_cache_spec=MambaSpec(
+                    block_size=16,
+                    shapes=((1, 16),),
+                    dtypes=(torch.float16,),
+                ),
+            )
+        ],
+    )
+
+    mode = comp_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.UNIFORM_BATCH,
+        min_cg_attn_backend="FLASHINFER",
+        uniform_decode_query_len=4,
+        kv_cache_config=kv_cache_config,
+    )
+
+    assert mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert comp_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 @pytest.mark.skipif(
