@@ -169,6 +169,7 @@ _TQ_CONTINUATION_SDPA_MAX_QK_CELLS = int(
 _TQ_CUDAGRAPH_SPEC_DECODE_SAFE = (
     os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE", "0") == "1"
 )
+_TQ_DEBUG_MIXED = os.getenv("VLLM_TURBOQUANT_DEBUG_MIXED", "0") == "1"
 _SKIP_PREFILL_STORE_FOR_PROFILING = (
     os.getenv("VLLM_TURBOQUANT_SKIP_PREFILL_STORE", "0") == "1"
 )
@@ -1183,11 +1184,33 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     else None
                 ),
                 num_actual_tokens=num_decode_tokens,
-                max_query_len=1,
+                max_query_len=max(
+                    attn_metadata.query_start_loc_cpu[i + 1].item()
+                    - attn_metadata.query_start_loc_cpu[i].item()
+                    for i in range(num_decodes)
+                ),
                 max_seq_len=attn_metadata.max_seq_len,
                 is_prefill=False,
             )
-            if use_decode_sdpa or use_shared_draft_decode_sdpa:
+            if decode_meta.max_query_len > 1:
+                if _TQ_DEBUG_MIXED:
+                    logger.warning(
+                        "TurboQuant mixed decode spec-path: num_decode_tokens=%s "
+                        "num_decodes=%s decode_max_query=%s",
+                        num_decode_tokens,
+                        num_decodes,
+                        decode_meta.max_query_len,
+                    )
+                attn_out[:num_decode_tokens] = self._spec_decode_attention(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_meta,
+                    Pi,
+                    centroids,
+                    PiT,
+                    layer,
+                )
+            elif use_decode_sdpa or use_shared_draft_decode_sdpa:
                 k_dec = key[:num_decode_tokens].view(
                     num_decode_tokens, self.num_kv_heads, self.head_size
                 )
@@ -1221,11 +1244,32 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # first-chunk prefills. Using full-batch max_seq_len breaks
             # this because decode requests inflate max_seq_len.
             prefill_seq_lens = attn_metadata.seq_lens[num_decodes:]
+            prefill_query_lens_cpu = (
+                attn_metadata.query_start_loc_cpu[num_decodes + 1 :]
+                - attn_metadata.query_start_loc_cpu[num_decodes:-1]
+            )
             # Use CPU-side max to avoid GPU→CPU sync from .item()
             prefill_max_seq = max(attn_metadata.seq_lens[num_decodes:].tolist())
+            prefill_max_query = max(prefill_query_lens_cpu.tolist())
             prefill_qsl = (
                 attn_metadata.query_start_loc[num_decodes:] - num_decode_tokens
             )
+            if _TQ_DEBUG_MIXED:
+                logger.warning(
+                    "TurboQuant mixed batch: N=%s num_decodes=%s "
+                    "num_decode_tokens=%s decode_max_query=%s "
+                    "prefill_reqs=%s prefill_max_query=%s "
+                    "prefill_max_seq=%s full_max_query=%s full_max_seq=%s",
+                    N,
+                    num_decodes,
+                    num_decode_tokens,
+                    decode_meta.max_query_len,
+                    prefill_seq_lens.shape[0],
+                    prefill_max_query,
+                    prefill_max_seq,
+                    attn_metadata.max_query_len,
+                    attn_metadata.max_seq_len,
+                )
             prefill_meta = TurboQuantMetadata(
                 seq_lens=prefill_seq_lens,
                 seq_lens_cpu=attn_metadata.seq_lens_cpu[num_decodes:],
@@ -1242,7 +1286,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     else None
                 ),
                 num_actual_tokens=N - num_decode_tokens,
-                max_query_len=attn_metadata.max_query_len,
+                max_query_len=prefill_max_query,
                 max_seq_len=prefill_max_seq,
                 is_prefill=True,
             )
@@ -1299,8 +1343,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 continue
 
             rel_seq_lens = _ac[1 : q_len + 1]
-            synth_seq_lens = attn_metadata.seq_lens[i : i + 1] - q_len + rel_seq_lens
-            synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
+            synth_seq_lens = (
+                attn_metadata.seq_lens[i : i + 1] - q_len + rel_seq_lens
+            ).contiguous()
+            synth_bt = (
+                attn_metadata.block_table[i : i + 1]
+                .expand(q_len, -1)
+                .contiguous()
+            )
             output[q_start:q_end] = triton_turboquant_decode_attention(
                 query=query[q_start:q_end],
                 kv_cache=kv_cache,
@@ -1319,6 +1369,88 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             ).to(query.dtype)
 
         return output
+
+    def _spec_continuation_decode_attention(
+        self,
+        query: torch.Tensor,
+        key_chunk: torch.Tensor,
+        value_chunk: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cached_len: int,
+        Pi: torch.Tensor,
+        centroids: torch.Tensor,
+        PiT: torch.Tensor | None,
+        arange_cache: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Fast continuation attention for small MTP chunks.
+
+        The cached prefix can be read through the TQ decode kernel, but the
+        current chunk must use the uncompressed K/V produced in this step.
+        Reading the current chunk back from the quantized cache corrupts
+        multi-token speculative continuation quality.
+        """
+        if cached_len <= 0 or self._decode_sliding_window > 0:
+            return None
+
+        q_len, Hq, D = query.shape
+        Hk = key_chunk.shape[1]
+        if Hq % Hk != 0:
+            return None
+
+        # Prefix attention from compressed cache. All queries in this chunk see
+        # the same cached prefix; causal masking for current tokens is handled
+        # below on the raw current K/V.
+        prefix_seq_lens = torch.full(
+            (q_len,),
+            cached_len,
+            dtype=arange_cache.dtype,
+            device=query.device,
+        )
+        prefix_bt = block_table.expand(q_len, -1).contiguous()
+        prefix_lse = torch.empty(q_len, Hq, dtype=torch.float32, device=query.device)
+        prefix_out = triton_turboquant_decode_attention(
+            query=query,
+            kv_cache=kv_cache,
+            block_table=prefix_bt,
+            seq_lens=prefix_seq_lens,
+            Pi=Pi,
+            centroids=centroids,
+            scale=self.scale,
+            mse_bits=self.tq_config.key_mse_bits,
+            key_packed_size=self.tq_config.key_packed_size,
+            value_quant_bits=self.tq_config.effective_value_quant_bits,
+            key_fp8=self.tq_config.key_fp8,
+            norm_correction=self.tq_config.norm_correction,
+            PiT=PiT,
+            output_buf=torch.empty_like(query),
+            lse_buf=prefix_lse,
+            sliding_window=self._decode_sliding_window,
+        )
+
+        # Current chunk attention from raw K/V. This is tiny for MTP
+        # continuation (typically q_len <= 8), so torch SDPA-style math is fast
+        # enough and avoids quantizing the just-produced K/V before use.
+        kv_group_size = Hq // Hk
+        q_float = query.float().view(q_len, Hk, kv_group_size, D)
+        k_float = key_chunk.float()
+        v_float = value_chunk.float()
+        scores = torch.einsum("thgd,shd->thgs", q_float, k_float) * self.scale
+        idx = torch.arange(q_len, device=query.device)
+        causal = idx.view(q_len, 1, 1, 1) >= idx.view(1, 1, 1, q_len)
+        scores = scores.masked_fill(~causal, float("-inf"))
+        current_lse = torch.logsumexp(scores, dim=-1).reshape(q_len, Hq)
+        probs = torch.softmax(scores, dim=-1)
+        current_out = torch.einsum("thgs,shd->thgd", probs, v_float)
+        current_out = current_out.reshape(q_len, Hq, D)
+
+        combined_lse = torch.logaddexp(prefix_lse, current_lse)
+        prefix_weight = torch.exp(prefix_lse - combined_lse).unsqueeze(-1)
+        current_weight = torch.exp(current_lse - combined_lse).unsqueeze(-1)
+        return (
+            prefix_out.float() * prefix_weight
+            + current_out.float() * current_weight
+        ).to(query.dtype)
 
     # ------------------------------------------------------------------ #
     #  Store K/V into combined cache (vectorized)                         #
@@ -1554,6 +1686,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # avoid O(cached_len) full-dequant per continuation.
                 # For large continuations, fall back to _continuation_prefill.
                 cached_len = seq_len - q_len
+                if _TQ_DEBUG_MIXED:
+                    logger.warning(
+                        "TurboQuant continuation chunk: req=%s q_len=%s "
+                        "seq_len=%s cached_len=%s kv_dim=%s",
+                        i,
+                        q_len,
+                        seq_len,
+                        cached_len,
+                        kv_cache.dim(),
+                    )
                 if (
                     q_len <= _CONTINUATION_DECODE_THRESHOLD
                     and kv_cache.dim() == 5
@@ -1591,27 +1733,62 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     and q_len <= _CONTINUATION_DECODE_THRESHOLD
                     and kv_cache.dim() != 5
                 ):
-                    # Fast path: treat each query as a decode request
-                    # with incremental seq_lens for causal masking.
-                    # Slice from pre-built arange (no kernel launch)
-                    synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
-                    synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
-                    out = triton_turboquant_decode_attention(
-                        query=q_seq,
-                        kv_cache=kv_cache,
-                        block_table=synth_bt,
-                        seq_lens=synth_seq_lens,
-                        Pi=Pi,
-                        centroids=centroids,
-                        scale=self.scale,
-                        mse_bits=self.tq_config.key_mse_bits,
-                        key_packed_size=self.tq_config.key_packed_size,
-                        value_quant_bits=(self.tq_config.effective_value_quant_bits),
-                        key_fp8=self.tq_config.key_fp8,
-                        norm_correction=self.tq_config.norm_correction,
-                        PiT=PiT,
-                        sliding_window=self._decode_sliding_window,
-                    )
+                    if q_len == 1:
+                        # Single-token continuation is equivalent to decode;
+                        # keep the original direct TQ decode path.
+                        synth_seq_lens = _arange_cache[
+                            cached_len + 1 : seq_len + 1
+                        ].contiguous()
+                        synth_bt = (
+                            attn_metadata.block_table[i : i + 1]
+                            .expand(q_len, -1)
+                            .contiguous()
+                        )
+                        out = triton_turboquant_decode_attention(
+                            query=q_seq,
+                            kv_cache=kv_cache,
+                            block_table=synth_bt,
+                            seq_lens=synth_seq_lens,
+                            Pi=Pi,
+                            centroids=centroids,
+                            scale=self.scale,
+                            mse_bits=self.tq_config.key_mse_bits,
+                            key_packed_size=self.tq_config.key_packed_size,
+                            value_quant_bits=(
+                                self.tq_config.effective_value_quant_bits
+                            ),
+                            key_fp8=self.tq_config.key_fp8,
+                            norm_correction=self.tq_config.norm_correction,
+                            PiT=PiT,
+                            sliding_window=self._decode_sliding_window,
+                        )
+                    else:
+                        out = self._spec_continuation_decode_attention(
+                            q_seq,
+                            k_seq,
+                            v_seq,
+                            kv_cache,
+                            attn_metadata.block_table[i : i + 1],
+                            cached_len,
+                            Pi,
+                            centroids,
+                            PiT,
+                            _arange_cache,
+                        )
+                        if out is None:
+                            out = self._continuation_prefill(
+                                layer,
+                                q_seq,
+                                k_seq,
+                                v_seq,
+                                kv_cache,
+                                attn_metadata.block_table[i : i + 1],
+                                cached_len,
+                                seq_len,
+                                Pi,
+                                centroids,
+                                force_sdpa=False,
+                            )
                 else:
                     # Large continuation: dequant cached K/V and use
                     # flash_attn for better throughput.
