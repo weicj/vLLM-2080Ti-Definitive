@@ -62,6 +62,7 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     _fp8_format_name,
     triton_turboquant_decode_attention,
 )
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
@@ -97,6 +98,39 @@ _CONTINUATION_DECODE_THRESHOLD = 128
 _SPEC_CONTINUATION_DECODE_FASTPATH = (
     os.getenv("VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH", "0") == "1"
 )
+
+
+def _normalize_tq_prefix_combine_mode(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on", "force", "always"):
+        return "on"
+    if normalized in ("0", "false", "no", "off", "disable", "disabled"):
+        return "off"
+    if normalized in ("", "auto"):
+        return "auto"
+    raise ValueError(
+        "VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE must be one of "
+        "off, on, auto, 0, or 1"
+    )
+
+
+_TQ_CONTINUATION_PREFIX_COMBINE_MODE = _normalize_tq_prefix_combine_mode(
+    os.getenv("VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE", "off")
+)
+_TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS = max(
+    0,
+    int(os.getenv("VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS", "20480")),
+)
+
+
+def _tq_continuation_prefix_combine_enabled(seq_len: int) -> bool:
+    if _TQ_CONTINUATION_PREFIX_COMBINE_MODE == "on":
+        return True
+    if _TQ_CONTINUATION_PREFIX_COMBINE_MODE == "auto":
+        return seq_len >= _TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS
+    return False
+
+
 def _normalize_turboquant_flashinfer_backend(value: str) -> str:
     normalized = value.strip().lower()
     if normalized in ("1", "true", "yes", "on"):
@@ -643,6 +677,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             logger.info_once(
                 "TurboQuant continuation prefill is forced to full-dequant "
                 "SDPA fallback by VLLM_TURBOQUANT_FORCE_CONTINUATION_SDPA=1"
+            )
+        if _TQ_CONTINUATION_PREFIX_COMBINE_MODE != "off":
+            logger.info_once(
+                "TurboQuant continuation prefix-combine experiment is enabled "
+                "with mode=%s min_tokens=%s",
+                _TQ_CONTINUATION_PREFIX_COMBINE_MODE,
+                _TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS,
             )
 
     def _get_flashinfer_prefill_wrapper(self, device: torch.device):
@@ -1977,6 +2018,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         q_len, Hq, D = query.shape
         Hk = key_chunk.shape[1]
         device = query.device
+        prefix_combine_enabled = (
+            _tq_continuation_prefix_combine_enabled(seq_len)
+            and not force_sdpa
+            and kv_cache.dim() != 5
+            and cached_len > 0
+            and self._prefill_sliding_window <= 0
+            and self._use_flashinfer_for_continuation(q_len)
+        )
         if kv_cache.dim() == 5:
             triton_out = self._shared_fp16_decode_triton(
                 query,
@@ -2053,13 +2102,20 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # Reuse cached buffers to avoid per-call allocation (~16MB at 8K).
             alloc_len = math.ceil(cached_len / block_size) * block_size
             buf_shape = (1, Hk, alloc_len, D)
-            # Use WorkspaceManager for dequant buffers.
-            # Shared across all layers — saves 60× memory at long context.
-            # Required for CUDA Graph capture (per-layer growth incompatible with CG).
-            k_buf, v_buf = current_workspace_manager().get_simultaneous(
-                (buf_shape, torch.float16),
-                (buf_shape, torch.float16),
-            )
+            if prefix_combine_enabled:
+                # This experiment only needs the dequantized prefix during the
+                # prefix attention call. Use transient buffers so later layer
+                # work can reuse the memory once those references are dropped.
+                k_buf = torch.empty(buf_shape, dtype=torch.float16, device=device)
+                v_buf = torch.empty(buf_shape, dtype=torch.float16, device=device)
+            else:
+                # Use WorkspaceManager for dequant buffers.
+                # Shared across all layers — saves 60× memory at long context.
+                # Required for CUDA Graph capture (per-layer growth incompatible with CG).
+                k_buf, v_buf = current_workspace_manager().get_simultaneous(
+                    (buf_shape, torch.float16),
+                    (buf_shape, torch.float16),
+                )
             # Skip .zero_() — kernel writes all positions up to cached_len,
             # and we only read [:cached_len] afterwards.
             k_cached = k_buf[:, :, :alloc_len, :]
@@ -2170,6 +2226,140 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     "Unsupported shared KV head mapping: "
                     f"cached_hk={cached_hk}, layer_hk={Hk}, D={D}"
                 )
+
+        if prefix_combine_enabled:
+            if self._fi_single_qo_indptr_cpu is None:
+                self._fi_single_qo_indptr_cpu = torch.empty(
+                    2, dtype=torch.int32, pin_memory=True
+                )
+                self._fi_single_kv_indptr_cpu = torch.empty(
+                    2, dtype=torch.int32, pin_memory=True
+                )
+
+            self._fi_single_qo_indptr_cpu[0] = 0
+            self._fi_single_qo_indptr_cpu[1] = q_len
+            self._fi_single_kv_indptr_cpu[0] = 0
+            self._fi_single_kv_indptr_cpu[1] = cached_len
+            seq_lens_prefix = cached_len * torch.ones(1, dtype=torch.int32)
+            seq_lens_q = q_len * torch.ones(1, dtype=torch.int32)
+            prefix_plan_key = (
+                "continuation_prefix_combine_prefix",
+                Hq,
+                Hk,
+                D,
+                str(query.dtype),
+                str(k_cached_trim.dtype),
+                q_len,
+                cached_len,
+            )
+            prefix_wrapper = self._get_or_plan_flashinfer_prefill_wrapper(
+                device,
+                prefix_plan_key,
+                {
+                    "qo_indptr": self._flashinfer_indptr(
+                        self._fi_single_qo_indptr_cpu, Hq, D
+                    ),
+                    "kv_indptr": self._flashinfer_indptr(
+                        self._fi_single_kv_indptr_cpu, Hk, D
+                    ),
+                    "num_qo_heads": Hq,
+                    "num_kv_heads": Hk,
+                    "head_dim_qk": D,
+                    "causal": False,
+                    "window_left": -1,
+                    "sm_scale": self.scale,
+                    "pos_encoding_mode": "NONE",
+                    "q_data_type": query.dtype,
+                    "kv_data_type": k_cached_trim.dtype,
+                    "seq_lens": seq_lens_prefix,
+                    "seq_lens_q": seq_lens_q,
+                    "max_token_per_sequence": q_len,
+                    "max_sequence_kv": cached_len,
+                },
+            )
+            prefix_out = torch.empty_like(query)
+            prefix_lse = torch.empty(
+                (q_len, Hq), dtype=torch.float32, device=device
+            )
+            prefix_out, prefix_lse = prefix_wrapper.run(
+                query,
+                k_cached_trim,
+                v_cached_trim,
+                out=prefix_out,
+                lse=prefix_lse,
+                return_lse=True,
+            )
+            del k_cached_trim, v_cached_trim, k_cached, v_cached, k_buf, v_buf
+
+            self._fi_single_kv_indptr_cpu[1] = q_len
+            seq_lens_current = q_len * torch.ones(1, dtype=torch.int32)
+            current_plan_key = (
+                "continuation_prefix_combine_current",
+                Hq,
+                Hk,
+                D,
+                str(query.dtype),
+                str(key_chunk.dtype),
+                q_len,
+            )
+            current_wrapper = self._get_or_plan_flashinfer_prefill_wrapper(
+                device,
+                current_plan_key,
+                {
+                    "qo_indptr": self._flashinfer_indptr(
+                        self._fi_single_qo_indptr_cpu, Hq, D
+                    ),
+                    "kv_indptr": self._flashinfer_indptr(
+                        self._fi_single_kv_indptr_cpu, Hk, D
+                    ),
+                    "num_qo_heads": Hq,
+                    "num_kv_heads": Hk,
+                    "head_dim_qk": D,
+                    "causal": True,
+                    "window_left": self._prefill_sliding_window,
+                    "sm_scale": self.scale,
+                    "pos_encoding_mode": "NONE",
+                    "q_data_type": query.dtype,
+                    "kv_data_type": key_chunk.dtype,
+                    "seq_lens": seq_lens_current,
+                    "seq_lens_q": seq_lens_q,
+                    "max_token_per_sequence": q_len,
+                    "max_sequence_kv": q_len,
+                },
+            )
+            current_out = torch.empty_like(query)
+            current_lse = torch.empty(
+                (q_len, Hq), dtype=torch.float32, device=device
+            )
+            current_out, current_lse = current_wrapper.run(
+                query,
+                key_chunk,
+                val_chunk,
+                out=current_out,
+                lse=current_lse,
+                return_lse=True,
+            )
+            prefix_lse_for_merge = prefix_lse.transpose(0, 1).contiguous()
+            current_lse_for_merge = current_lse.transpose(0, 1).contiguous()
+            merge_attn_states(
+                current_out,
+                prefix_out,
+                prefix_lse_for_merge,
+                current_out,
+                current_lse_for_merge,
+            )
+            del prefix_out, prefix_lse, current_lse
+            del prefix_lse_for_merge, current_lse_for_merge
+            logger.info_once(
+                "TurboQuant continuation prefix-combine path used: "
+                "mode=%s min_tokens=%s seq_len=%s cached_len=%s q_len=%s",
+                _TQ_CONTINUATION_PREFIX_COMBINE_MODE,
+                _TQ_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS,
+                seq_len,
+                cached_len,
+                q_len,
+            )
+            return current_out
 
         # Concatenate cached + current chunk K/V (match query dtype)
         # Pre-allocate full K/V buffer, copy into slices (no cat alloc)

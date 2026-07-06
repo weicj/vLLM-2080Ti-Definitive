@@ -32,6 +32,24 @@ if _FP8_FORMAT_OVERRIDE not in ("", "auto", "e4b15", "e4nv", "e5"):
     )
 
 
+def _read_decode_block_kv() -> int:
+    value = os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV", "4").strip()
+    try:
+        block_kv = int(value)
+    except ValueError as err:
+        raise ValueError(
+            "VLLM_TURBOQUANT_DECODE_BLOCK_KV must be one of: 1, 2, 4, 8, 16"
+        ) from err
+    if block_kv not in (1, 2, 4, 8, 16):
+        raise ValueError(
+            "VLLM_TURBOQUANT_DECODE_BLOCK_KV must be one of: 1, 2, 4, 8, 16"
+        )
+    return block_kv
+
+
+_DECODE_BLOCK_KV = _read_decode_block_kv()
+
+
 def _fp8_format_code(device: int = 0) -> int:
     """Return 0=e4nv, 1=e4b15, 2=e5 for TQ raw FP8 key kernels."""
     if _FP8_FORMAT_OVERRIDE == "e4b15":
@@ -596,7 +614,7 @@ def triton_turboquant_decode_attention(
 
     # Stage 1: split-KV tiled attention scoring + value accumulation
     fp8_format = _fp8_format_code(device.index or 0)
-    BLOCK_KV = 4
+    BLOCK_KV = _DECODE_BLOCK_KV
     grid = (B, Hq, NUM_KV_SPLITS)
     _tq_decode_stage1[grid](
         q_rot,
