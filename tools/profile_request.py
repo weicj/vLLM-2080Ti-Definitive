@@ -18,15 +18,18 @@ def build_exact_prompt(
     *,
     image: bool,
     pure_filler: bool,
+    prompt_salt: str = "",
 ) -> tuple[str, int]:
     if target_tokens <= 0:
         return "Reply with OK.", len(tokenizer.encode("Reply with OK.", add_special_tokens=False))
 
+    salt_prefix = f"PROMPT SALT: {prompt_salt}\n" if prompt_salt else ""
     if pure_filler:
-        prefix = ""
+        prefix = salt_prefix
         suffix = ""
     elif image:
         prefix = (
+            salt_prefix +
             "Please read the long filler text first. The filler is irrelevant. "
             "Only answer the final image question.\nFILLER START\n"
         )
@@ -35,7 +38,7 @@ def build_exact_prompt(
             "left shape/color, right shape/color, and visible code text."
         )
     else:
-        prefix = "Long filler text follows. FILLER START\n"
+        prefix = salt_prefix + "Long filler text follows. FILLER START\n"
         suffix = "\nFILLER END\nReply with exactly: PROFILE_OK"
 
     prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
@@ -205,6 +208,11 @@ def main() -> None:
     parser.add_argument("--read-timeout", type=float, default=1800.0)
     parser.add_argument("--ignore-eos", action="store_true")
     parser.add_argument(
+        "--prompt-salt",
+        default="",
+        help="Insert a short unique prefix so repeated long-context runs do not share the same prefix-cache key.",
+    )
+    parser.add_argument(
         "--pure-filler",
         action="store_true",
         help='Use only repeated " the" tokens. This is for synthetic throughput, not correctness.',
@@ -223,6 +231,7 @@ def main() -> None:
         args.prompt_tokens,
         image=is_image,
         pure_filler=args.pure_filler,
+        prompt_salt=args.prompt_salt,
     )
     prepare_s = time.perf_counter() - prepare_start
 
@@ -313,6 +322,7 @@ def main() -> None:
         "completion_token_source": token_source,
         "ignore_eos": args.ignore_eos,
         "pure_filler": args.pure_filler,
+        "prompt_salt": args.prompt_salt,
         "prepare_s": prepare_s,
         **result,
         "text_chars": len(text),

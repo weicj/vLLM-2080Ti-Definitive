@@ -295,6 +295,7 @@ ROUTE_PROFILE_KEYS=(
   KV_CACHE_DTYPE
   KV_CACHE_DTYPE_SKIP_LAYERS
   MAX_MODEL_LEN
+  KV_CACHE_MEMORY_BYTES
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
@@ -318,6 +319,10 @@ ROUTE_PROFILE_KEYS=(
   VLLM_INT8KV_FA_FIRST_CHUNK_DEQUANT
   VLLM_INT8KV_FA_PREFILL
   VLLM_INT8KV_ALIGNED_HEAD_STRIDE
+  VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE
+  VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS
+  VLLM_TURBOQUANT_MAX_KV_SPLITS
+  VLLM_TURBOQUANT_DECODE_BLOCK_KV
 )
 
 reset_route_profile_fields() {
@@ -366,7 +371,29 @@ apply_profile_overrides() {
   [[ -f "$file" ]] || return 0
 
   local key value
+  local preserve_route_env_keys=(
+    KV_CACHE_MEMORY_BYTES
+    VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE
+    VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS
+    VLLM_TURBOQUANT_MAX_KV_SPLITS
+    VLLM_TURBOQUANT_DECODE_BLOCK_KV
+  )
+  local preserved_keys=()
+  local preserved_values=()
+  local preserve_key
+  for preserve_key in "${preserve_route_env_keys[@]}"; do
+    if [[ -z "$(read_profile_value "$file" "$preserve_key")" && ${!preserve_key+x} ]]; then
+      preserved_keys+=("$preserve_key")
+      preserved_values+=("${!preserve_key}")
+    fi
+  done
+
   reset_route_profile_fields
+  local preserve_index
+  for preserve_index in "${!preserved_keys[@]}"; do
+    printf -v "${preserved_keys[$preserve_index]}" '%s' "${preserved_values[$preserve_index]}"
+    export "${preserved_keys[$preserve_index]}"
+  done
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
     profile_key_is_global "$key" && continue
@@ -420,6 +447,7 @@ save_manager_state() {
     printf 'ENABLE_PREFIX_CACHING=%q\n' "${ENABLE_PREFIX_CACHING:-1}"
     printf 'ENABLE_PROMPT_TOKENS_DETAILS=%q\n' "${ENABLE_PROMPT_TOKENS_DETAILS:-1}"
     printf 'MAX_MODEL_LEN=%q\n' "${MAX_MODEL_LEN:-}"
+    printf 'KV_CACHE_MEMORY_BYTES=%q\n' "${KV_CACHE_MEMORY_BYTES:-}"
     printf 'GPU_UTIL=%q\n' "${GPU_UTIL:-}"
     printf 'MAX_BATCHED_TOKENS=%q\n' "${MAX_BATCHED_TOKENS:-}"
     printf 'MAX_NUM_SEQS=%q\n' "${MAX_NUM_SEQS:-}"
@@ -745,10 +773,13 @@ current_tq_diagnostics_label() {
     printf 'n/a'
     return 0
   fi
-  printf 'FORCE_DECODE_SDPA=%s, FORCE_CONTINUATION_SDPA=%s, MAX_KV_SPLITS=%s, K8V4_FP8_FORMAT=%s' \
+  printf 'FORCE_DECODE_SDPA=%s, FORCE_CONTINUATION_SDPA=%s, PREFIX_COMBINE=%s@%s, MAX_KV_SPLITS=%s, DECODE_BLOCK_KV=%s, K8V4_FP8_FORMAT=%s' \
     "${VLLM_TURBOQUANT_FORCE_DECODE_SDPA:-0}" \
     "${VLLM_TURBOQUANT_FORCE_CONTINUATION_SDPA:-0}" \
+    "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE:-auto}" \
+    "${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS:-20480}" \
     "${VLLM_TURBOQUANT_MAX_KV_SPLITS:-auto}" \
+    "${VLLM_TURBOQUANT_DECODE_BLOCK_KV:-4}" \
     "${VLLM_TURBOQUANT_K8V4_FP8_FORMAT:-auto}"
 }
 
@@ -831,6 +862,7 @@ profile_summary() {
     KV_CACHE_DTYPE
     KV_CACHE_DTYPE_SKIP_LAYERS
     MAX_MODEL_LEN
+    KV_CACHE_MEMORY_BYTES
     GPU_UTIL
     MAX_BATCHED_TOKENS
     MAX_NUM_SEQS
@@ -1347,7 +1379,7 @@ show_profiles() {
   banner
   echo "Profile presets:"
   echo
-  local profile profile_file family variant mode kv context mtp seqs
+  local profile profile_file family variant mode kv context kv_memory mtp seqs
   if [[ ! -d "$PROFILE_DIR" ]]; then
     echo "No profile directory found: $PROFILE_DIR"
     echo
@@ -1363,10 +1395,11 @@ show_profiles() {
     [[ -n "$mode" ]] || mode=$(read_profile_value "$profile_file" MODE)
     kv=$(read_profile_value "$profile_file" KV_CACHE_DTYPE)
     context=$(read_profile_value "$profile_file" MAX_MODEL_LEN)
+    kv_memory=$(read_profile_value "$profile_file" KV_CACHE_MEMORY_BYTES)
     mtp=$(read_profile_value "$profile_file" MTP_K)
     seqs=$(read_profile_value "$profile_file" MAX_NUM_SEQS)
-    printf '  %-62s compatible=%-12s family=%-7s weight=%-6s kv=%-24s ctx=%-8s mtp=%-3s seqs=%s\n' \
-      "$profile" "${mode:-safe,normal,fast}" "${family:-auto}" "${variant:-auto}" "${kv:-fp16}" "${context:-auto}" "${mtp:-0}" "${seqs:-1}"
+    printf '  %-62s compatible=%-12s family=%-7s weight=%-6s kv=%-24s ctx=%-8s kvmem=%-10s mtp=%-3s seqs=%s\n' \
+      "$profile" "${mode:-safe,normal,fast}" "${family:-auto}" "${variant:-auto}" "${kv:-fp16}" "${context:-auto}" "${kv_memory:-auto}" "${mtp:-0}" "${seqs:-1}"
   done < <(list_profiles)
   echo
   pause_enter
@@ -1594,6 +1627,7 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
+  write_profile_entry "$target_file.tmp" KV_CACHE_MEMORY_BYTES "${KV_CACHE_MEMORY_BYTES:-}"
   write_profile_entry "$target_file.tmp" GPU_UTIL "${GPU_UTIL:-}"
   write_profile_entry "$target_file.tmp" MAX_BATCHED_TOKENS "${MAX_BATCHED_TOKENS:-}"
   write_profile_entry "$target_file.tmp" MAX_NUM_SEQS "${MAX_NUM_SEQS:-}"
@@ -1936,6 +1970,7 @@ edit_runtime_parameters() {
   fi
 
   MAX_MODEL_LEN=$(prompt_default "Context tokens" "${MAX_MODEL_LEN:-$(default_context_tokens)}") || return 0
+  KV_CACHE_MEMORY_BYTES=$(prompt_optional "KV cache memory bytes (empty = use GPU util)" "${KV_CACHE_MEMORY_BYTES:-}") || return 0
   GPU_UTIL=$(prompt_default "GPU memory utilization" "${GPU_UTIL:-$(default_gpu_util)}") || return 0
   MAX_BATCHED_TOKENS=$(prompt_default "Max batched tokens" "${MAX_BATCHED_TOKENS:-2048}") || return 0
   MAX_NUM_SEQS=$(prompt_default "Max concurrent sequences" "${MAX_NUM_SEQS:-1}") || return 0
@@ -2009,7 +2044,7 @@ edit_prefix_cache_menu() {
 runtime_parameter_menu() {
   local selected choices=()
   local model_family_value profile_group_value model_variant_value served_name_value
-  local quantization_value kv_value context_value gpu_util_value
+  local quantization_value kv_value context_value kv_cache_memory_value gpu_util_value
   local batch_tokens_value max_sequences_value mtp_value message_type_value
   local template_value reasoning_value tool_calling_value prefix_cache_value
 
@@ -2021,7 +2056,11 @@ runtime_parameter_menu() {
     quantization_value=$(menu_value "${QUANTIZATION:-auto}")
     kv_value=$(menu_value "${KV_CACHE_DTYPE:-fp16}")
     context_value=$(menu_value "${MAX_MODEL_LEN:-$(default_context_tokens)}")
+    kv_cache_memory_value=$(menu_value "${KV_CACHE_MEMORY_BYTES:-auto}")
     gpu_util_value=$(menu_value "${GPU_UTIL:-$(default_gpu_util)}")
+    if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
+      gpu_util_value="${gpu_util_value} (fallback)"
+    fi
     batch_tokens_value=$(menu_value "${MAX_BATCHED_TOKENS:-2048}")
     max_sequences_value=$(menu_value "${MAX_NUM_SEQS:-1}")
     mtp_value=$(menu_value "${MTP_K:-0}")
@@ -2045,6 +2084,7 @@ runtime_parameter_menu() {
       "vLLM --quantization: $quantization_value"
       "KV precision: $kv_value"
       "Context tokens: $context_value"
+      "KV cache memory bytes: $kv_cache_memory_value"
       "GPU util: $gpu_util_value"
       "Batch tokens: $batch_tokens_value"
       "Max sequences: $max_sequences_value"
@@ -2085,6 +2125,10 @@ runtime_parameter_menu() {
         ;;
       "Context tokens:"*)
         MAX_MODEL_LEN=$(prompt_default "Context tokens" "${MAX_MODEL_LEN:-$(default_context_tokens)}") || continue
+        save_manager_state
+        ;;
+      "KV cache memory bytes:"*)
+        KV_CACHE_MEMORY_BYTES=$(prompt_optional "KV cache memory bytes (empty = use GPU util)" "${KV_CACHE_MEMORY_BYTES:-}") || continue
         save_manager_state
         ;;
       "GPU util:"*)
@@ -2815,16 +2859,24 @@ set_sm75_runtime_env() {
     fi
     export VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL=${VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL:-1}
     export VLLM_TURBOQUANT_FLASHINFER_BACKEND=${VLLM_TURBOQUANT_FLASHINFER_BACKEND:-fa2}
+    export VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE=${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE:-auto}
+    export VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS=${VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS:-20480}
     export VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS=${VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS:-$tq_continuation_reserve_default}
     export VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE=${VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE:-1}
     export VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK=${VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK:-512}
     export VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS=${VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS:-16777216}
     export VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH=${VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH:-1}
+    if [[ -n "${VLLM_TURBOQUANT_MAX_KV_SPLITS:-}" ]]; then
+      export VLLM_TURBOQUANT_MAX_KV_SPLITS
+    fi
+    export VLLM_TURBOQUANT_DECODE_BLOCK_KV=${VLLM_TURBOQUANT_DECODE_BLOCK_KV:-2}
   fi
-  # Keep generated kernels inside this runtime tree. Reusing cache dirs from
-  # experiment worktrees can leave absolute paths to deleted environments.
-  export TORCHINDUCTOR_CACHE_DIR="$MANAGER_ROOT/torchinductor-cache"
-  export TRITON_CACHE_DIR="$MANAGER_ROOT/triton-cache"
+  # Keep generated kernels inside this runtime tree by default. Reusing cache
+  # dirs from experiment worktrees can leave absolute paths to deleted
+  # environments, but explicit overrides are useful when the runtime tree is on
+  # a constrained filesystem.
+  export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-"$MANAGER_ROOT/torchinductor-cache"}
+  export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-"$MANAGER_ROOT/triton-cache"}
   export PYTHONUNBUFFERED=1
   if [[ "${ENABLE_AUTO_TOOL_CHOICE:-0}" == "1" ]]; then
     export VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-1}
@@ -2847,7 +2899,6 @@ build_args() {
     --dtype half
     --tensor-parallel-size "${TP_SIZE:-2}"
     --generation-config vllm
-    --gpu-memory-utilization "$GPU_UTIL"
     --max-model-len "$MAX_MODEL_LEN"
     --enable-chunked-prefill
     --max-num-seqs "$MAX_NUM_SEQS"
@@ -2856,6 +2907,11 @@ build_args() {
 
   [[ -n "${QUANTIZATION:-}" ]] && VLLM_ARGS+=(--quantization "$QUANTIZATION")
   [[ -n "${KV_CACHE_DTYPE:-}" ]] && VLLM_ARGS+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+  if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
+    VLLM_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
+  else
+    VLLM_ARGS+=(--gpu-memory-utilization "$GPU_UTIL")
+  fi
   if [[ -n "${KV_CACHE_DTYPE_SKIP_LAYERS:-}" ]]; then
     local skip_layers_text=${KV_CACHE_DTYPE_SKIP_LAYERS//,/ }
     local skip_layers=()
@@ -3627,6 +3683,11 @@ print_review() {
   banner
   local message_type=text-only
   [[ -n "${MM_LIMIT_JSON:-}" ]] && message_type=text+image
+  local kv_cache_memory_label=${KV_CACHE_MEMORY_BYTES:-auto}
+  local gpu_util_label=$GPU_UTIL
+  if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
+    gpu_util_label="$GPU_UTIL (fallback, ignored)"
+  fi
 
   cat <<EOF
 Launch summary:
@@ -3644,7 +3705,8 @@ Launch summary:
   Prefix cache:         $(current_prefix_cache_label)
   Mamba cache mode:     ${MAMBA_CACHE_MODE:-auto}
   Context tokens:       $MAX_MODEL_LEN
-  GPU util:             $GPU_UTIL
+  KV cache memory:      $kv_cache_memory_label
+  GPU util:             $gpu_util_label
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
   MTP tokens:           $MTP_K
@@ -3721,9 +3783,14 @@ render_main_menu_item() {
 
 render_main_menu() {
   local current=${1:-1}
-  local gpu_devices tp_size
+  local gpu_devices tp_size kv_cache_memory_label gpu_util_label
   gpu_devices=${GPU_DEVICES:-$(detect_default_gpu_devices)}
   tp_size=${TP_SIZE:-$(gpu_device_count "$gpu_devices")}
+  kv_cache_memory_label=${KV_CACHE_MEMORY_BYTES:-auto}
+  gpu_util_label=${GPU_UTIL:-$(default_gpu_util)}
+  if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
+    gpu_util_label="${gpu_util_label} (fallback)"
+  fi
 
   if is_tty; then
     clear >/dev/tty 2>/dev/null || true
@@ -3741,7 +3808,8 @@ render_main_menu() {
   printf '     KV precision:     %s\n' "$(menu_value "${KV_CACHE_DTYPE:-fp16}")"
   printf '     Prefix cache:     %s\n' "$(menu_value "$(current_prefix_cache_label)")"
   printf '     Context tokens:   %s\n' "$(menu_value "${MAX_MODEL_LEN:-$(default_context_tokens)}")"
-  printf '     GPU util:         %s\n' "$(menu_value "${GPU_UTIL:-$(default_gpu_util)}")"
+  printf '     KV cache memory:  %s\n' "$(menu_value "$kv_cache_memory_label")"
+  printf '     GPU util:         %s\n' "$(menu_value "$gpu_util_label")"
   printf '     Batch tokens:     %s\n' "$(menu_value "${MAX_BATCHED_TOKENS:-2048}")"
   printf '     Max sequences:    %s\n' "$(menu_value "${MAX_NUM_SEQS:-1}")"
   printf '     MTP tokens:       %s\n' "$(menu_value "${MTP_K:-0}")"
