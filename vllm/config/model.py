@@ -1334,7 +1334,13 @@ class ModelConfig:
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
-            if tensor_parallel_size <= total_num_kv_heads:
+            supports_sequence_sharded_gqa_dcp = (
+                self.model_arch_config.model_type in {"qwen3_5_text", "qwen3_next"}
+            )
+            if (
+                not supports_sequence_sharded_gqa_dcp
+                and tensor_parallel_size <= total_num_kv_heads
+            ):
                 raise ValueError(
                     "Decode context parallelism for GQA/MQA requires "
                     f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
@@ -1344,7 +1350,10 @@ class ModelConfig:
                 )
 
             max_dcp_size = tensor_parallel_size // total_num_kv_heads
-            if decode_context_parallel_size > max_dcp_size:
+            if (
+                not supports_sequence_sharded_gqa_dcp
+                and decode_context_parallel_size > max_dcp_size
+            ):
                 raise ValueError(
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) exceeds the maximum "
@@ -1360,6 +1369,19 @@ class ModelConfig:
                     f"({num_q_per_kv}) must be divisible by "
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) for GQA/MQA."
+                )
+            if (
+                supports_sequence_sharded_gqa_dcp
+                and tensor_parallel_size <= total_num_kv_heads
+            ):
+                logger.warning(
+                    "Enabling experimental GQA DCP with tensor_parallel_size=%s, "
+                    "total_num_kv_heads=%s, decode_context_parallel_size=%s. "
+                    "This relies on sequence-dimension KV sharding instead of "
+                    "KV-head replication removal.",
+                    tensor_parallel_size,
+                    total_num_kv_heads,
+                    decode_context_parallel_size,
                 )
 
         # torch_shm uses a single IPC queue to rank 0; DP>1 is
@@ -1427,6 +1449,21 @@ class ModelConfig:
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
+        if (
+            self.model_arch_config.model_type in {"qwen3_5_text", "qwen3_next"}
+            and total_num_kv_heads % parallel_config.tensor_parallel_size != 0
+            and parallel_config.tensor_parallel_size % total_num_kv_heads != 0
+        ):
+            from vllm.model_executor.layers.attention.head_partition import (
+                make_attention_head_partition,
+            )
+
+            return make_attention_head_partition(
+                total_num_heads=self.model_arch_config.total_num_attention_heads,
+                total_num_kv_heads=total_num_kv_heads,
+                tp_size=parallel_config.tensor_parallel_size,
+                tp_rank=0,
+            ).num_kv_heads
         return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
 
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
