@@ -1,0 +1,40 @@
+{
+  "date": "2026-08-02",
+  "hardware": {
+    "gpus": "RTX 2080 Ti x2",
+    "sm": "7.5",
+    "cuda_visible_devices": "6,7",
+    "tensor_parallel": 2,
+    "port": 18087
+  },
+  "request": {
+    "prompt_tokens": 4096,
+    "completion_tokens": 1024,
+    "stream": true,
+    "temperature": 0.0,
+    "ignore_eos": true,
+    "multimodal_limit": {"image": 4, "video": 0, "audio": 0}
+  },
+  "same_prompt_warm_pair": {
+    "baseline": {
+      "decode_tok_s": 25.525166267715115,
+      "ttft_s": 4.817148133995943,
+      "decode_s": 40.11727051099297,
+      "elapsed_s": 44.93441864498891,
+      "label": "baseline-cudagraph-triton-native-sampler-no-mtp-repeat"
+    },
+    "optimized": {
+      "decode_tok_s": 49.937903214601995,
+      "ttft_s": 3.017077254015021,
+      "decode_s": 20.505466471018735,
+      "elapsed_s": 23.522543725033756,
+      "label": "optimized-mtp3-flashqla-flashinfer-cudagraph-repeat2"
+    },
+    "speedup": 1.955
+  },
+  "short_128_token_reference": {
+    "baseline_mean_tok_s": 38.7661,
+    "optimized_mean_tok_s": 74.6724,
+    "note": "separate project-style short benchmark; not long-run throughput"
+  }
+}
