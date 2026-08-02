@@ -10,12 +10,13 @@ TP=2，保留 CUDA Graph，并保留 `image=4` 的多模态上限。
 
 | profile | decode | TTFT | 说明 |
 |---|---:|---:|---|
-| baseline | 25.53 tok/s | 4.82 s | no MTP、Triton attention、native sampler、PIECEWISE Graph `[1]` |
-| optimized | 49.94 tok/s | 3.02 s | MTP3、FlashQLA legacy GDN、FlashInfer attention/sampler、PIECEWISE Graph `[4]` |
+| baseline | 26.03 tok/s | 5.12 s | no MTP、Triton attention、native sampler、PIECEWISE Graph `[1]` |
+| optimized | 53.00 tok/s | 3.47 s | MTP3、FlashQLA legacy GDN、FlashInfer attention/sampler、PIECEWISE Graph `[4]` |
 
-这是一轮同 prompt 的热缓存长测，提升约 **1.96x**。此前独立的 4096/128 短测为
+这是一轮同 prompt、`max_model_len=245760`、开启 prefix caching 的生产口径热缓存长测，
+提升约 **2.04x**。此前独立的 4096/128 短测为
 `38.77 -> 74.67 tok/s`；短测峰值不能当作 1024-token 长稳态吞吐，因此视频把两种
-口径明确分开。基线长测还记录过 30.39 tok/s，优化长测记录过 42.87、49.29 tok/s，
+口径明确分开。基线长测还记录过 25.53、30.39 tok/s，优化长测记录过 42.87、49.29 tok/s，
 这些波动也保留在本地 `test-results/` 中，不能只挑最好的一次宣称固定速度。
 
 视频：[qwen36-sm75-throughput-before-after-20260802.mp4](video/qwen36-sm75-throughput-before-after-20260802.mp4)

@@ -15,6 +15,7 @@ GPU_IDS=${CUDA_VISIBLE_DEVICES:-6,7}
 MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-2048}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-0}
 ENFORCE_EAGER=${ENFORCE_EAGER:-0}
 SKIP_MM_PROFILING=${SKIP_MM_PROFILING:-0}
 
@@ -55,6 +56,9 @@ if [[ "$ENFORCE_EAGER" == 1 ]]; then
 fi
 if [[ "$SKIP_MM_PROFILING" == 1 ]]; then
   cmd+=(--skip-mm-profiling)
+fi
+if [[ "$ENABLE_PREFIX_CACHING" == 1 ]]; then
+  cmd+=(--enable-prefix-caching)
 fi
 
 if [[ "$MODE" == optimized ]]; then
