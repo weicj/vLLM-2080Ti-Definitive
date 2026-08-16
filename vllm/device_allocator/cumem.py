@@ -10,13 +10,13 @@
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
 import gc
-import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
@@ -262,8 +262,7 @@ class CuMemAllocator:
         # If the user has enabled expandable segments via
         # PYTORCH_CUDA_ALLOC_CONF, temporarily disable them for the duration
         # of the memory pool context and restore on exit.
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        expandable_was_enabled = "expandable_segments:True" in conf
+        expandable_was_enabled = envs.is_expandable_segments_enabled()
         if expandable_was_enabled:
             torch.cuda.memory._set_allocator_settings("expandable_segments:False")
 

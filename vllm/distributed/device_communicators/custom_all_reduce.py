@@ -297,6 +297,14 @@ class CustomAllreduce:
                 f"auto, registered, or staging. Got {graph_input_mode!r}."
             )
 
+        # CUDA IPC cannot export graph-private tensors allocated from
+        # PyTorch expandable segments (cudaIpcGetMemHandle returns
+        # cudaErrorInvalidValue). Keep the custom all-reduce kernel enabled,
+        # but route graph inputs through its pre-registered cudaMalloc staging
+        # buffer. Explicit "registered" mode above remains an opt-in override.
+        if envs.is_expandable_segments_enabled():
+            return False
+
         # Full decode graphs keep the fast registered-input path. SM75
         # piecewise/prefill captures may allocate graph-private large buffers
         # that cannot be exported through CUDA IPC, so those fall back to the
