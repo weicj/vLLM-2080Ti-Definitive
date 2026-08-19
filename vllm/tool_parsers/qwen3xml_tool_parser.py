@@ -59,7 +59,7 @@ class StreamingXMLToolCallParser:
         self.tool_call_index = 0
         self.current_call_id = None
         self.last_completed_call_id = None
-        self.current_function_name = None
+        self.current_function_name = ""
         self.current_function_open = False
         self.parameters = {}
         self.current_param_name = None
@@ -1128,7 +1128,7 @@ class StreamingXMLToolCallParser:
         if self.current_call_id:
             self.last_completed_call_id = self.current_call_id
         self.current_call_id = None
-        self.current_function_name = None
+        self.current_function_name = ""
         self.current_function_open = False
         self.parameters = {}
         self.current_param_name = None
