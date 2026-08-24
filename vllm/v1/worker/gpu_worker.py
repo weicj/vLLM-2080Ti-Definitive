@@ -367,6 +367,27 @@ class Worker(WorkerBase):
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
             self.model_runner.profile_run()
+            # [FORK] Same always-on reserve diagnostic as the profiled path below:
+            # the kv_cache_memory_bytes early return would otherwise skip it and
+            # leave such boots unattributable.
+            # workspace reserve decision. Emitted HERE (before cudagraph-memory
+            # profiling) on purpose: at large num_speculative_tokens the very
+            # next step can OOM inside profile_cudagraph_memory (allocating the
+            # minimal KV cache for capture) — which is *upstream* of
+            # get_kv_cache_configs where the reserve is actually applied — so a
+            # log placed only there would never print. This makes every boot
+            # attributable either way.
+            if self.vllm_config.speculative_config is not None:
+                from vllm.v1.core.kv_cache_utils import (
+                    spec_decode_verify_reserve_decision,
+                )
+
+                _spec_reason = spec_decode_verify_reserve_decision(self.vllm_config)[1]
+                logger.info(
+                    "Speculative-decode verify workspace reserve (applied later "
+                    "in get_kv_cache_configs): %s",
+                    _spec_reason,
+                )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -395,6 +416,26 @@ class Worker(WorkerBase):
                 "allocated_bytes.all.peak", 0
             )
 
+            # [FORK] Always-on diagnostic of the speculative-decode verify
+            # workspace reserve decision. Emitted HERE (before cudagraph-memory
+            # profiling) on purpose: at large num_speculative_tokens the very
+            # next step can OOM inside profile_cudagraph_memory (allocating the
+            # minimal KV cache for capture) — which is *upstream* of
+            # get_kv_cache_configs where the reserve is actually applied — so a
+            # log placed only there would never print. This makes every boot
+            # attributable either way.
+            if self.vllm_config.speculative_config is not None:
+                from vllm.v1.core.kv_cache_utils import (
+                    spec_decode_verify_reserve_decision,
+                )
+
+                _spec_reason = spec_decode_verify_reserve_decision(self.vllm_config)[1]
+                logger.info(
+                    "Speculative-decode verify workspace reserve (applied later "
+                    "in get_kv_cache_configs): %s",
+                    _spec_reason,
+                )
+
             # Profile CUDA graph memory if graphs will be captured.
             # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
@@ -404,6 +445,18 @@ class Worker(WorkerBase):
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
+                # [FORK] profile_run leaves its (1+K)-wide activation peak in the
+                # caching allocator as reserved-but-unallocated blocks. The next
+                # call, profile_cudagraph_memory -> _init_minimal_kv_cache_for_
+                # profiling, must allocate a *fresh contiguous* minimal KV cache
+                # (min_blocks = max_cudagraph_capture_size); at K=16/seqs=16 the
+                # fragmented cache cannot serve it and CUDA has <1 GiB free, so
+                # it OOM'd here (868 MiB) before the KV budget was ever sized.
+                # Return the cache to the driver so the minimal-KV alloc + graph
+                # capture have contiguous room. Peak was already recorded above
+                # (profile_torch_peak), so this does not perturb the measurement.
+                gc.collect()
+                torch.accelerator.empty_cache()
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.

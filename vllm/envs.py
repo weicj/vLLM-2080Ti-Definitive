@@ -283,6 +283,13 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_TOOL_REPETITION_DETECTION_MIN_COUNT: int = 0
+    # Reserve VRAM for the speculative-decode verify working set that KV-cache
+    # memory profiling under-counts at large num_speculative_tokens (see
+    # vllm/v1/core/spec_decode_workspace.py). Auto no-op when speculative
+    # decoding is off or num_speculative_tokens <= 1.
+    VLLM_SPEC_RESERVE_VERIFY_WORKSPACE: bool = True
+    # Peak-overshoot multiplier for that reserve. 0 disables the reserve.
+    VLLM_SPEC_VERIFY_OVERSHOOT_MULT: int = 24
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
@@ -1882,6 +1889,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # default n-gram heuristic can terminate a valid JSON argument mid-string.
     "VLLM_TOOL_REPETITION_DETECTION_MIN_COUNT": lambda: int(
         os.getenv("VLLM_TOOL_REPETITION_DETECTION_MIN_COUNT", "0")
+    ),
+    # Reserve VRAM for the speculative-decode verify working set that memory
+    # profiling under-counts at num_speculative_tokens > 1 (see
+    # vllm/v1/core/spec_decode_workspace.py). Auto no-op when spec decoding is
+    # off or K <= 1; the multiplier bounds the peak-overshoot estimate.
+    "VLLM_SPEC_RESERVE_VERIFY_WORKSPACE": lambda: bool(
+        int(os.getenv("VLLM_SPEC_RESERVE_VERIFY_WORKSPACE", "1"))
+    ),
+    "VLLM_SPEC_VERIFY_OVERSHOOT_MULT": lambda: int(
+        os.getenv("VLLM_SPEC_VERIFY_OVERSHOOT_MULT", "24")
     ),
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
