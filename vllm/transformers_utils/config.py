@@ -36,6 +36,7 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
     check_gguf_file,
+    detect_gguf_multimodal,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
@@ -129,6 +130,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
+    # GGUF/llama.cpp naming: arch qwen35 maps to HF Qwen3_5Config
+    qwen35="Qwen3_5Config",
     qwen3_5_moe="Qwen3_5MoeConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
@@ -760,10 +763,49 @@ def get_config(
 
     # Special architecture mapping check for GGUF models
     if _is_gguf:
-        if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+        # [FORK] qwen35 is our registered alias for qwen3_5; the transformers
+        # registry only knows qwen3_5 (review #107).
+        _model_type = "qwen3_5" if config.model_type == "qwen35" else config.model_type
+        if _model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
-        model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
+        model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[_model_type]
         config.update({"architectures": [model_type]})
+        # Qwen3_5Config always has vision_config, which makes vLLM misdetect
+        # it as multimodal (ForConditionalGeneration). When the GGUF main file
+        # is text-only (vision lives in mmproj), set it to None and take the
+        # text model Qwen3_5ForCausalLM.
+        if (
+            config.model_type == "qwen35"
+            and getattr(config, "vision_config", None) is not None
+        ):
+            # Rebuild the original GGUF file path: get_config rewrote `model`
+            # into the parent directory and stashed the filename in
+            # kwargs["gguf_file"], so detect_gguf_multimodal must receive the
+            # actual file (it returns None for a directory). Remote GGUFs are
+            # resolved after download by GGUFModelLoader, so they keep the
+            # text-only default here.
+            _gguf_path = str(model)
+            if kwargs.get("gguf_file"):
+                _gguf_path = str(Path(model) / kwargs["gguf_file"])
+            if detect_gguf_multimodal(_gguf_path) is None:
+                config.vision_config = None
+        # GGUF ssm structure -> vLLM GDN layout (Qwen3.5 family):
+        # ssm_alpha/beta output 48 dims, ssm_out 6144 = 48*128, ssm_dt/a[48]
+        # -> linear_num_value_heads must be 48 (default 32 would mismatch shape)
+        if config.model_type == "qwen35":
+            text_config = config.get_text_config()
+            text_config.linear_num_value_heads = 48
+            # GGUF rope.freq_base=1e7 -> rope_parameters (otherwise vLLM uses
+            # the default 10000 and position encoding errors garble the
+            # output); partial_rotary_factor=0.25 (GGUF dimension_count=64 /
+            # head_dim=256; get_rope's default 1.0 would override it)
+            rope_theta = getattr(config, "rope_theta", None)
+            if rope_theta is not None:
+                text_config.rope_parameters = {
+                    "rope_type": "default",
+                    "rope_theta": rope_theta,
+                    "partial_rotary_factor": 0.25,
+                }
 
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:

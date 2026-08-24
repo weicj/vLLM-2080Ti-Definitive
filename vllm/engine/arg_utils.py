@@ -704,6 +704,11 @@ class EngineArgs:
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
+        # [FORK compatibility] Fix: JSON strings passed via CLI were not
+        # converted to dict, silently disabling compilation_config
+        # (always compiled with default mode=3)
+        if isinstance(self.compilation_config, str):
+            self.compilation_config = json.loads(self.compilation_config)
         if isinstance(self.compilation_config, dict):
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):

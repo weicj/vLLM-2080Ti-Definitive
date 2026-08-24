@@ -704,16 +704,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if isinstance(loaded_shard_id, tuple) and (
-            is_gguf_weight or is_gguf_weight_type
-        ):
-            raise NotImplementedError(
-                "Shard id with multiple indices is not supported for GGUF."
-            )
         if is_gguf_weight_type:
             if loaded_shard_id is not None:
-                param.data[loaded_shard_id].copy_(loaded_weight)
-                param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
+                if isinstance(loaded_shard_id, tuple):
+                    # Merged shards such as Qwen3.5 GDN in_proj_qkv (shards 0,1,2):
+                    # broadcast the same quant type to each shard (key is a
+                    # tuple; apply looks up by idx)
+                    for sid in loaded_shard_id:
+                        param.data[sid].copy_(loaded_weight)
+                        param.shard_weight_type[sid] = loaded_weight.item()
+                else:
+                    param.data[loaded_shard_id].copy_(loaded_weight)
+                    param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             else:
                 param.shard_weight_type = {
                     i: loaded_weight.item() for i, _ in enumerate(self.output_sizes)
@@ -722,6 +724,25 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
+            if isinstance(loaded_shard_id, tuple):
+                # Merged shards (e.g. Qwen3.5 GDN in_proj_qkv = [q,k,v] stored
+                # as a single GGUF tensor attn_qkv): must split at output_sizes
+                # boundaries, then apply TP sharding per shard; narrowing the
+                # whole tensor would misalign q/k/v (upstream vLLM only tested
+                # Gemma2/3 and doesn't cover the Qwen3Next GGUF layout).
+                cur_offset = 0
+                for sid in loaded_shard_id:
+                    osize = self.output_sizes[sid]
+                    shard_size = osize // self.tp_size
+                    start_idx = self.tp_rank * shard_size
+                    shard_w = loaded_weight.narrow(
+                        output_dim, cur_offset + start_idx, shard_size
+                    )
+                    param.shard_id.append(sid)
+                    param.shard_id_map[sid] = len(param.data_container)
+                    param.data_container.append(shard_w)
+                    cur_offset += osize
+                return
             shard_size = loaded_weight.size(output_dim) // self.tp_size
             start_idx = self.tp_rank * shard_size
 

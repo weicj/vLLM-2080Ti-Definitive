@@ -242,7 +242,35 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
     # Create config with extracted parameters
     # Note: num_channels and attention_dropout use SiglipVisionConfig defaults
     # (3 and 0.0 respectively) which are correct for all models
-    config = SiglipVisionConfig(**config_params)
+    if projector_type == VisionProjectorType.GEMMA3:
+        config = SiglipVisionConfig(**config_params)
+    else:
+        # [FORK compatibility] Qwen3.5-VL (mmproj qwen3vl_merger): the vision
+        # config needs Qwen3-VL style fields (depth/num_heads/
+        # spatial_merge_size) that SiglipVisionConfig lacks (qwen3_vl.py
+        # get_data_parser would crash)
+        from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5VisionConfig
+
+        # out_hidden_size = clip.vision.projection_dim (mmproj metadata;
+        # Qwen3.5-VL 27B = 5120; the default 3584 is wrong and merger weight
+        # loading would crash on shape mismatch)
+        _proj_field = reader.get_field("clip.vision.projection_dim")
+        _out_hs = (
+            int(_proj_field.parts[-1]) if _proj_field else 3584
+        )
+        config = Qwen3_5VisionConfig(
+            depth=config_params["num_hidden_layers"],
+            hidden_size=config_params["hidden_size"],
+            intermediate_size=config_params["intermediate_size"],
+            num_heads=config_params["num_attention_heads"],
+            patch_size=config_params["patch_size"],
+            out_hidden_size=_out_hs,
+            # GGUF mmproj conv is 2D single-frame (16x16); vLLM preprocessing
+            # organizes images/videos with temporal_patch_size=2 (3 channels x
+            # time dim 2, matching AWQ); the time dim is replicated during
+            # weight loading (see gguf_loader patch_embed handling)
+            temporal_patch_size=2,
+        )
 
     if projector_type:
         logger.info(
@@ -291,6 +319,15 @@ def maybe_patch_hf_config_from_gguf(
                 architectures=["Gemma3ForConditionalGeneration"],
             )
             hf_config = new_hf_config
+        elif vision_config is not None and hf_config.model_type in (
+            "qwen3_5", "qwen3_next", "qwen35"
+        ):
+            # [FORK compatibility] Qwen3.5 GGUF multimodal: Qwen3_5Config's
+            # vision_config is an empty template (fields None); replace it with
+            # the real config extracted from mmproj and switch the architecture
+            # to ForConditionalGeneration (multimodal class, matching AWQ)
+            hf_config.vision_config = vision_config
+            hf_config.architectures = ["Qwen3_5ForConditionalGeneration"]
 
     return hf_config
 

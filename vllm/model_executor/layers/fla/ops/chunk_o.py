@@ -16,10 +16,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
-
-BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
-NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+from .utils import FLA_CHUNK_SIZE
 
 
 @triton.heuristics(
@@ -28,13 +25,15 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
+# [FORK] Fixed GDN kernel config (revised):
+# 2026-08-16 micro-benchmark: the original fixed BK32/BV32/w2 was the worst in
+# the feasible set (32K 8.4x slower); shrinking the autotune set (6 combos)
+# also failed - key lacks T, so the false optimum from warmup (T=64) is reused
+# for all shapes. Pinned to micro-benchmark-optimal BK32/BV64/w4 (sm_75 shared
+# memory 44KB is safe)
 @triton.autotune(
     configs=[
-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BKV_LIST
-        for BV in BKV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
+        triton.Config({"BK": 32, "BV": 64}, num_warps=4, num_stages=2)  # 32K measured optimal
     ],
     key=["H", "K", "V", "BT"],
 )

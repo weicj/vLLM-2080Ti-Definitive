@@ -29,7 +29,8 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm as Qwen3NextRMSNorm,
+    GemmaRMSNorm,
+    RMSNorm,
 )
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -76,6 +77,22 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+# [FORK compatibility] GGUF RMSNorm weights already include +1 (llama.cpp
+# convention, see conversion/gemma.py norm_shift), so plain RMSNorm must be
+# used to multiply directly; safetensors weights are raw w (1+w semantics), so
+# use GemmaRMSNorm. Consistent with upstream vLLM PR #31464/#37220 Gemma2/3
+# GGUF fixes.
+# Note: cannot branch on vllm_config.quant_config (it is None on the GGUF
+# path); use model_config.load_format. Other formats (safetensors/AWQ etc.)
+# default to the original GemmaRMSNorm.
+def _get_qwen3_next_rms_norm_cls(load_format) -> type:
+    if load_format == "gguf":
+        return RMSNorm
+    return GemmaRMSNorm
+
+
+Qwen3NextRMSNorm = GemmaRMSNorm
 
 logger = init_logger(__name__)
 
@@ -210,6 +227,7 @@ class Qwen3NextAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        load_format: str = "auto",  # [FORK compatibility] pick plain RMSNorm for GGUF (weights include +1)
     ) -> None:
         super().__init__()
         self.config = config
@@ -278,8 +296,12 @@ class Qwen3NextAttention(nn.Module):
             else {},
         )
 
-        self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = _get_qwen3_next_rms_norm_cls(load_format)(
+            self.head_dim, eps=config.rms_norm_eps
+        )
+        self.k_norm = _get_qwen3_next_rms_norm_cls(load_format)(
+            self.head_dim, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -288,6 +310,7 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         qkv, _ = self.qkv_proj(hidden_states)
+
 
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(
@@ -332,6 +355,14 @@ class Qwen3NextDecoderLayer(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        # [FORK compatibility] All RMSNorm weights include +1 when loaded
+        # from GGUF, so plain RMSNorm is needed. load_config may be lost after
+        # multiproc worker deserialization; fall back to gguf (qwen35 currently
+        # only has a GGUF load path)
+        try:
+            load_format = vllm_config.load_config.load_format
+        except Exception:
+            load_format = "gguf"
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
@@ -350,6 +381,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+                load_format=load_format,  # [FORK compatibility] q/k_norm use plain RMSNorm for GGUF
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
@@ -374,10 +406,10 @@ class Qwen3NextDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
 
-        self.input_layernorm = Qwen3NextRMSNorm(
+        self.input_layernorm = _get_qwen3_next_rms_norm_cls(load_format)(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = Qwen3NextRMSNorm(
+        self.post_attention_layernorm = _get_qwen3_next_rms_norm_cls(load_format)(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -439,6 +471,8 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
+
         hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
@@ -454,6 +488,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hidden_states = hidden_states * (
                     self.ffn_layer_scale.to(hidden_states.dtype) + 1
                 )
+
 
         return hidden_states, residual
 

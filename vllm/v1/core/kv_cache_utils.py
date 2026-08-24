@@ -611,8 +611,8 @@ def resolve_kv_cache_block_sizes(
 
     # Mamba groups with block_size != cache_config.block_size
     # (mamba_cache_mode != "align") break divisibility; back off to the
-    # scheduler block size.
-    if any(
+    # scheduler block size. In align mode hashing by GCD is safe.
+    if cache_config.mamba_cache_mode != "align" and any(
         isinstance(g.kv_cache_spec, MambaSpec)
         and g.kv_cache_spec.block_size != cache_config.block_size
         for g in groups
@@ -1032,6 +1032,14 @@ def unify_kv_cache_spec_page_size(
         else:
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size != 0:
+                # When divisibility by block_size can't be achieved: for
+                # layers supporting padding (state-based, e.g. Mamba) pad the
+                # page directly to max_page_size
+                if hasattr(layer_spec, "page_size_padded"):
+                    new_kv_cache_spec[layer_name] = replace(
+                        layer_spec, page_size_padded=max_page_size
+                    )
+                    continue
                 raise NotImplementedError(
                     "The page size of the layer is not divisible by the "
                     "maximum page size. Cannot unify by adjusting block_size."

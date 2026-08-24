@@ -38,6 +38,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3_5RMSNorm,
+    RMSNorm,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
@@ -102,6 +103,14 @@ from .utils import (
     maybe_prefix,
 )
 
+# [FORK compatibility] GGUF RMSNorm weights already include +1 (llama.cpp
+# convention), so use plain RMSNorm; safetensors/AWQ etc. use the original
+# GemmaRMSNorm (1+w semantics).
+def _get_qwen3_5_rms_norm_cls(load_format) -> type:
+    if load_format == "gguf":
+        return RMSNorm
+    return Qwen3_5RMSNorm
+
 logger = init_logger(__name__)
 
 
@@ -133,6 +142,13 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             if override_quant_config is None
             else override_quant_config
         )
+        # [FORK compatibility] GGUF RMSNorm weights include +1, so use plain
+        # RMSNorm; load_config may be lost after multiproc worker
+        # deserialization, fall back to gguf
+        try:
+            _lf = vllm_config.load_config.load_format
+        except Exception:
+            _lf = "gguf"
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
@@ -150,6 +166,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                load_format=_lf,
                 prefix=f"{prefix}.self_attn",
             )
         else:
@@ -173,10 +190,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
 
-        self.input_layernorm = Qwen3_5RMSNorm(
+        self.input_layernorm = _get_qwen3_5_rms_norm_cls(_lf)(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = Qwen3_5RMSNorm(
+        self.post_attention_layernorm = _get_qwen3_5_rms_norm_cls(_lf)(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -244,7 +261,15 @@ class Qwen3_5Model(Qwen3NextModel):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            # [FORK compatibility] Use plain RMSNorm for GGUF (weights include
+            # +1); fall back to gguf after worker deserialization
+            try:
+                _lf = vllm_config.load_config.load_format
+            except Exception:
+                _lf = "gguf"
+            self.norm = _get_qwen3_5_rms_norm_cls(_lf)(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
         else:
             self.norm = PPMissingLayer()
 
@@ -430,6 +455,8 @@ class Qwen3_5Model(Qwen3NextModel):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+
         return loaded_params
 
 
@@ -527,8 +554,54 @@ class Qwen3_5ForCausalLMBase(
         )
         return loader.load_weights(weights)
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        # [FORK compatibility] GGUF text-only (ForCausalLM) also needs SSM
+        # state copy functions (upstream only defines them in the multimodal class)
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
-class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        # [FORK compatibility] Text-only ForCausalLM must implement these
+        # itself (upstream only defines them in the multimodal class), so
+        # IsHybrid can derive mamba_block_size (GDN linear_attn state cache)
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+
+class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase, IsHybrid):
+    # [FORK compatibility] GGUF text-only (Qwen3_5ForCausalLM) also contains
+    # linear_attn hybrid layers; must be marked IsHybrid so mamba_block_size
+    # can be derived (GDN linear_attn state cache), otherwise get_kv_cache_spec
+    # crashes asserting mamba_block_size is not None.
     pass
 
 

@@ -48,6 +48,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    V_START: tl.constexpr,  # global v-head start of this TP rank (for interleaved-layout TP sharding)
+    GGUF_LAYOUT: tl.constexpr,  # [FORK compatibility] True=GGUF/llama.cpp layout (mod16); False=AWQ/official div3 layout
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
@@ -63,7 +65,20 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
+    # llama.cpp fused GDN kernel: k-head = v-head % num_k_heads (fastmodulo(h_idx, neqk1))
+    # q/k are all-gathered to full width (gather order = [rank0 data, rank1 data]):
+    #   rank0 (TP0, second-half weights q8-15) -> gather 0-7 are q8-15
+    #   rank1 (TP1, first-half weights q0-7)  -> gather 8-15 are q0-7
+    # This rank's global v-head start v_start (TP0=24, TP1=0); global v = v_start + i_hv.
+    # The q/k gather position p must satisfy (p + H//2) % H = (v_start + i_hv) % H
+    # => p = (v_start + i_hv + H//2) % H; let V_START = (v_start + H//2) % H
+    if GGUF_LAYOUT:
+        # [FORK compatibility] GGUF/llama.cpp mod16 layout (requires full q/k gather)
+        i_h = (i_hv + V_START) % H
+    else:
+        # [FORK compatibility] AWQ/transformers official div3 layout (q/k are
+        # half-split under TP; use this rank's k-head directly)
+        i_h = i_hv // (HV // H)
     if IS_VARLEN:
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int64),
@@ -145,7 +160,12 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             b_h *= tl.exp(b_g)
         else:
             b_h *= tl.exp(b_g[None, :])
-        # [BV]
+        # llama.cpp GDN (delta-net-base.cpp / gated_delta_net.cu):
+        #   kv = S @ k (decayed state read = g*kv_old)
+        #   delta = (v - kv) * beta
+        #   S' = g*S + delta ⊗ k
+        # Note: previously both b_v and b_k were multiplied by beta (double
+        # beta), which disagreed with llama.cpp; fixed.
         b_v -= tl.sum(b_h * b_k[None, :], 1)
         b_v *= b_beta
         # [BV, BK]
@@ -197,6 +217,8 @@ def fused_sigmoid_gating_delta_rule_update(
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
     null_block_id: int = NULL_BLOCK_ID,
+    v_start: int = 0,
+    gguf_layout: bool = False,  # [FORK compatibility] True=GGUF mod16 layout; False=AWQ official div3 layout
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -266,6 +288,8 @@ def fused_sigmoid_gating_delta_rule_update(
         V=V,
         BK=BK,
         BV=BV,
+        V_START=v_start,
+        GGUF_LAYOUT=gguf_layout,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,

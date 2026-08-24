@@ -186,7 +186,29 @@ class Qwen3_5Config(PretrainedConfig):
         if isinstance(text_config, dict):
             self.text_config = self.sub_configs["text_config"](**text_config)
         elif text_config is None:
-            self.text_config = self.sub_configs["text_config"]()
+            # When loading from GGUF the fields arrive as top-level kwargs
+            # (hidden_size etc.); forward them to text_config, otherwise
+            # Qwen3_5TextConfig uses all defaults (hidden=4096 etc.)
+            _text_keys = (
+                "vocab_size", "hidden_size", "intermediate_size",
+                "num_hidden_layers", "num_attention_heads",
+                "num_key_value_heads", "hidden_act",
+                "max_position_embeddings", "initializer_range",
+                "rms_norm_eps", "use_cache",
+                "rope_parameters", "attention_bias", "attention_dropout",
+                "head_dim", "linear_conv_kernel_dim", "linear_key_head_dim",
+                "linear_value_head_dim", "linear_num_key_heads",
+                "linear_num_value_heads", "layer_types",
+                "full_attention_interval", "pad_token_id", "bos_token_id",
+                "eos_token_id",
+            )
+            self.text_config = self.sub_configs["text_config"](
+                **{k: v for k, v in kwargs.items() if k in _text_keys},
+                # tie_word_embeddings is an explicit named arg (not in kwargs),
+                # so the _text_keys filter would drop it and leave the nested
+                # text_config at the default False (review #107).
+                tie_word_embeddings=tie_word_embeddings,
+            )
 
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id

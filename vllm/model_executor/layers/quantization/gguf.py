@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
 import gguf
+import os
 import torch
 from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -212,6 +213,14 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    # GDN precision fix: force fp32 dequant computation (skips the precision
+    # loss of the MMQ fp16 kernel)
+    if os.getenv("VLLM_GGUF_FP32", "0") == "1":
+        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+        shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, torch.float32)
+        y = x.float() @ weight.T
+        return y if x.dtype == torch.float32 else y.to(x.dtype)
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
@@ -501,7 +510,7 @@ class GGUFLinearMethod(LinearMethodBase):
         qweight = layer.qweight
         shard_id_map = qweight.shard_id_map
         shard_id = qweight.shard_id
-        if len(data_container := qweight.data_container) > 1:
+        if len(data_container := qweight.data_container) >= 1:
             dtype = {data.dtype for data in data_container}
             assert len(dtype) == 1, ValueError(
                 f"Data container has mixed dtypes: {dtype}"
@@ -517,13 +526,20 @@ class GGUFLinearMethod(LinearMethodBase):
             )
             # (dim0_start, dim0_end, dim1_size)
             shard_offset_map = dict[str, tuple[int, int, int]]()
-            for idx in shard_id:
-                id_in_container = shard_id_map[idx]
-                start = sum(x.size(0) for x in data_container[:id_in_container])
-                end = start + data_container[id_in_container].size(0)
-                size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+            # Qwen3.5 GDN: attn_gate (z) precedes attn_qkv in the GGUF file,
+            # so shard_id=[3,0,1,2] and data_container=[z,q,k,v];
+            # must concatenate in shard id order, otherwise qkv and z are
+            # misaligned (forward splits as [qkv,z]). start uses the running
+            # row count in shard id order, not data_container's physical order.
+            cur_start = 0
+            for idx in (sorted(shard_id) if all(isinstance(s, int) for s in shard_id) else shard_id):
+                data = data_container[shard_id_map[idx]]
+                start = cur_start
+                end = cur_start + data.size(0)
+                size = data.size(1)
+                padded_data[start:end, :size] = data
                 shard_offset_map[idx] = (start, end, size)
+                cur_start = end
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
@@ -543,7 +559,10 @@ class GGUFLinearMethod(LinearMethodBase):
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
             qweight = layer.qweight
             result = []
-            for idx in shard_id:
+            # Qwen3.5 GDN: attn_gate (z) loads first, so shard_id=[3,0,1,2];
+            # must output in shard id order (q,k,v,z), otherwise forward's
+            # [qkv,z] split gets [z,q,...] misaligned.
+            for idx in (sorted(shard_id) if all(isinstance(s, int) for s in shard_id) else shard_id):
                 start, end, offset = layer.qweight.shard_offset_map[idx]
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
                 result.append(

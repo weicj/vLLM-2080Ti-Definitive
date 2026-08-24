@@ -62,6 +62,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
+    # This kernel backs the generic fused_recurrent_gated_delta_rule API used
+    # by non-GGUF callers (e.g. olmo_hybrid), whose layouts use the official
+    # div3 grouping: v-head // (HV // H) maps each contiguous group of value
+    # heads to one query/key head (review #107 #9). GGUF mod16 is served by
+    # fused_sigmoid_gating_delta_rule_update / packed decode, which carry
+    # their own layout branch and v_start.
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
         bos, eos = (
@@ -280,10 +286,23 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    GGUF_LAYOUT: tl.constexpr,  # [FORK compatibility] True=GGUF mod16; False=AWQ/official div3
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
+    # [FORK compatibility 2026-08-10 GPTQ8] The v-head -> k-head mapping must
+    # match the layout:
+    #   GGUF/mod16 (llama.cpp): k-head = v-head % num_k_heads (interleaved)
+    #   AWQ/transformers official div3: repeat_interleave semantics =
+    #     v-head // (HV // H) (contiguous grouping)
+    # The original implementation hardcoded % H, which broke the mapping in
+    # decode for the div3 layout (root cause of 12*8=1).
+    if GGUF_LAYOUT:
+        # llama.cpp fused GDN: k-head = v-head % num_k_heads
+        i_h = i_hv % H
+    else:
+        # transformers official div3: q/k repeat_interleave(ratio) -> contiguous grouping
+        i_h = i_hv // (HV // H)
 
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -349,6 +368,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     ssm_state_indices: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
     null_block_id: int = NULL_BLOCK_ID,
+    gguf_layout: bool = False,  # [FORK compatibility] True=GGUF mod16; False=AWQ/official div3
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if mixed_qkv.ndim != 2:
         raise ValueError(
@@ -475,6 +495,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        GGUF_LAYOUT=gguf_layout,  # [FORK compatibility] layout branch
         num_warps=num_warps,
         num_stages=num_stages,
     )

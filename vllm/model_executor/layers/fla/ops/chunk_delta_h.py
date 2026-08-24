@@ -16,7 +16,6 @@ from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp
 from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
-NUM_WARPS = [2, 4, 8, 16]
 
 
 @triton.heuristics(
@@ -29,12 +28,14 @@ NUM_WARPS = [2, 4, 8, 16]
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
+# [FORK] Fixed GDN kernel config (revised):
+# 2026-08-16 micro-benchmark: BV32/w4 is optimal across all shapes (32K: 112ms
+# vs original BV32/w2 145ms, -23%; BV64 is actually slower at 136-249ms - the
+# opposite of chunk_o). Shrinking the autotune set didn't help (key lacks T, so
+# the false optimum found during warmup gets reused); pinned directly.
 @triton.autotune(
     configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
-        for BV in [32, 64]
+        triton.Config({"BV": 32}, num_warps=4, num_stages=2)  # micro-benchmark optimal
     ],
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,
