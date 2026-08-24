@@ -39,6 +39,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "int8_per_tensor": torch.int8,  # [FORK-PORT] PR#41505
     "int8_per_token_head": torch.int8,
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
@@ -76,6 +77,9 @@ PIN_MEMORY = "microsoft" not in " ".join(platform.uname()).lower()
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
         kv_cache_dtype.startswith("fp8")
+        # [FORK-PORT] PR#41505: int8_per_tensor is also a quantized KV cache
+        # (torch_utils variant)
+        or kv_cache_dtype.startswith("int8")
         or kv_cache_dtype.endswith("per_token_head")
         or kv_cache_dtype == "nvfp4"
     )

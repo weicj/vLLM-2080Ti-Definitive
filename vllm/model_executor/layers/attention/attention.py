@@ -113,9 +113,18 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
     layer._prob_scale_float = 1.0
 
     # Initialize q/k/v range constants used by calc_kv_scales
-    layer.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-    layer.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-    layer.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+    if getattr(layer, "kv_cache_dtype", None) == "int8_per_tensor":
+        # [FORK-PORT] PR#41505: symmetric int8 quantization range is ±127,
+        # NOT the fp8 defaults (envs K/V_SCALE_CONSTANT = 200/100). Without
+        # this, process_weights_after_loading resets the ranges to 200/100
+        # before calibration and int8 K/V values clip (review #106 P1).
+        layer.q_range = torch.tensor(127.0, dtype=torch.float32)
+        layer.k_range = torch.tensor(127.0, dtype=torch.float32)
+        layer.v_range = torch.tensor(127.0, dtype=torch.float32)
+    else:
+        layer.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+        layer.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        layer.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
 
 def _init_kv_cache_quant(
@@ -150,6 +159,11 @@ def _init_kv_cache_quant(
     # wrong scales) and then load real weights (which misses scales and keeps the
     # wrong scales from dummy load).
     set_default_quant_scales(layer, register_buffer=True)
+    # [FORK-PORT] PR#41505: int8_per_tensor uses a symmetric range of +-127,
+    # which set_default_quant_scales already initializes (fp8 defaults to envs
+    # K/V_SCALE_CONSTANT=200/100). The range is re-asserted after
+    # create_weights below in case a checkpoint ships fp8-style k/v_scale
+    # values (review #106 round 7 P3).
 
     # The output scale on host memory. This should be the input scale of
     # the quant op after this attention layer.
@@ -172,6 +186,12 @@ def _init_kv_cache_quant(
         # values after weight loading.
         layer.quant_method = quant_method
         layer.quant_method.create_weights(layer)
+    if getattr(layer, "kv_cache_dtype", None) == "int8_per_tensor":
+        # [FORK-PORT] Re-assert the int8 symmetric range after quant weight
+        # loading: fp8-style checkpoints may carry k/v_scale weights that
+        # would otherwise overwrite the 127 range set above.
+        layer.k_range.fill_(127.0)
+        layer.v_range.fill_(127.0)
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -501,13 +521,64 @@ class Attention(nn.Module, AttentionLayerBase):
         return output.view(-1, hidden_size)
 
     def calc_kv_scales(self, query, key, value):
+        # [FORK] int8_per_tensor: warmup/dummy forward passes have all-zero K/V
+        # → scale=0 garbage cache (hybrid #37554 confirmed: recurrent state is
+        # uninitialized during calibration). Skip zero-value calibration and keep
+        # the calculate_kv_scales flag; calibrate on the first real request
+        # (long prefill) instead.
+        k_absmax = 0.0
+        v_absmax = 0.0
+        if self.kv_cache_dtype == "int8_per_tensor":
+            k_absmax = torch.abs(key).max().item()
+            v_absmax = torch.abs(value).max().item()
+            if k_absmax == 0.0 or v_absmax == 0.0:
+                # All-or-nothing calibration: with either tensor still zero,
+                # update neither scale and wait for the next eligible batch
+                # (review #106 round 8 P1 — partial updates corrupt the cache
+                # because values written under the old scale would later be
+                # dequantized with the new one).
+                logger.debug(
+                    "[FORK-INT8SCALE] %s skip zero-value calibration "
+                    "(k_absmax=%.6f v_absmax=%.6f), waiting for real request",
+                    self.layer_name, k_absmax, v_absmax,
+                )
+                return
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
-        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
-        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        if self.kv_cache_dtype == "int8_per_tensor":
+            # Reuse the k_absmax/v_absmax computed above instead of re-running
+            # two full reductions (review #106 round 6 P2). Calibration is
+            # all-or-nothing: when one tensor is still zero, update neither
+            # scale and stay pending. Partially updating (round 8 P1) leaves
+            # the zero side at the default 1.0 while calibration finishes, so
+            # values already written to the cache under 1.0 are later
+            # dequantized with a different scale, corrupting prior context.
+            # A zero K (or V) on a real prefill is degenerate (both come from
+            # the same input projection), so waiting for the next batch is
+            # safe; both scales are calibrated together once both tensors
+            # have nonzero maxima.
+            self._k_scale.copy_(k_absmax / self.k_range)
+            self._v_scale.copy_(v_absmax / self.v_range)
+        else:
+            self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+            self._v_scale.copy_(torch.abs(value).max() / self.v_range)
         self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
-        # We only calculate the scales once
+        # [FORK] int8_per_tensor debug: log the actually calibrated scales.
+        # k_absmax/v_absmax are already computed above for the zero-value
+        # check; reuse them instead of re-running two full reductions
+        # (logger.debug args are evaluated unconditionally, review #106 P3).
+        if self.kv_cache_dtype == "int8_per_tensor":
+            logger.debug(
+                "[FORK-INT8SCALE] %s k_scale=%.6f v_scale=%.6f "
+                "k_absmax=%.4f v_absmax=%.4f",
+                self.layer_name, self._k_scale_float, self._v_scale_float,
+                k_absmax, v_absmax,
+            )
+        # We only calculate the scales once. By the time we reach this point
+        # the all-or-nothing guard above has returned for any batch with a
+        # zero tensor, so both scales are freshly calibrated here and it is
+        # safe to finish (review #106 round 8 P1).
         self.calculate_kv_scales = False
 
     def extra_repr(self) -> str:
@@ -596,6 +667,83 @@ def maybe_calc_kv_scales(
     # This flag gets set to False after the first forward pass
     if not self.calculate_kv_scales:
         return
+
+    # [FORK] int8_per_tensor: skip during CUDA graph capture/replay —
+    # calc_kv_scales contains .item() CPU sync, which triggers
+    # cudaErrorStreamCaptureInvalidated during capture. Keep the flag until the
+    # first real eager prefill (long chunk exceeds graph capture size) to
+    # calibrate. Scoped to int8_per_tensor so other quantized KV dtypes (fp8
+    # etc.) keep upstream first-forward calibration timing (review #106 round
+    # 6 P2). The capture checks are only evaluated on the int8 path.
+    if self.kv_cache_dtype == "int8_per_tensor":
+        _cudagraph_mode = getattr(forward_context, "cudagraph_runtime_mode", None)
+        _in_cudagraph = (
+            _cudagraph_mode is not None and _cudagraph_mode.name != "NONE"
+        ) or torch.cuda.is_current_stream_capturing()
+        if _in_cudagraph:
+            return
+
+    # [FORK] int8_per_tensor: defer calibration until a calibration-ready
+    # prefill — the first execute_model runs with cudagraph_mode=NONE, so a
+    # short first request (e.g. "12*8") would reach this point and freeze
+    # undersized int8 scales, clipping larger K/V values later (review #106
+    # P1). Gate on a prefill request's TOTAL sequence length (max_seq_len,
+    # includes context) instead of the chunk length: chunked prefill schedules
+    # long prompts in chunks < 2048 tokens, and gating on chunk length would
+    # defer calibration forever (review #106 P2). Decode-only batches never
+    # calibrate (they carry no new prompt tokens), and in a mixed batch only
+    # the prefill rows' total lengths are considered (review #106 round 5 P1).
+    # Other quantized KV dtypes (fp8 etc.) keep upstream first-forward
+    # calibration.
+    if self.kv_cache_dtype == "int8_per_tensor":
+        # Resolve the per-layer metadata entry (mirror get_attention_context):
+        # forward_context.attn_metadata is dict[layer_name] or, for
+        # speculative decoding, list[dict[layer_name]]. Read the backend's
+        # actual per-request total sequence length (FIPrefill.seq_lens_cpu
+        # includes context, not just the current chunk).
+        _md = getattr(forward_context, "attn_metadata", None)
+        if isinstance(_md, dict):
+            _md = _md.get(layer_name)
+        elif isinstance(_md, list) and _md:
+            _md = _md[0].get(layer_name)
+        _seq_lens_cpu = getattr(getattr(_md, "prefill", None), "seq_lens_cpu", None)
+        if _seq_lens_cpu is None:
+            # Triton attention backend stores seq_lens_cpu on the metadata
+            # object itself rather than under .prefill (review #106). Restrict
+            # to prefill rows so an unrelated long decode in the same batch
+            # does not satisfy the gate (review #106 round 5 P1).
+            _seq_lens_cpu = getattr(_md, "seq_lens_cpu", None)
+            _is_prefilling = getattr(_md, "is_prefilling", None)
+            if (
+                _seq_lens_cpu is not None
+                and _is_prefilling is not None
+                and _is_prefilling.numel() == _seq_lens_cpu.numel()
+            ):
+                _seq_lens_cpu = _seq_lens_cpu[_is_prefilling]
+            elif (
+                _seq_lens_cpu is not None
+                and _is_prefilling is not None
+                and _is_prefilling.numel() != _seq_lens_cpu.numel()
+            ):
+                logger.debug(
+                    "[FORK-INT8SCALE] %s is_prefilling(%d) vs seq_lens_cpu(%d) "
+                    "shape mismatch, falling back to unfiltered seq_lens_cpu",
+                    layer_name, _is_prefilling.numel(), _seq_lens_cpu.numel(),
+                )
+            if _seq_lens_cpu is None:
+                # FlashInfer TRTLLM prefill has no seq_lens_cpu (the TRTLLM
+                # path keeps seq lengths on GPU only); its seq_lens covers
+                # prefill requests exclusively, which is exactly the
+                # population this gate wants (review #106 round 7 P1).
+                _seq_lens_t = getattr(getattr(_md, "prefill", None), "seq_lens",
+                                      None)
+                if _seq_lens_t is not None and _seq_lens_t.numel() > 0:
+                    _seq_lens_cpu = _seq_lens_t
+        _max_seq_len = 0
+        if _seq_lens_cpu is not None and _seq_lens_cpu.numel() > 0:
+            _max_seq_len = int(_seq_lens_cpu.max().item())
+        if _max_seq_len < 2048:
+            return
 
     self.calc_kv_scales(query, key, value)
 

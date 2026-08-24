@@ -191,8 +191,15 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if is_quantized_kv_cache(kv_cache_dtype):
+        if kv_cache_dtype.startswith("fp8") or kv_cache_dtype == "nvfp4":
             return flash_attn_supports_fp8()
+        if is_quantized_kv_cache(kv_cache_dtype):
+            # [FORK-PORT] PR#41505: int8_per_tensor (and int8 per-token-head)
+            # are NOT supported by FlashAttention kernels. They would be
+            # misrouted to the FP8 path and hit ValueError in
+            # get_fp8_dtype_for_flashattn. Restrict backend selection to
+            # int8-aware implementations (FlashInfer/Triton).
+            return False
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
     @classmethod
