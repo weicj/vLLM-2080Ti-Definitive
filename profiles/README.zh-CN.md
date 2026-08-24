@@ -73,10 +73,13 @@ Jackrong/Qwopus3.6-27B-v2-FP8（后者约 29G）。
 | Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 | 吞吐性能 |
 |---|---|---:|---|---:|---|---:|---:|
 | `qwen27b/normal/fp8/fp16kv-128K-mtp3-text-only.env` | normal | 128K | FP16 | 3 | text-only | 1 | 1619.48 / 84.71 |
+| `qwen27b/normal/fp8/fp16kv-138K-mtp3-text-only.env` | normal | 138K | FP16 | 3 | text-only | 1 | - [^qwen27b-fp8-138k] |
 | `qwen27b/normal/fp8/int8kv-252K-mtp3-text-only.env` | normal | 252K | INT8 | 3 | text-only | 1 | 1605.10 / 44.09 |
 | `qwen27b/fast/fp8/fp16kv-112K-mtp3-text-only.env` | fast | 112K | FP16 | 3 | text-only | 1 | 1615.58 / 83.69 |
 | `qwen27b/fast/fp8/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 1 | 1615.81 / 81.06 |
 | `qwen27b/fast/fp8/tqk8v4-240K-mtp3-text-image.env` | fast | 240K | TQK8V4 | 3 | text+image | 1 | 1605.61 / 80.67 |
+
+[^qwen27b-fp8-138k]: 该路由为 MTP3 138K 部署跟踪；本 PR 未单独跑吞吐基准（最接近的已测 qwen27b FP8 MTP3 路由为 `fp16kv-128K`，1619.48 / 84.71）。
 
 ### Qwen3.x 35B
 
@@ -105,3 +108,18 @@ llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GPTQ-Int4，
 | `qwen27b/fast/int4/fp16kv-256K-mtp3-text-only.env` | fast | 256K | FP16 | 3 | text-only | 1 | 1734.98 / 87.00 |
 | `qwen27b/fast/int4/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 1 | 1744.67 / 100.81 |
 | `qwen27b/fast/int4/tqk8v4-two250K-mtp3-text-only.env` | fast | 每工作区 250K | TQK8V4 | 3 | text-only | 2 | 1739.23 / 99.91 |
+
+### Qwen3.8-27B（INT4）
+
+测试权重：[SergiioB/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16](https://huggingface.co/SergiioB/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16)，
+18.22 GB，GPTQ INT4 G128，MTP 以 BF16 保留。
+
+**关键发现**：Qwen3.8 GPTQ INT4 + FP16 KV + MTP3 在 4K PP/TG 下 decode 达 **126.2 tok/s**，相较
+Qwen3.6-27B（4K PP/TG 下 81.7 tok/s）**+54%**，二者采用同一 4K PP/TG 基准口径。逐配置对比见基准文档。
+
+| Profile | 兼容模式 | 上下文 | KV | MTP | 消息 | 并发 | 吞吐性能 |
+|---|---|---|---:|---|---:|---|---:|---:|
+| `qwen38/fast/int4/fp16kv-128K-mtp3-text-only.env` | fast | 128K | FP16 | 3 | text-only | 1 | **1690.7 / 126.2** |
+| `qwen38/normal/int4/int8kv-128K-nomtp-text-only.env` | normal | 128K | INT8 | 0 | text-only | 1 | 1741.4 / 54.7 |
+
+详细基准结果见 [docs/benchmarks/qwen38-gptq-int4-benchmark.md](../docs/benchmarks/qwen38-gptq-int4-benchmark.md)。

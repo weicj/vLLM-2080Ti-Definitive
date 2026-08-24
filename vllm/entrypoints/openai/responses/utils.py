@@ -83,20 +83,58 @@ def construct_input_messages(
     prev_msg: list[ChatCompletionMessageParam] | None = None,
     prev_response_output: list[ResponseOutputItem] | None = None,
 ):
-    messages: list[ChatCompletionMessageParam] = []
-    if request_instructions:
-        messages.append(
-            {
-                "role": "system",
-                "content": request_instructions,
-            }
-        )
+    if isinstance(request_input, str):
+        input_messages: list[ChatCompletionMessageParam] = [
+            {"role": "user", "content": request_input}
+        ]
+    else:
+        input_messages = construct_chat_messages_with_tool_call(request_input)
 
+    # [local 2080ti fork] Clients such as codex send the system prompt BOTH
+    # in top-level `instructions` AND as a role="developer" input message.
+    # Naively emitting both as system messages yields [system, system, user,
+    # ...], which Qwen-family chat templates reject ("System message must be
+    # at the beginning."). When the input already opens with the system
+    # message converted from role="developer" and there is no earlier
+    # server-side history, merge `instructions` into it.
+    lead: ChatCompletionMessageParam | None = None
+    if request_instructions:
+        if (
+            prev_msg is None
+            and prev_response_output is None
+            and input_messages
+            and input_messages[0].get("role") == "system"
+        ):
+            first = input_messages[0]
+            old_content = first.get("content")
+            if isinstance(old_content, str):
+                if old_content:
+                    first["content"] = f"{request_instructions}\n{old_content}"
+                else:
+                    first["content"] = request_instructions
+            elif isinstance(old_content, list):
+                # Non-string content (e.g. it still carries non-text parts
+                # such as images) must not be replaced: prepend the
+                # instructions as the first text part so the original parts
+                # are preserved.
+                if not old_content:
+                    first["content"] = request_instructions
+                else:
+                    first["content"] = [
+                        {"type": "text", "text": request_instructions}
+                    ] + list(old_content)
+            else:
+                first["content"] = request_instructions
+        else:
+            lead = {"role": "system", "content": request_instructions}
+
+    messages: list[ChatCompletionMessageParam] = []
+    if lead is not None:
+        messages.append(lead)
     # Prepend the conversation history.
     if prev_msg is not None:
         # Filter out system messages from previous conversation -- per the
         # OpenAI spec, instructions should NOT carry over across responses.
-        # The current request's instructions (if any) were already added above.
         messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
         # Add the previous output.
@@ -111,13 +149,9 @@ def construct_input_messages(
                         }
                     )
 
-    # Append the new input.
-    # Responses API supports simple text inputs without chat format.
-    if isinstance(request_input, str):
-        messages.append({"role": "user", "content": request_input})
-    else:
-        input_messages = construct_chat_messages_with_tool_call(request_input)
-        messages.extend(input_messages)
+    # Append the new input (the leading system message is already merged in
+    # via `input_messages` when applicable).
+    messages.extend(input_messages)
     return messages
 
 
@@ -228,6 +262,48 @@ def _construct_single_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
+    # A missing `type` defaults to "message" in the Responses API, so
+    # untyped message dicts (as some codex-style clients send them) must
+    # go through the same normalization; otherwise role="developer" would
+    # slip through unconverted and be rejected by chat templates.
+    elif isinstance(item, dict) and item.get("type", "message") == "message":
+        # [local 2080ti fork] Normalize Responses-API input messages to
+        # chat-template roles. Clients such as codex submit system context
+        # as role="developer" (the OpenAI-recommended alias of "system"),
+        # which Qwen-family chat templates reject with
+        # "Unexpected message role.". Map it to "system" (same aliasing the
+        # chat-completions path performs) and flatten input_text parts.
+        role = item.get("role") or "user"
+        if role == "developer":
+            role = "system"
+        content = item.get("content")
+        if isinstance(content, list):
+            texts: list[str] = []
+            kept: list[dict] = []
+            for part in content:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type")
+                    in ("input_text", "output_text", "text")
+                ):
+                    if part.get("text"):
+                        texts.append(part["text"])
+                else:
+                    # Non-text parts (images, files, ...): pass through
+                    # untouched for now; codex-style text traffic never
+                    # carries them.
+                    kept.append(part)
+            if not kept:
+                # Newline-join (same separator as the instructions merge
+                # above) so part boundaries are preserved in the prompt
+                # instead of "first" + "second" becoming "firstsecond".
+                content = "\n".join(texts)
+            else:
+                content = [{"type": "text", "text": t} for t in texts] + kept
+        msg: dict = {"role": role, "content": content}
+        if item.get("name") and role != "system":
+            msg["name"] = item.get("name")
+        return msg
     return item  # type: ignore
 
 

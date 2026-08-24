@@ -203,14 +203,22 @@ class TokenizeParams:
             and max_total_tokens is not None
             and max_output_tokens > max_total_tokens
         ):
-            raise VLLMValidationError(
-                f"{self.max_output_tokens_param}={max_output_tokens} "
-                f"cannot be greater than "
-                f"{self.max_total_tokens_param}={max_total_tokens=}. "
-                f"Please request fewer output tokens.",
-                parameter=self.max_output_tokens_param,
-                value=max_output_tokens,
+            # [local 2080ti fork] Be lenient instead of rejecting: clients
+            # that over-declare their output budget (e.g. codex declaring
+            # the model's full 128k window) would otherwise hard-fail every
+            # request. Clamp the budget down to the context window; the
+            # length checks below clamp it further to the actual remaining
+            # context once the prompt length is known.
+            logger.warning(
+                "Clamping %s=%d down to %d (max_model_len) instead of "
+                "rejecting the request.",
+                self.max_output_tokens_param,
+                max_output_tokens,
+                max_total_tokens,
             )
+            object.__setattr__(self, "max_output_tokens", max_total_tokens)
+            max_output_tokens = max_total_tokens
+            max_input_tokens = self.max_input_tokens
 
         if (
             max_input_tokens is not None
@@ -295,6 +303,21 @@ class TokenizeParams:
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
 
+        # [local 2080ti fork] Be lenient instead of rejecting: if the
+        # declared output budget left no room for input
+        # (max_input_tokens <= 0), the derived max_length is either 0 (from
+        # a negative truncation mapping) or the +1 sentinel (1) —
+        # pre-truncating would silently drop the prompt content. Skip
+        # token-level truncation in that case; _token_len_check clamps the
+        # budget to the remaining window, or still rejects a prompt that
+        # does not fit at all.
+        if (
+            max_length is not None
+            and self.max_input_tokens is not None
+            and self.max_input_tokens <= 0
+            and max_length <= 1
+        ):
+            max_length = None
         # Left-side truncation requires the full token sequence so we can
         # slice from the end in _token_truncation.  Disable HF-level
         # truncation (which would incorrectly truncate from the right for
@@ -321,6 +344,26 @@ class TokenizeParams:
             max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
 
             if len(text) > max_input_chars:
+                # [local 2080ti fork] Be lenient instead of rejecting: if
+                # the declared output budget left no room for input but
+                # the prompt itself still fits the context window, let it
+                # through; _token_len_check then clamps the budget to the
+                # actual remaining window.
+                if (
+                    self.max_total_tokens is not None
+                    and self.max_total_tokens * tokenizer.max_chars_per_token
+                    >= len(text)
+                ):
+                    logger.warning(
+                        "Prompt (%d chars) exceeds the input room left by the "
+                        "declared output budget (%s=%s); clamping the output "
+                        "budget to the remaining context instead of rejecting "
+                        "the request.",
+                        len(text),
+                        self.max_output_tokens_param,
+                        self.max_output_tokens,
+                    )
+                    return text
                 # To save resources, fail the request outright without even
                 # attempting tokenization
                 raise VLLMValidationError(
@@ -389,6 +432,22 @@ class TokenizeParams:
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
 
+        # [local 2080ti fork] Be lenient instead of rejecting: if a
+        # negative truncation mapped to a non-positive input budget (the
+        # declared output budget starved the input), truncating would drop
+        # the entire prompt. Leave it to _token_len_check, which clamps
+        # the budget to the remaining window or rejects a prompt that
+        # does not fit at all.
+        if (
+            max_length is not None
+            and max_length <= 0
+            and self.truncate_prompt_tokens is not None
+            and self.truncate_prompt_tokens < 0
+            and self.max_total_tokens is not None
+            and self.max_total_tokens - len(tokens) > 0
+        ):
+            return tokens
+
         if max_length is None or max_length >= len(tokens):
             return tokens
         if max_length == 0:
@@ -410,6 +469,25 @@ class TokenizeParams:
 
         if len(tokens) > max_input_tokens:
             token_count = len(tokens)
+            # [local 2080ti fork] Be lenient instead of rejecting: if the
+            # prompt does not fit alongside the declared output budget but
+            # still leaves room for at least one output token, clamp the
+            # budget to the remaining context instead of failing the
+            # request (same tolerance the chat path gets for sane budgets).
+            if (
+                self.max_total_tokens is not None
+                and self.max_total_tokens - token_count > 0
+            ):
+                logger.warning(
+                    "Prompt uses %d tokens, leaving only %d for output; "
+                    "clamping the declared output budget (%s=%s) to the "
+                    "remaining window instead of rejecting the request.",
+                    token_count,
+                    self.max_total_tokens - token_count,
+                    self.max_output_tokens_param,
+                    self.max_output_tokens,
+                )
+                return tokens
             # The tokenizer may have truncated the prompt to
             # max_input_tokens + 1 (see get_encode_kwargs), so the
             # actual prompt length could be larger.
