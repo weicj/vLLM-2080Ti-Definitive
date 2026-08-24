@@ -292,11 +292,12 @@ class BatchDCPPrefillWrapper:
         prefill_query_across_dcp = get_dcp_group().all_gather(
             prefill_query.contiguous(), dim=1
         )
+        _is_i8 = getattr(layer, "kv_cache_dtype", "") == "int8_per_tensor"
         output_context_tmp, lse_context_tmp = self._context.run(
             prefill_query_across_dcp,
             kv_cache_permute,
-            k_scale=layer._k_scale_float,
-            v_scale=layer._v_scale_float,
+            k_scale=(1.0 if _is_i8 else layer._k_scale_float),
+            v_scale=(1.0 if _is_i8 else layer._v_scale_float),
             return_lse=True,
         )
         output_context, lse_context = self._dcp_combine(
@@ -335,6 +336,9 @@ class FlashInferBackend(AttentionBackend):
         "fp8_e4m3",
         "fp8_e5m2",
         "nvfp4",
+        # [FORK] int8_per_tensor: FlashInfer kernels lack an int8 branch; the
+        # forward pass dequantizes into a temp fp16 buffer (storage halved, cost ~bandwidth)
+        "int8_per_tensor",
     ]
 
     @staticmethod
@@ -627,7 +631,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
-            if self.is_kvcache_nvfp4:
+            if self.cache_dtype == "int8_per_tensor":
+                # [FORK] int8_per_tensor: FlashInfer 0.6.8 kernels have no
+                # int8 branch; the forward pass dequantizes into a temporary
+                # fp16 buffer. Tell FlashInfer the data is fp16 (plan's kv_data_type).
+                self.kv_cache_dtype = torch.float16
+            elif self.is_kvcache_nvfp4:
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
@@ -1268,6 +1277,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     disable_split_kv=self.disable_split_kv,
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+        # [FORK] int8_per_tensor decode uses the Triton kernel (FlashInfer 0.6.8
+        # lacks an int8 decode template; whole-pool dequant 5.7 tok/s vs Triton
+        # 42.8 tok/s). Dynamic attribute, not a dataclass field: _copy_tensor_tree
+        # copy_()s dataclass fields; views aliasing the underlying buffer would
+        # crash CUDA graph capture.
+        attn_metadata.seq_lens = seq_lens
+        attn_metadata.block_table = block_table_tensor
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -1282,6 +1298,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 class FlashInferImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+
+    # [FORK] Dedupe uncalibrated int8_per_tensor warnings (tracked per layer, at most once per layer)
+    _warned_uncalibrated_layers: set = set()
 
     def __init__(
         self,
@@ -1347,6 +1366,40 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+
+        # [FORK] 3D segmented params for int8 decode via Triton unified_attention
+        # (same as triton_attn.py): long-context decode uses 3D segmented
+        # parallel softmax; otherwise the 2D single segment serially scans all
+        # KV (3.4 vs 26 tok/s at 32K context).
+        self._decode_3d: dict | None = None
+        if kv_cache_dtype == "int8_per_tensor":
+            MIN_LAUNCH_GRID_SIZE_2D = 128
+            NUM_PAR_SOFTMAX_SEGMENTS = 16
+            seq_threshold = MIN_LAUNCH_GRID_SIZE_2D // num_kv_heads
+            if vllm_config is not None:
+                capture_sizes = (
+                    vllm_config.compilation_config.cudagraph_capture_sizes
+                )
+                if capture_sizes:
+                    seq_threshold = min(
+                        capture_sizes,
+                        key=lambda x: abs(x - seq_threshold),
+                    )
+            headdim_padded = head_size  # 128 is already a power of 2
+            self._decode_3d = {
+                "seq_threshold_3D": seq_threshold,
+                "num_par_softmax_segments": NUM_PAR_SOFTMAX_SEGMENTS,
+                "softmax_segm_output": torch.empty(
+                    (seq_threshold, num_heads, NUM_PAR_SOFTMAX_SEGMENTS,
+                     headdim_padded),
+                    dtype=torch.float32, device="cuda"),
+                "softmax_segm_max": torch.empty(
+                    (seq_threshold, num_heads, NUM_PAR_SOFTMAX_SEGMENTS),
+                    dtype=torch.float32, device="cuda"),
+                "softmax_segm_expsum": torch.empty(
+                    (seq_threshold, num_heads, NUM_PAR_SOFTMAX_SEGMENTS),
+                    dtype=torch.float32, device="cuda"),
+            }
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.is_kvcache_nvfp4 and vllm_config is not None:
@@ -1416,14 +1469,21 @@ class FlashInferImpl(AttentionImpl):
             f"got {query.dtype}"
         )
 
+        # [FORK] int8_per_tensor goes through the dequant path (data already
+        # includes the scale), so it is not folded into the bmm
+        _is_int8_dequant = self.kv_cache_dtype == "int8_per_tensor"
+        # [FORK] int8_per_tensor: KV is already dequantized to real fp16 values;
+        # do not pass k_scale/v_scale to FlashInfer (double scaling would corrupt output)
+        _kv_scale = (1.0, 1.0) if _is_int8_dequant else (
+            layer._k_scale_float, layer._v_scale_float)
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
+            if is_quantized_kv_cache(self.kv_cache_dtype) and not _is_int8_dequant:
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
+            if is_quantized_kv_cache(self.kv_cache_dtype) and not _is_int8_dequant:
                 self.bmm2_scale *= layer._v_scale_float
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
@@ -1474,15 +1534,75 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        # [FORK] Whether decode takes the Triton fast path (int8, 1 token per
+        # request, no padding rows). Initialized here (method scope) so the
+        # decode branch below never reads an unbound name; set inside the
+        # int8_per_tensor branch below.
+        _use_triton_decode = False
+
         # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
         # to process the cache when the kv_cache_dtype is fp8
         if self.kv_sharing_target_layer_name is None and is_quantized_kv_cache(
             self.kv_cache_dtype
         ):
-            torch_dtype = FlashInferBackend.get_dtype_for_flashinfer(
-                self.kv_cache_dtype
-            )
-            kv_cache = kv_cache.view(torch_dtype)
+            if self.kv_cache_dtype == "int8_per_tensor":
+                # [FORK] int8_per_tensor: FlashInfer kernels have no int8 branch
+                # (0.6.8 lists the enum but ships no template; feeding int8 raw
+                # hits illegal address). Prefill dequantizes into a temporary
+                # fp16 buffer (separate K/V scales); storage stays halved int8.
+                # Decode uses the Triton kernel (native int8) on the raw cache,
+                # skipping dequant (saves ~17GB whole-pool dequant traffic per
+                # step, 5.7 → 42 tok/s). NOTE: pass the tensor _k_scale/_v_scale
+                # (graph inputs; replay reads calibrated values); _k_scale_float
+                # (Python float) is folded to a constant at capture (1.0 while
+                # uncalibrated) → wrong data on replay. [FORK] The Triton fast
+                # path runs only for "1 token per request with no padding rows"
+                # (num_decode_tokens == num_decodes); speculative decode or
+                # multi-token falls back to FlashInfer and must dequant (the
+                # decode-only fallback also dequantizes, or feeding int8 cache
+                # to FlashInfer crashes).
+                _use_triton_decode = (
+                    attn_metadata.num_decode_tokens == attn_metadata.num_decodes
+                )
+                _kv_cache_int8 = kv_cache
+                if attn_metadata.num_prefill_tokens > 0 or not _use_triton_decode:
+                    if layer._k_scale_float == 1.0:
+                        # [FORK] When the first request is short (<2048 tokens,
+                        # fully CUDA-graphed), calibration is skipped (zero-value
+                        # skip in calc_kv_scales + early return in graph mode)
+                        # and scale stays 1.0 → wrong data. Dedupe per layer
+                        # (at most once) to avoid spamming during graph capture
+                        # while still showing the hint on real requests.
+                        if layer.layer_name not in \
+                                FlashInferImpl._warned_uncalibrated_layers:
+                            logger.warning(
+                                "[FORK-INT8] %s int8 KV 未校准 (scale=1.0), "
+                                "首个请求请用 >=2048 tokens 的长 prompt 触发校准",
+                                layer.layer_name,
+                            )
+                            FlashInferImpl._warned_uncalibrated_layers.add(
+                                layer.layer_name
+                            )
+                    # Dequantize (temporary allocation per layer; layers execute
+                    # serially so buffers are freed naturally; measured peak
+                    # ~700MB per layer at 256K context). Tensor scales are graph
+                    # inputs read back at replay; _k_scale_float (Python float)
+                    # would be folded to a constant at CUDA graph capture (1.0
+                    # while uncalibrated) → wrong data. The decode branch uses
+                    # _kv_cache_int8 (raw int8 + tensor scales, see the decode
+                    # branch) when taking the Triton kernel.
+                    _k = kv_cache[:, 0].to(torch.float16) * layer._k_scale.to(
+                        torch.float16
+                    )
+                    _v = kv_cache[:, 1].to(torch.float16) * layer._v_scale.to(
+                        torch.float16
+                    )
+                    kv_cache = torch.stack((_k, _v), dim=1)
+            else:
+                torch_dtype = FlashInferBackend.get_dtype_for_flashinfer(
+                    self.kv_cache_dtype
+                )
+                kv_cache = kv_cache.view(torch_dtype)
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
@@ -1595,8 +1715,8 @@ class FlashInferImpl(AttentionImpl):
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
+                        k_scale=_kv_scale[0],
+                        v_scale=_kv_scale[1],
                         out=out_prefill,
                         kv_cache_sf=kv_cache_sf,
                     )
@@ -1746,8 +1866,8 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
+                        k_scale=_kv_scale[0],
+                        v_scale=_kv_scale[1],
                         out=output_tmp,
                         lse=lse,
                         return_lse=True,
@@ -1759,14 +1879,68 @@ class FlashInferImpl(AttentionImpl):
                         get_dcp_group(),
                     )
                 else:
-                    decode_wrapper.run(
-                        decode_query,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=out_decode,
-                        kv_cache_sf=kv_cache_sf,
-                    )
+                    if self.kv_cache_dtype == "int8_per_tensor" and _use_triton_decode:
+                        # [FORK] int8 decode goes through the Triton kernel:
+                        # FlashInfer 0.6.8 has no int8 decode template (whole-
+                        # pool dequant: 5.7 tok/s); Triton unified_attention
+                        # handles native int8 (INT8_PER_TENSOR branch), request
+                        # blocks only, measured 42.8 tok/s. Prefill stays on
+                        # FlashInfer (dequant path, 1400+ tok/s) using the raw
+                        # int8 cache + tensor scales. Only for regular 1-token
+                        # decode (num_decode_tokens == num_decodes); speculative
+                        # decode with multiple tokens falls back to the
+                        # FlashInfer path (per-request metadata semantics differ,
+                        # see review #99).
+                        from vllm.v1.attention.ops.triton_unified_attention import (
+                            unified_attention,
+                        )
+                        from vllm.v1.kv_cache_interface import KVQuantMode
+
+                        num_seqs = num_decode_tokens
+                        key_cache_i8, value_cache_i8 = _kv_cache_int8.unbind(1)
+                        seqused_k = attn_metadata.seq_lens[:num_seqs]
+                        cu_seqlens_q = torch.arange(
+                            num_seqs + 1,
+                            device=decode_query.device,
+                            dtype=torch.int32,
+                        )
+                        descale_shape = (num_seqs, key_cache_i8.shape[2])
+                        d3 = self._decode_3d or {}
+                        unified_attention(
+                            q=decode_query,
+                            k=key_cache_i8,
+                            v=value_cache_i8,
+                            out=out_decode,
+                            cu_seqlens_q=cu_seqlens_q,
+                            max_seqlen_q=1,
+                            seqused_k=seqused_k,
+                            max_seqlen_k=seqused_k.max(),
+                            softmax_scale=self.scale,
+                            causal=True,
+                            window_size=self.sliding_window,
+                            block_table=attn_metadata.block_table[:num_seqs],
+                            softcap=self.logits_soft_cap or 0.0,
+                            q_descale=None,
+                            k_descale=layer._k_scale.expand(descale_shape),
+                            v_descale=layer._v_scale.expand(descale_shape),
+                            seq_threshold_3D=d3.get("seq_threshold_3D"),
+                            num_par_softmax_segments=d3.get(
+                                "num_par_softmax_segments"
+                            ),
+                            softmax_segm_output=d3.get("softmax_segm_output"),
+                            softmax_segm_max=d3.get("softmax_segm_max"),
+                            softmax_segm_expsum=d3.get("softmax_segm_expsum"),
+                            kv_quant_mode=KVQuantMode.INT8_PER_TENSOR,
+                        )
+                    else:
+                        decode_wrapper.run(
+                            decode_query,
+                            kv_cache_permute,
+                            k_scale=_kv_scale[0],
+                            v_scale=_kv_scale[1],
+                            out=out_decode,
+                            kv_cache_sf=kv_cache_sf,
+                        )
 
                 if needs_fp8_out:
                     output[:num_decode_tokens].copy_(out_decode.to(output.dtype))
@@ -1865,16 +2039,33 @@ class FlashInferImpl(AttentionImpl):
             # actual tokens.
             k_cache = kv_cache[:, 0]
             v_cache = kv_cache[:, 1]
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                k_cache,
-                v_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if self.kv_cache_dtype == "int8_per_tensor":
+                # [FORK] int8_per_tensor: C++ reshape_and_cache_flash lacks an
+                # int8 branch; use the Triton version (same as TRITON_ATTN backend)
+                from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+                    triton_reshape_and_cache_flash,
+                )
+                triton_reshape_and_cache_flash(
+                    key,
+                    value,
+                    k_cache,
+                    v_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
+            else:
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    k_cache,
+                    v_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
 
 def fast_plan_decode(

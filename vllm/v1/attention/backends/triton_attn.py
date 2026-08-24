@@ -297,6 +297,7 @@ class TritonAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     num_computed_tokens_cpu: torch.Tensor | None
+    is_prefilling: torch.Tensor | None
 
     seq_threshold_3D: int
     num_par_softmax_segments: int
@@ -489,6 +490,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             num_computed_tokens_cpu=num_computed_tokens_cpu,
+            is_prefilling=common_attn_metadata.is_prefilling,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
@@ -517,6 +519,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "int8_per_tensor",  # [FORK-PORT] PR#41505
         "int8_per_token_head",
         "fp8_per_token_head",
     ]
@@ -1822,10 +1825,14 @@ class TritonAttentionImpl(AttentionImpl):
             v_descale = None
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
-        # FP8 per-tensor / auto path (original flow).
+        # FP8 per-tensor / INT8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if is_quantized_kv_cache(self.kv_cache_dtype):
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                # [FORK-PORT] PR#41505: int8_per_tensor is already int8; no fp8 view needed
+                and self.kv_cache_dtype != "int8_per_tensor"
+            ):
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
@@ -1991,7 +1998,11 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            # [FORK-PORT] PR#41505: int8_per_tensor is already int8
+            and self.kv_cache_dtype != "int8_per_tensor"
+        ):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(

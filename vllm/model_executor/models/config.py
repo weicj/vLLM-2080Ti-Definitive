@@ -212,15 +212,29 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # See issue: https://github.com/vllm-project/vllm/issues/37554
 
         if cache_config.calculate_kv_scales:
-            logger.warning(
-                "Disabling calculate_kv_scales for hybrid model '%s'. "
-                "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
-                "produce unreliable KV cache scales during the "
-                "calibration pass because recurrent state is "
-                "uninitialized. Using default scale of 1.0 instead.",
-                vllm_config.model_config.model,
-            )
-            cache_config.calculate_kv_scales = False
+            # [FORK-PORT] PR#41505: keep dynamic scale for int8_per_tensor.
+            # fp8 is disabled for hybrid models per issue #37554 (uninitialized
+            # recurrent state during calibration pollutes the fp8 scale); the
+            # int8 path is equally affected, but tests need real scales, so the
+            # calibration request uses a real long-text prefill to avoid it.
+            # fp8 keeps the official disabled behavior.
+            if cache_config.cache_dtype == "int8_per_tensor":
+                logger.info(
+                    "Keeping calculate_kv_scales for int8_per_tensor KV on "
+                    "hybrid model '%s' (FORK-PORT PR#41505; calibrate on real "
+                    "long prefill).",
+                    vllm_config.model_config.model,
+                )
+            else:
+                logger.warning(
+                    "Disabling calculate_kv_scales for hybrid model '%s'. "
+                    "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
+                    "produce unreliable KV cache scales during the "
+                    "calibration pass because recurrent state is "
+                    "uninitialized. Using default scale of 1.0 instead.",
+                    vllm_config.model_config.model,
+                )
+                cache_config.calculate_kv_scales = False
 
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
