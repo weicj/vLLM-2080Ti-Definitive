@@ -982,13 +982,17 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            if num_required_blocks == len(req_blocks):
+            if num_required_blocks <= len(req_blocks):
+                # The requirement can legitimately drop below what the request
+                # already holds: with a draft-width cap (or a gated drafter)
+                # the per-step speculative width varies, and rejection rollback
+                # shrinks num_tokens between steps. Mirror the base allocate
+                # path (num_new_blocks <= 0 -> no-op); the extra blocks stay
+                # attached to the request and are freed with it. Previously
+                # this asserted (num_required_blocks > len(req_blocks)) and
+                # killed the engine on the first variable-width spec step.
                 return []
             else:
-                assert num_required_blocks > len(req_blocks), (
-                    "num_required_blocks "
-                    f"{num_required_blocks} < len(req_blocks) {len(req_blocks)}"
-                )
                 prev_block_len = len(req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
                 # Record the last state block

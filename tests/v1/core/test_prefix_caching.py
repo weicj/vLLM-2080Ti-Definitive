@@ -219,3 +219,43 @@ def test_mamba_align_eagle_split_stops_at_reusable_boundary() -> None:
         eagle, request, 2 * block_size - 2
     )
     assert request.num_computed_tokens + scheduled == 2 * block_size
+
+
+def test_mamba_align_allocate_tolerates_required_below_allocated() -> None:
+    """Regression (EXP-039 windows): with variable-width drafts (an MTP draft
+    cap below the scheduler's num_spec_tokens, or the S4 gate flipping between
+    2- and 16-wide drafts) plus rejection rollback, a later step can require
+    FEWER Mamba blocks than the request already holds. The base allocate path
+    tolerates that (num_new_blocks <= 0 -> []); align mode asserted:
+    ``num_required_blocks 17 < len(req_blocks) 18`` -> engine death on first
+    spec-decode traffic. Align mode must tolerate it the same way."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+    from vllm.v1.core.block_pool import BlockPool
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=block_size)
+    mgr = MambaManager(
+        kv_cache_spec=spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+    )
+    rid = "req-varwidth"
+    # Step 1: a wide step (e.g. 16-token draft scheduled) grows the block list.
+    first = mgr.allocate_new_blocks(rid, num_tokens=18 * block_size,
+                                    num_tokens_main_model=17 * block_size)
+    assert first, "first allocation should create blocks"
+    held = len(mgr.req_to_blocks[rid])
+    # Step 2: rejection rollback / narrow draft -> requirement DROPS below the
+    # held count. Must be a graceful no-op, not an AssertionError.
+    out = mgr.allocate_new_blocks(rid, num_tokens=16 * block_size,
+                                  num_tokens_main_model=15 * block_size)
+    assert out == []
+    assert len(mgr.req_to_blocks[rid]) == held  # nothing freed mid-request
