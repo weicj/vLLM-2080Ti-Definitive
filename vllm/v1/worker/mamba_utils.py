@@ -10,6 +10,7 @@ import torch
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
+    MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
     is_conv_state_dim_first,
@@ -17,7 +18,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
@@ -447,6 +453,55 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
     return mamba_group_ids, mamba_specs[0]
 
 
+def _get_mamba_spec_for_layer(
+    kv_cache_group: KVCacheGroupSpec, layer_name: str
+) -> MambaSpec:
+    kv_cache_spec = kv_cache_group.kv_cache_spec
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+    assert isinstance(kv_cache_spec, MambaSpec)
+    return kv_cache_spec
+
+
+def get_mamba_groups_by_spec(
+    kv_cache_config: KVCacheConfig,
+) -> dict[MambaSpec, list[int]]:
+    """Map each distinct Mamba spec to the KV cache groups that use it."""
+    mamba_groups: dict[MambaSpec, set[int]] = {}
+    for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        group_spec = kv_cache_group.kv_cache_spec
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            group_spec = group_spec.first_spec
+        if not isinstance(group_spec, MambaSpec):
+            continue
+        for layer_name in kv_cache_group.layer_names:
+            mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
+            mamba_groups.setdefault(mamba_spec, set()).add(group_id)
+    assert mamba_groups, "no mamba layers in the model"
+    return {spec: sorted(group_ids) for spec, group_ids in mamba_groups.items()}
+
+
+def get_mamba_group_ids(mamba_groups: dict[MambaSpec, list[int]]) -> list[int]:
+    """Return all Mamba group IDs once, in stable order."""
+    return sorted(
+        {group_id for group_ids in mamba_groups.values() for group_id in group_ids}
+    )
+
+
+def validate_mamba_state_copy_funcs(
+    mamba_groups: dict[MambaSpec, list[int]],
+    copy_funcs: MambaStateCopyFuncsByType,
+) -> None:
+    for mamba_spec in mamba_groups:
+        assert mamba_spec.mamba_type in copy_funcs, (
+            f"missing state copy funcs for {mamba_spec.mamba_type}"
+        )
+        assert len(copy_funcs[mamba_spec.mamba_type]) == len(mamba_spec.shapes), (
+            f"{mamba_spec.mamba_type} declares {len(mamba_spec.shapes)} states, "
+            f"but provides {len(copy_funcs[mamba_spec.mamba_type])} state copy funcs"
+        )
+
+
 @dataclasses.dataclass
 class MambaCopyBuffers:
     src_ptrs: CpuGpuBuffer
@@ -496,7 +551,8 @@ class MambaSpecDecodeGPUContext:
     window with offset-based copies), 0 for temporal states (full block copies).
     """
 
-    # Per-state metadata tensors (shape: [num_layers * num_state_types])
+    # Per-state metadata tensors (shape: [num_states]). Different Mamba
+    # groups may expose different numbers of state tensors.
     # These are populated from forward_context during the first forward pass
     state_base_addrs: torch.Tensor  # int64: base address of each state tensor
     state_block_strides: torch.Tensor  # int64: bytes per block
@@ -512,6 +568,7 @@ class MambaSpecDecodeGPUContext:
     block_size: int
     num_layers: int
     num_state_types: int
+    num_states: int
     mamba_group_ids: list[int]
     num_groups: int
 
@@ -543,19 +600,47 @@ class MambaSpecDecodeGPUContext:
         cls,
         max_num_reqs: int,
         kv_cache_config: KVCacheConfig,
-        num_state_types: int,
         device: torch.device,
         make_buffer: Callable[..., CpuGpuBuffer],
+        num_state_types: int | None = None,
+        copy_funcs: MambaStateCopyFuncsByType | None = None,
     ) -> "MambaSpecDecodeGPUContext":
         """Create context with allocated buffers (metadata populated later)."""
-        mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
-
-        # Count total layers across all mamba groups
-        num_layers = sum(
-            len(kv_cache_config.kv_cache_groups[gid].layer_names)
-            for gid in mamba_group_ids
-        )
-        total_states = num_layers * num_state_types
+        if copy_funcs is None:
+            assert num_state_types is not None
+            mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+            num_layers = sum(
+                len(kv_cache_config.kv_cache_groups[gid].layer_names)
+                for gid in mamba_group_ids
+            )
+            total_states = num_layers * num_state_types
+        else:
+            mamba_groups = get_mamba_groups_by_spec(kv_cache_config)
+            validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+            mamba_spec = next(iter(mamba_groups))
+            assert all(
+                spec.block_size == mamba_spec.block_size
+                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
+                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
+                for spec in mamba_groups
+            ), "all mamba groups must share cache scheduling parameters"
+            mamba_group_ids = get_mamba_group_ids(mamba_groups)
+            num_layers = sum(
+                len(kv_cache_config.kv_cache_groups[gid].layer_names)
+                for gid in mamba_group_ids
+            )
+            total_states = sum(
+                len(
+                    copy_funcs[
+                        _get_mamba_spec_for_layer(
+                            kv_cache_config.kv_cache_groups[gid], layer_name
+                        ).mamba_type
+                    ]
+                )
+                for gid in mamba_group_ids
+                for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names
+            )
+            num_state_types = 0
 
         return cls(
             state_base_addrs=torch.zeros(
@@ -585,6 +670,7 @@ class MambaSpecDecodeGPUContext:
             block_size=mamba_spec.block_size,
             num_layers=num_layers,
             num_state_types=num_state_types,
+            num_states=total_states,
             mamba_group_ids=mamba_group_ids,
             num_groups=len(mamba_group_ids),
             num_accepted_tokens_out=torch.zeros(
@@ -606,7 +692,8 @@ class MambaSpecDecodeGPUContext:
         self,
         kv_cache_config: KVCacheConfig,
         forward_context: dict[str, Any],
-        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...]
+        | MambaStateCopyFuncsByType,
         block_tables: list[torch.Tensor],
     ) -> None:
         """
@@ -648,12 +735,28 @@ class MambaSpecDecodeGPUContext:
 
         idx = 0
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
-            layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+            kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+            layer_names = kv_cache_group.layer_names
             for layer_name in layer_names:
+                if isinstance(mamba_state_copy_funcs, dict):
+                    mamba_spec = _get_mamba_spec_for_layer(
+                        kv_cache_group, layer_name
+                    )
+                    state_copy_funcs = mamba_state_copy_funcs[
+                        mamba_spec.mamba_type
+                    ]
+                else:
+                    state_copy_funcs = mamba_state_copy_funcs
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
 
-                for state_type_idx, state in enumerate(kv_caches):
+                if len(kv_caches) < len(state_copy_funcs):
+                    raise ValueError(
+                        f"Expected at least {len(state_copy_funcs)} Mamba state "
+                        f"tensors, got {len(kv_caches)}"
+                    )
+                for state_type_idx, state_copy_func in enumerate(state_copy_funcs):
+                    state = kv_caches[state_type_idx]
                     # Base address
                     self.state_base_addrs[idx] = state.data_ptr()
 
@@ -670,12 +773,11 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    copy_func = mamba_state_copy_funcs[state_type_idx]
                     assert (
-                        copy_func is get_conv_copy_spec
-                        or copy_func is get_temporal_copy_spec
-                    ), f"unexpected copy func: {copy_func}"
-                    if copy_func is get_conv_copy_spec:
+                        state_copy_func is get_conv_copy_spec
+                        or state_copy_func is get_temporal_copy_spec
+                    ), f"unexpected copy func: {state_copy_func}"
+                    if state_copy_func is get_conv_copy_spec:
                         if state.dim() != 3:
                             raise ValueError(
                                 "Expected 3D conv state cache, got "
@@ -725,6 +827,8 @@ class MambaSpecDecodeGPUContext:
                     self.state_group_indices[idx] = group_local_idx
                     idx += 1
 
+        assert idx == self.num_states
+
         # Cache per-group block-table base addresses and per-request stride.
         # `block_tables[i]` is the persistent 2D int32 block-table tensor for
         # `mamba_group_ids[i]`; `data_ptr()` / `stride(0)` are stable for the
@@ -773,7 +877,7 @@ class MambaSpecDecodeGPUContext:
             num_accepted_tokens_gpu[:num_reqs]
         )
 
-        total_states = self.num_layers * self.num_state_types
+        total_states = self.num_states
         grid = (num_reqs, total_states)
 
         postprocess_mamba_fused_kernel[grid](
@@ -821,7 +925,7 @@ class MambaSpecDecodeGPUContext:
         """
         if num_reqs == 0 or not self.is_initialized:
             return
-        total_states = self.num_layers * self.num_state_types
+        total_states = self.num_states
         grid = (num_reqs, total_states)
         precopy_mamba_align_fused_kernel[grid](
             state_idx_gpu,
@@ -862,7 +966,7 @@ class MambaSpecDecodeGPUContext:
         """
         if num_reqs == 0 or not self.is_initialized:
             return
-        total_states = self.num_layers * self.num_state_types
+        total_states = self.num_states
         grid = (num_reqs, total_states)
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_gpu,

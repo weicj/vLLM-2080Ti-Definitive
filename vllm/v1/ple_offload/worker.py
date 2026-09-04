@@ -582,7 +582,7 @@ class PleOffloadRunner:
         pull_socket: zmq.Socket,
         shutdown_event: threading.Event,
     ) -> None:
-        """Decode and batch available requests by DP rank until shutdown."""
+        """Decode and serve one PLE request at a time until shutdown."""
         logger.info("Busy-loop started.")
         poller = zmq.Poller()
         poller.register(pull_socket, zmq.POLLIN)
@@ -590,79 +590,60 @@ class PleOffloadRunner:
             if pull_socket not in dict(poller.poll(timeout=100)):
                 continue
 
-            requests = []
             try:
-                requests.append(_PLE_OFFLOAD_REQUEST_DECODER.decode(pull_socket.recv()))
-                while True:
-                    requests.append(
-                        _PLE_OFFLOAD_REQUEST_DECODER.decode(
-                            pull_socket.recv(zmq.NOBLOCK)
-                        )
-                    )
-            except zmq.Again:
-                pass
+                request = _PLE_OFFLOAD_REQUEST_DECODER.decode(pull_socket.recv())
             except msgspec.DecodeError as error:
                 raise RuntimeError("Unexpected PLE offload request") from error
 
-            self._handle_requests(requests)
+            # One shared input buffer exists per DP rank. Its contents are
+            # valid for exactly one forward, so process each message before
+            # receiving another rather than coalescing same-DP requests.
+            self._handle_request(request)
 
-    def _handle_requests(self, requests: list[PleOffloadRequest]) -> None:
-        """Run requests layer-first so each DP rank can resume promptly."""
-        requests_by_dp: dict[int, PleOffloadRequest] = {}
-        for request in requests:
-            if request.dp_rank not in self._worker_targets:
-                logger.warning(
-                    "No PLE output targets for dp_rank=%d; skipping request.",
-                    request.dp_rank,
-                )
-                continue
-            if request.dp_rank in requests_by_dp:
-                logger.warning(
-                    "Duplicate PLE request for dp_rank=%d; skipping duplicate.",
-                    request.dp_rank,
-                )
-                continue
-            requests_by_dp[request.dp_rank] = request
+    def _handle_request(self, request: PleOffloadRequest) -> None:
+        """Compute and distribute the result for one DP request."""
+        dp_rank = request.dp_rank
+        if dp_rank not in self._worker_targets:
+            logger.warning(
+                "No PLE output targets for dp_rank=%d; skipping request.", dp_rank
+            )
+            return
 
         # Speculative placeholders are not vocabulary IDs. Normalize each DP
         # input once before all PLE layers consume the shared buffer.
         if self._clamp_input_ids:
-            for dp_rank, request in requests_by_dp.items():
-                self._input_bufs[dp_rank].input_ids_buf[
-                    : request.num_tokens
-                ].clamp_min_(0)
+            self._input_bufs[dp_rank].input_ids_buf[: request.num_tokens].clamp_min_(
+                0
+            )
 
         for layer_name, layer in self._layers.items():
-            for dp_rank, request in requests_by_dp.items():
-                targets = self._worker_targets[dp_rank][layer_name]
+            targets = self._worker_targets[dp_rank][layer_name]
+            # The CPU must not overwrite a GPU output buffer until its
+            # previous result has been consumed. The GPU runner resets the
+            # flag after the complete model forward.
+            for target in targets:
+                target.copy_stream.synchronize()
+                target.sem.wait_reset(target.copy_stream)
 
-                # The CPU must not overwrite a GPU output buffer until its
-                # previous result has been consumed. The GPU runner resets the
-                # flag after the complete model forward.
-                for target in targets:
-                    target.copy_stream.synchronize()
-                    target.sem.wait_reset(target.copy_stream)
-
-                input_bufs = self._input_bufs[dp_rank]
-                ngram_context = (
-                    input_bufs.ngram_context_buf[: request.num_reqs]
-                    if input_bufs.ngram_context_buf is not None
-                    else None
-                )
-                result = layer.forward_impl(
-                    input_bufs.input_ids_buf[: request.num_tokens],
-                    input_bufs.input_ids_buf[: request.num_tokens],
-                    input_bufs.query_start_loc_buf[: request.num_reqs + 1],
-                    ngram_context,
-                    output_buffer=self._pinned_bufs[dp_rank][layer_name],
-                )
-
-                # The result is identical on every TP rank in this DP group.
-                # Each copy stream signals only after its DMA completes.
-                slices = tuple(slice(0, size) for size in result.shape)
-                for target in targets:
-                    with torch.cuda.stream(target.copy_stream):
-                        target.gpu_output_buffer[slices].copy_(
-                            result[slices], non_blocking=True
-                        )
-                        target.sem.signal(target.copy_stream)
+            input_bufs = self._input_bufs[dp_rank]
+            ngram_context = (
+                input_bufs.ngram_context_buf[: request.num_reqs]
+                if input_bufs.ngram_context_buf is not None
+                else None
+            )
+            result = layer.forward_impl(
+                input_bufs.input_ids_buf[: request.num_tokens],
+                input_bufs.input_ids_buf[: request.num_tokens],
+                input_bufs.query_start_loc_buf[: request.num_reqs + 1],
+                ngram_context,
+                output_buffer=self._pinned_bufs[dp_rank][layer_name],
+            )
+            # The result is identical on every TP rank in this DP group.
+            # Each copy stream signals only after its DMA completes.
+            slices = tuple(slice(0, size) for size in result.shape)
+            for target in targets:
+                with torch.cuda.stream(target.copy_stream):
+                    target.gpu_output_buffer[slices].copy_(
+                        result[slices], non_blocking=True
+                    )
+                    target.sem.signal(target.copy_stream)

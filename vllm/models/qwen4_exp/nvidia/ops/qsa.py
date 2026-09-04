@@ -873,6 +873,14 @@ def qsa_sparse_paged_attention(
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
 
+    # GB300 has enough shared memory for a 64-token QSA tile. The same tile
+    # needs 72 KiB for Qwen3.8 Flash-Next's 256-wide heads, while SM75 is
+    # limited to 64 KiB per block. Narrow the tile before deriving the split
+    # count so the complete SM75 launch configuration is safe.
+    sm75_compatible = not current_platform.has_device_capability(80)
+    if sm75_compatible:
+        block_n = min(block_n, 32)
+
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
     max_useful_splits = 1 << (num_tiles.bit_length() - 1)
@@ -895,6 +903,10 @@ def qsa_sparse_paged_attention(
         )
 
     partial_grid = (q.shape[0], k_cache.shape[2], num_splits)
+    # Keep the narrower SM75 kernel single-stage. Newer GPUs retain the
+    # GB300-tuned two-stage pipeline.
+    num_stages = 1 if sm75_compatible else 2
+
     _qsa_sparse_paged_gqa_splitk_kernel[partial_grid](
         q,
         k_cache,
@@ -931,7 +943,7 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=partial_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     if num_splits == 1:
         return out

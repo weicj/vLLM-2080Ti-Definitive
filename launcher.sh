@@ -1180,6 +1180,16 @@ enforce_parallelism_constraints() {
       PP_MTP_ASYNC_AUTO_DISABLED=1
     fi
   fi
+
+  # PLE CPU offload has one shared request/output slot per DP rank. The PP
+  # async scheduler can advance a later microstep before that slot's reset is
+  # visible to the CPU worker, leaving the pipeline waiting indefinitely.
+  if [[ "$pp" =~ ^[2-9][0-9]*$ ]] && [[ "${VLLM_PLE_CPU_OFFLOAD:-0}" == "1" || "${VLLM_PLE_CPU_OFFLOAD:-}" == "true" ]]; then
+    if [[ "${NO_ASYNC_SCHEDULING:-0}" != "1" ]]; then
+      NO_ASYNC_SCHEDULING=1
+      PP_PLE_ASYNC_AUTO_DISABLED=1
+    fi
+  fi
 }
 
 list_nvidia_gpus() {
@@ -3767,6 +3777,9 @@ run_compile_prewarm() {
     if [[ "${PP_MTP_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
       echo "Async scheduling: disabled automatically for PP + MTP compatibility"
     fi
+    if [[ "${PP_PLE_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
+      echo "Async scheduling: disabled automatically for PP + PLE compatibility"
+    fi
     echo "Command: $RUNTIME_ROOT/.venv/bin/python -m vllm.entrypoints.openai.api_server $args_text"
     echo "============================================================"
   } > "$prewarm_log"
@@ -3943,6 +3956,9 @@ launch_server() {
   echo "  MTP graph policy: VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
   if [[ "${PP_MTP_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
     echo "  Async scheduling: disabled automatically for PP + MTP compatibility"
+  fi
+  if [[ "${PP_PLE_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
+    echo "  Async scheduling: disabled automatically for PP + PLE compatibility"
   fi
   echo "  TQ diagnostics: $(current_tq_diagnostics_label)"
   echo "  Strict tool calling: VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}"

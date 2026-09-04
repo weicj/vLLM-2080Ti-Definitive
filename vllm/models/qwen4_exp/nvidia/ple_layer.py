@@ -832,11 +832,34 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         positions = torch.arange(
             num_prefill_tokens, device=x_p.device, dtype=torch.int64
         )
+        # Piecewise CUDA Graph replay keeps the hidden-state tensor at the
+        # captured token count while the query offsets describe only the live
+        # batch. Route padded rows into a zeroed sink so they cannot index past
+        # the final real prefill request.
+        total_real_tokens = q_starts[num_prefills]
         req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
-        col_indices = positions - q_starts[req_indices]
+        valid_input_tokens = (positions < total_real_tokens) & (
+            req_indices < num_prefills
+        )
+        clamped_req_indices = req_indices.clamp_max(max(num_prefills - 1, 0))
+        col_indices = (
+            positions - q_starts[clamped_req_indices]
+        ).clamp_(0, max_len - 1)
+        pack_req_indices = torch.where(
+            valid_input_tokens,
+            clamped_req_indices,
+            torch.full_like(req_indices, num_prefills),
+        )
+        pack_col_indices = torch.where(
+            valid_input_tokens, col_indices, torch.zeros_like(col_indices)
+        )
 
-        packed_tokens = x_p.new_zeros((num_prefills, max_len, hidden_size))
-        packed_tokens[req_indices, col_indices] = x_p
+        # The final row absorbs graph padding and never updates persistent
+        # short-conv state.
+        packed_tokens = x_p.new_zeros((num_prefills + 1, max_len, hidden_size))
+        packed_tokens[pack_req_indices, pack_col_indices] = x_p * (
+            valid_input_tokens.view(-1, 1).to(x_p.dtype)
+        )
         packed_tokens = packed_tokens.transpose(1, 2).contiguous()
 
         state_indices = state_indices_tensor_p[:num_prefills].to(
@@ -852,14 +875,26 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         if self.conv_state_len > 0:
             if conv_state.shape[0] == 0:
                 state = conv_state.new_zeros(
-                    (num_prefills, hidden_size, self.conv_state_len),
+                    (num_prefills + 1, hidden_size, self.conv_state_len),
                     dtype=x_p.dtype,
                 )
             else:
                 state = conv_state.index_select(0, state_indices)[
                     ..., : self.conv_state_len
                 ].to(x_p.dtype)
-            use_initial_mask = (valid_state & has_initial).view(num_prefills, 1, 1)
+                state = torch.cat(
+                    (
+                        state,
+                        state.new_zeros((1, hidden_size, self.conv_state_len)),
+                    ),
+                    dim=0,
+                )
+            use_initial_mask = torch.cat(
+                (
+                    valid_state & has_initial,
+                    torch.zeros(1, device=valid_state.device, dtype=torch.bool),
+                )
+            ).view(num_prefills + 1, 1, 1)
             initial_state = torch.where(
                 use_initial_mask,
                 state,
@@ -878,12 +913,23 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
 
         token_positions = torch.arange(max_len, device=x_p.device, dtype=torch.int64)
-        valid_tokens = token_positions.view(1, max_len) < lengths.view(num_prefills, 1)
-        valid_output_mask = valid_tokens & valid_state.to(device=x_p.device).view(
+        valid_output_tokens = token_positions.view(1, max_len) < lengths.view(
             num_prefills, 1
         )
+        valid_output_mask = valid_output_tokens & valid_state.to(device=x_p.device).view(
+            num_prefills, 1
+        )
+        valid_output_mask = torch.cat(
+            (
+                valid_output_mask,
+                torch.zeros(
+                    (1, max_len), device=x_p.device, dtype=torch.bool
+                ),
+            )
+        )
         conv_output.masked_fill_(~valid_output_mask.unsqueeze(-1), 0)
-        output.copy_(conv_output[req_indices, col_indices])
+        output.copy_(conv_output[pack_req_indices, pack_col_indices])
+        output.mul_(valid_input_tokens.view(-1, 1).to(output.dtype))
 
         if self.conv_state_len > 0 and conv_state.shape[0] > 0:
             state_starts = lengths.to(device=history.device, dtype=torch.int64).view(

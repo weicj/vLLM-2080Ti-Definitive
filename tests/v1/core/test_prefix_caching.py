@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
@@ -111,6 +112,59 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
     )
     return KVCacheManager(kv_cache_config, **kwargs)
+
+
+def test_align_mamba_uses_gcd_hash_blocks() -> None:
+    """Flash-Next PLE/GDN states retain fine-grained prefix hashes in align mode."""
+    config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=12544,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["gdn"],
+                MambaSpec(
+                    block_size=784,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float16,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["ple"],
+                MambaSpec(
+                    block_size=4,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float16,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=12544,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
+
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+        config, vllm_config
+    )
+
+    assert scheduler_block_size == 12544
+    assert hash_block_size == 4
 
 
 def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:

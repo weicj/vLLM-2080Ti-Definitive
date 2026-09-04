@@ -66,3 +66,49 @@ def test_qsa_sparse_paged_attention_fp16_matches_reference() -> None:
             expected[row, head] = (weights @ values).to(torch.float16)
 
     torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qsa_sparse_paged_attention_flash_next_capture_shape() -> None:
+    """Keep the 256-wide TP capture tile launchable on SM75."""
+    device = torch.device("cuda")
+    rows, num_query_heads, head_dim = 512, 6, 256
+    page_size, selected_tokens = 16, 256
+
+    query = torch.randn(
+        rows,
+        num_query_heads,
+        head_dim,
+        dtype=torch.float16,
+        device=device,
+    )
+    key_cache = torch.randn(
+        16,
+        page_size,
+        1,
+        head_dim,
+        dtype=torch.float16,
+        device=device,
+    )
+    value_cache = torch.randn_like(key_cache)
+    logical_indices = (
+        torch.arange(selected_tokens, dtype=torch.int32, device=device)
+        .unsqueeze(0)
+        .expand(rows, -1)
+        .contiguous()
+    )
+    block_table = torch.arange(16, dtype=torch.int32, device=device).unsqueeze(0)
+    token_to_req = torch.zeros(rows, dtype=torch.int32, device=device)
+
+    actual = qsa_sparse_paged_attention(
+        query,
+        key_cache,
+        value_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+    )
+    torch.cuda.synchronize()
+
+    assert actual.shape == query.shape
+    assert torch.isfinite(actual).all()

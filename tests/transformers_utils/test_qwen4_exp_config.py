@@ -9,11 +9,19 @@ import torch
 
 from vllm.models.qwen4_exp.config import Qwen4ExpConfig, Qwen4ExpTextConfig
 from vllm.models.qwen4_exp.nvidia import model as qwen4_exp_model
+from vllm.models.qwen4_exp.nvidia import model_state as qwen4_exp_model_state
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    get_conv_copy_spec,
+    get_temporal_copy_spec,
+)
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpConfig as ExportedQwen4ExpConfig,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
 
 
 def _text_config(**overrides: object) -> Qwen4ExpTextConfig:
@@ -86,16 +94,88 @@ def test_qwen4_exp_model_state_allows_pipeline_parallel_ple() -> None:
         model_config=SimpleNamespace(hf_text_config=_text_config()),
         parallel_config=SimpleNamespace(pipeline_parallel_size=3),
     )
-    with patch.object(MambaHybridModelState, "__init__", init_base_state):
+    model = torch.nn.Module()
+    model.ple = torch.nn.Identity()
+    with (
+        patch.object(MambaHybridModelState, "__init__", init_base_state),
+        patch.object(
+            qwen4_exp_model_state,
+            "get_pp_group",
+            return_value=SimpleNamespace(is_first_rank=True),
+        ),
+    ):
         state = Qwen4ExpModelState(
             vllm_config,
-            torch.nn.Identity(),
+            model,
             None,
             torch.device("cpu"),
         )
 
     assert state.uses_ngram_embedding
+    assert state.has_local_ple
     assert state.ngram_context.shape == (4, 2)
+
+
+def test_qwen4_exp_model_state_skips_ple_inputs_without_local_ple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = object.__new__(Qwen4ExpModelState)
+    state.uses_ngram_embedding = True
+    state.has_local_ple = False
+    monkeypatch.setattr(
+        MambaHybridModelState,
+        "prepare_inputs",
+        lambda *_args: {"base": True},
+    )
+
+    assert state.prepare_inputs(object(), object()) == {"base": True}
+
+
+def test_qwen4_exp_align_cache_accepts_heterogeneous_mamba_states() -> None:
+    gdn_spec = MambaSpec(
+        shapes=((4, 8), (8, 4)),
+        dtypes=(torch.float16, torch.float16),
+        block_size=16,
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+    )
+    ple_spec = MambaSpec(
+        shapes=((4, 32),),
+        dtypes=(torch.float16,),
+        block_size=16,
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        mamba_cache_mode="align",
+        tp_replicated=True,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["gdn"], kv_cache_spec=gdn_spec),
+            KVCacheGroupSpec(layer_names=["ple"], kv_cache_spec=ple_spec),
+        ]
+    )
+    state = object.__new__(MambaHybridModelState)
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+
+    group_ids, mamba_spec = state._get_mamba_group_info(kv_cache_config)
+    ctx = MambaSpecDecodeGPUContext.create(
+        max_num_reqs=4,
+        kv_cache_config=kv_cache_config,
+        device=torch.device("cpu"),
+        make_buffer=lambda *_args, **_kwargs: SimpleNamespace(),
+        copy_funcs={
+            MambaAttentionBackendEnum.GDN_ATTN: (
+                get_conv_copy_spec,
+                get_temporal_copy_spec,
+            ),
+            MambaAttentionBackendEnum.SHORT_CONV: (get_conv_copy_spec,),
+        },
+    )
+
+    assert group_ids == [0, 1]
+    assert mamba_spec.block_size == 16
+    assert ctx.mamba_group_ids == [0, 1]
+    assert ctx.num_states == 3
 
 
 def test_qwen4_exp_hyper_connection_uses_model_dtype(monkeypatch) -> None:
