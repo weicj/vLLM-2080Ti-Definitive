@@ -31,3 +31,18 @@ def test_ple_wait_schema_orders_on_hidden_states() -> None:
     }
 
     assert write_args == {"hidden_states"}
+
+
+def test_qwen4_exp_ple_short_conv_schema_mutates_output() -> None:
+    # The custom op fills the caller-owned output buffer in place.
+    from vllm.models.qwen4_exp.nvidia import ple_layer  # noqa: F401
+
+    schema = torch.ops.vllm.qwen4_exp_ple_short_conv.default._schema
+    write_args = {
+        arg.name
+        for arg in schema.arguments
+        if arg.alias_info is not None and arg.alias_info.is_write
+    }
+
+    assert write_args == {"output"}
+    assert len(schema.returns) == 0

@@ -1237,7 +1237,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         gated_value = gate * value.unsqueeze(-2)
         normalized = self._apply_norm(self.norm_conv, gated_value).flatten(-2)
         conv_output = torch.zeros_like(normalized)
-        conv_output = torch.ops.vllm.qwen4_exp_ple_short_conv(
+        torch.ops.vllm.qwen4_exp_ple_short_conv(
             normalized,
             conv_output,
             self.prefix,
@@ -1249,25 +1249,24 @@ def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
+) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
     result = layer._short_conv(inputs)
     output[: result.shape[0]].copy_(result)
-    return output
 
 
 def qwen4_exp_ple_short_conv_fake(
     inputs: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
-    del inputs, layer_name
-    return output
+) -> None:
+    del inputs, output, layer_name
 
 
 direct_register_custom_op(
     op_name="qwen4_exp_ple_short_conv",
     op_func=qwen4_exp_ple_short_conv,
+    mutates_args=["output"],
     fake_impl=qwen4_exp_ple_short_conv_fake,
 )
 
