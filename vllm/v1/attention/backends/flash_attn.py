@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
+    reshape_and_cache_flash,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
@@ -39,7 +40,6 @@ if is_flash_attn_varlen_func_available():
         flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
-        reshape_and_cache_flash,
     )
 import vllm.envs as envs
 from vllm.config import (

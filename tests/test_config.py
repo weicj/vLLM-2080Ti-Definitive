@@ -264,6 +264,17 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="RadixArk/Qwen3.8-Flash-Next-NVFP4",
+                architectures=["Qwen4ExpForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=True,
+                is_hybrid=True,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="state-spaces/mamba-130m-hf",
                 architectures=["MambaForCausalLM"],
                 runner_type="generate",

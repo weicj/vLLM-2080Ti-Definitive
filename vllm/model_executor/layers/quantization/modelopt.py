@@ -1014,6 +1014,12 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
+        if quant_method == "NVFP4" and envs.VLLM_FORCE_NVFP4_W4A16:
+            logger.warning_once(
+                "VLLM_FORCE_NVFP4_W4A16=1: loading ModelOpt NVFP4 weights "
+                "through the Marlin W4A16 fallback."
+            )
+            quant_method = "W4A16_NVFP4"
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
@@ -2419,6 +2425,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "FP8":
                 return ModelOptFp8LinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
+                if self.nvfp4_config.quant_method == "W4A16_NVFP4":
+                    return ModelOptNvFp4W4A16LinearMethod(
+                        self.w4a16_nvfp4_config
+                    )
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
@@ -2434,6 +2444,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     moe_config=layer.moe_config,
                 )
             if quant_algo == "NVFP4":
+                if self.nvfp4_config.quant_method == "W4A16_NVFP4":
+                    return ModelOptNvFp4FusedMoE(
+                        quant_config=self.w4a16_nvfp4_config,
+                        moe_config=layer.moe_config,
+                    )
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,

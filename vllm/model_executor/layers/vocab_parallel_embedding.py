@@ -248,6 +248,7 @@ class VocabParallelEmbedding(PluggableLayer):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         super().__init__()
 
@@ -281,8 +282,7 @@ class VocabParallelEmbedding(PluggableLayer):
         )
         self.embedding_dim = embedding_dim
 
-        quant_method = None
-        if quant_config is not None:
+        if quant_method is None and quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()

@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.ple_offload_layer import PleOffloadLayer
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -56,6 +57,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.ple_offload.connector import PleOffloadConnector
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -262,6 +264,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self._ple_offload_connector: PleOffloadConnector | None = None
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -283,6 +286,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
+
+    def _setup_ple_offload(self, ipc_addr: str) -> bool:
+        """Bind local PLE placeholders to the shared CPU offload process.
+
+        In pipeline parallel mode only the stage that owns a PLE layer needs
+        this connector.  Other stages still retain the normal model runner.
+        """
+        if not any(
+            isinstance(module, PleOffloadLayer) for module in self.model.modules()
+        ):
+            return False
+        query_start_loc_source = getattr(self.model_state, "ple_query_start_loc", None)
+        ngram_context_source = getattr(self.model_state, "ngram_context", None)
+        if not isinstance(query_start_loc_source, torch.Tensor):
+            raise RuntimeError("PLE offload requires a query_start_loc source")
+        if not isinstance(ngram_context_source, torch.Tensor):
+            raise RuntimeError("PLE offload requires an ngram_context source")
+        self._ple_offload_connector = PleOffloadConnector(
+            self.vllm_config,
+            self.model,
+            self.device,
+            ipc_addr,
+            input_ids_source=self.input_buffers.input_ids,
+            query_start_loc_source=query_start_loc_source,
+            ngram_context_source=ngram_context_source,
+        )
+        return True
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -768,6 +798,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
+            if self._ple_offload_connector is not None:
+                self._ple_offload_connector.signal_dummy_outputs(self.max_num_tokens)
             self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
@@ -782,6 +814,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture()
+            if self._ple_offload_connector is not None:
+                self._ple_offload_connector.release_outputs()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1363,7 +1397,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         }
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
-            model_inputs["input_ids"] = None
+            # Qwen4-Exp PLE layers can be placed on a later pipeline stage.
+            # Its n-gram lookup therefore needs the raw IDs on every stage.
+            if not self.model.requires_raw_input_tokens:
+                model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
 
             # Prepare the intermediate tensors.
@@ -1381,6 +1418,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Update the EPLB meta.
         self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.prepare_forward(
+                input_batch.num_reqs,
+                input_batch.num_tokens_after_padding,
+                dummy_run,
+            )
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1421,6 +1465,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
+
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.release_outputs()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -1655,6 +1702,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.close()
+            self._ple_offload_connector = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):

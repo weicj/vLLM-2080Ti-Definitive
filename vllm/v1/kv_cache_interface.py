@@ -18,6 +18,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -114,6 +115,24 @@ class KVCacheSpec:
     block_size: int
 
     @property
+    def prefix_cacheable(self) -> bool:
+        """Whether this cache owner participates in prefix hashing."""
+        return True
+
+    @property
+    def tokens_per_state(self) -> int:
+        """Number of tokens represented by one stored state."""
+        return 1
+
+    @property
+    def num_states(self) -> int:
+        """Number of kernel states contained in one scheduler block."""
+        tokens_per_state = self.tokens_per_state
+        if tokens_per_state <= 0:
+            return 1
+        return max(1, self.block_size // tokens_per_state)
+
+    @property
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
@@ -188,6 +207,14 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
+
+    @property
+    def num_heads(self) -> int:
+        return self.num_kv_heads
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        return self.page_size_bytes // max(1, self.block_size * self.num_heads)
 
     @property
     def unpadded_page_size_bytes(self) -> int:
@@ -350,6 +377,23 @@ class FullAttentionSpec(AttentionSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class CircularBufferSpec(FullAttentionSpec):
+    """One per-request ring page used by Qwen4-Exp QSA compression state."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config, max_len
+        return 1
+
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return
@@ -395,6 +439,10 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
+
+    @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
 
     def __post_init__(self):
         super().__post_init__()
@@ -714,6 +762,7 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    tp_replicated: bool = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -843,6 +892,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
 
     kv_cache_specs: dict[str, KVCacheSpec]
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
+
+    @property
+    def first_spec(self) -> KVCacheSpec:
+        return next(iter(self.kv_cache_specs.values()))
 
     @property
     def page_size_bytes(self) -> int:
