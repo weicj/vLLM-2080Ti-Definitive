@@ -99,7 +99,7 @@ NON_INTERACTIVE=1 ./launcher.sh
 - `safe`：用于排障和兼容性的保守回退模式。
 
 Profile 只选择路线参数。GPU、端口、模型路径、chat template 和 reasoning 默认值
-由 launcher 统一管理。
+由 launcher 统一管理；实验性 profile 也可以携带已验证的 TP/PP 布局。
 
 ## MTP 与 KV 精度
 

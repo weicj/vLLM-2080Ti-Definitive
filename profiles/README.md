@@ -74,5 +74,19 @@ was disabled.
 | `qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 273,586 | 7378 / 128.7 |
 | `qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env` | normal | 136K | FP16 | 0 | text+image | 146,485 | 5965.8 / 127.6 |
 
+### Qwen3.8 Flash-Next NVFP4 experimental PP routes
+
+These routes target eight Tesla T10 GPUs (`0,2,3,4,6,7,8,9`) on `.31` and
+use ModelOpt NVFP4 through the SM75 Marlin W4A16 fallback, SSD PLE offload,
+FP16 KV, non-eager CUDA Graphs, and `max_num_batched_tokens=512`.
+
+| Profile | TP/PP | GPU KV tokens | 4K/128 prefill / decode tok/s |
+|---|---:|---:|---:|
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 121,139 | 1,615.30 / 21.99 |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 131,872 | 1,979.79 / 10.74 |
+
+Both are experimental engineering routes; TP2xPP2 is intentionally not
+shipped as a validated profile.
+
 Use `./launcher.sh --print-config` after selecting a profile to inspect the
 resolved route before starting the service.

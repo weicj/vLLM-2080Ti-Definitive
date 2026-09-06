@@ -2,6 +2,16 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## Unreleased - Qwen3.8 Flash-Next support
+
+- Adds Qwen4-Exp model/config registration and Qwen3.8 Flash-Next NVFP4 loading
+  through the SM75 Marlin W4A16 fallback.
+- Hardens PLE offload model discovery for pipeline-parallel workers and removes
+  the `ple_offload_wait` functionalization wrapper that breaks PyTorch 2.13
+  Inductor graph lowering.
+- Adds two experimental eight-T10 profiles: TP4xPP2 and TP2xPP4, with FP16 KV,
+  chunk size 512, non-eager CUDA Graph execution, and SSD PLE offload.
+
 ## v0.2.1-pre3 - 2026-08-27
 
 `v0.2.1-pre3` is the validated true-concurrency candidate for the CUDA 13 based 0.2.x line. The maintained 0.1.x line remains the project's primary stable release line.

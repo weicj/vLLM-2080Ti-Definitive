@@ -71,4 +71,17 @@ tok/s。</small> `-` 表示没有稳定测量值。详细证据见
 | `qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 273,586 | 7378 / 128.7 |
 | `qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env` | normal | 136K | FP16 | 0 | text+image | 146,485 | 5965.8 / 127.6 |
 
+### Qwen3.8 Flash-Next NVFP4 实验性 PP 路线
+
+以下路线使用 `.31` 的 8 张 Tesla T10（`0,2,3,4,6,7,8,9`），ModelOpt NVFP4
+经 SM75 Marlin W4A16 fallback，SSD PLE offload、FP16 KV、非 eager CUDA Graph，
+并统一设置 `max_num_batched_tokens=512`。
+
+| Profile | TP/PP | GPU KV tokens | 4K/128 prefill / decode tok/s |
+|---|---:|---:|---:|
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 121,139 | 1,615.30 / 21.99 |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 131,872 | 1,979.79 / 10.74 |
+
+两者均为实验性工程路线；TP2xPP2 不作为已验证 profile 发布。
+
 选定 profile 后，启动服务前执行 `./launcher.sh --print-config` 检查最终生效的路线参数。

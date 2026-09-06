@@ -21,11 +21,12 @@ Class structure mirrors the GPU worker pattern in multiproc_executor.py:
 
 import contextlib
 import multiprocessing.process
+import os
 import pickle
 import signal
 import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from typing import Any, cast
@@ -64,6 +65,16 @@ from vllm.v1.ple_offload.protocol import (
 )
 
 logger = init_logger(__name__)
+
+
+@contextlib.contextmanager
+def _without_pp_layer_partition() -> Iterator[None]:
+    partition = os.environ.pop("VLLM_PP_LAYER_PARTITION", None)
+    try:
+        yield
+    finally:
+        if partition is not None:
+            os.environ["VLLM_PP_LAYER_PARTITION"] = partition
 
 
 @dataclass
@@ -364,7 +375,13 @@ class PleOffloadRunner:
         # memory. All transformer, MoE, and vision parameters remain on meta.
         logger.info("Initializing model structure for PLE weight discovery ...")
         model_dtype = cast(torch.dtype, model_config.dtype)
-        with set_default_torch_dtype(model_dtype), torch.device("meta"):
+        # The offload worker has an isolated PP1 world and must discover PLE
+        # layers across the complete model, independent of the GPU PP layout.
+        with (
+            _without_pp_layer_partition(),
+            set_default_torch_dtype(model_dtype),
+            torch.device("meta"),
+        ):
             model = initialize_model(
                 vllm_config=self.vllm_config,
                 model_config=model_config,
