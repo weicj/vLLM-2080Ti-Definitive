@@ -11,6 +11,9 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
   Inductor graph lowering.
 - Adds two experimental eight-T10 profiles: TP4xPP2 and TP2xPP4, with FP16 KV,
   chunk size 512, non-eager CUDA Graph execution, and SSD PLE offload.
+- Retunes the QSA sparse prefill dispatch on pre-Ampere GPUs (SM70/SM75) to
+  use the validated `BLOCK_N=16` and four-warps profile, avoiding the
+  GB300-shaped D=256 tile that can exceed SM75 shared memory.
 
 ## v0.2.1-pre3 - 2026-08-27
 

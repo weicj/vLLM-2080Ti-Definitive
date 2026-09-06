@@ -858,28 +858,16 @@ def qsa_sparse_paged_attention(
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
-    small_profile_limit = 8 if block_m <= 8 else 4
+    device_id = q.device.index if q.device.index is not None else 0
+    is_pre_ampere = not current_platform.has_device_capability(
+        80, device_id=device_id
+    )
 
-    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
-        block_n, target_splits, partial_warps = 16, 64, 4
-    elif base_programs < 32:
-        block_n, target_splits, partial_warps = 16, 32, 4
-    elif base_programs <= 256:
-        block_n, target_splits, partial_warps = 64, 8, 2
-    elif base_programs <= 512:
-        block_n, target_splits, partial_warps = 64, 4, 2
-    else:
-        block_n, target_splits, partial_warps = 64, 1, 2
-
-    # GB300 has enough shared memory for a 64-token QSA tile. The same tile
-    # needs 72 KiB for Qwen3.8 Flash-Next's 256-wide heads, while SM75 is
-    # limited to 64 KiB per block. Narrow the tile before deriving the split
-    # count so the complete SM75 launch configuration is safe.
-    sm75_compatible = not current_platform.has_device_capability(80)
-    if sm75_compatible:
-        block_n = min(block_n, 32)
+    block_n, target_splits, partial_warps = _qsa_sparse_launch_profile(
+        base_programs,
+        block_m,
+        is_pre_ampere,
+    )
 
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
@@ -903,9 +891,9 @@ def qsa_sparse_paged_attention(
         )
 
     partial_grid = (q.shape[0], k_cache.shape[2], num_splits)
-    # Keep the narrower SM75 kernel single-stage. Newer GPUs retain the
+    # Keep the narrower pre-Ampere kernel single-stage. Newer GPUs retain the
     # GB300-tuned two-stage pipeline.
-    num_stages = 1 if sm75_compatible else 2
+    num_stages = 1 if is_pre_ampere else 2
 
     _qsa_sparse_paged_gqa_splitk_kernel[partial_grid](
         q,
@@ -963,6 +951,33 @@ def qsa_sparse_paged_attention(
         num_stages=1,
     )
     return out
+
+
+def _qsa_sparse_launch_profile(
+    base_programs: int,
+    block_m: int,
+    is_pre_ampere: bool,
+) -> tuple[int, int, int]:
+    """Return BLOCK_N, target splits, and warps for sparse QSA."""
+    small_profile_limit = 8 if block_m <= 8 else 4
+    if base_programs <= small_profile_limit:
+        block_n, target_splits, partial_warps = 16, 64, 4
+    elif base_programs < 32:
+        block_n, target_splits, partial_warps = 16, 32, 4
+    elif base_programs <= 256:
+        block_n, target_splits, partial_warps = 64, 8, 2
+    elif base_programs <= 512:
+        block_n, target_splits, partial_warps = 64, 4, 2
+    else:
+        block_n, target_splits, partial_warps = 64, 1, 2
+    if is_pre_ampere and block_n == 64:
+        # SM75 has a 64 KiB shared-memory limit and cannot launch the
+        # GB300-tuned 64-column, D=256 tile. On both SM70 and SM75, four
+        # warps also expose more parallelism than the original two-warp
+        # profile. Keep the split count from the existing regime while using
+        # the narrow tile validated in #441/#469.
+        block_n, partial_warps = 16, 4
+    return block_n, target_splits, partial_warps
 
 
 def qsa_store_cache_rows(
