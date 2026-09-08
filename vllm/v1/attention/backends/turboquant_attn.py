@@ -1175,15 +1175,28 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     else None
                 ),
             )
-            attn_out[:num_decode_tokens] = self._decode_attention(
-                q[:num_decode_tokens],
-                kv_cache,
-                decode_meta,
-                Pi,
-                centroids,
-                PiT,
-                layer,
-            )
+            if num_decode_tokens > num_decodes:
+                # Spec-as-decode admits multiple query tokens per request.
+                # Expand request metadata into causal per-query rows before
+                # using the decode kernel, just as for a pure MTP batch.
+                attn_out[:num_decode_tokens] = self._spec_decode_attention(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_meta,
+                    Pi,
+                    centroids,
+                    PiT,
+                )
+            else:
+                attn_out[:num_decode_tokens] = self._decode_attention(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_meta,
+                    Pi,
+                    centroids,
+                    PiT,
+                    layer,
+                )
 
             # --- Prefill portion (remaining requests) ---
             # CRITICAL: use prefill-specific max_seq_len so flash_attn's

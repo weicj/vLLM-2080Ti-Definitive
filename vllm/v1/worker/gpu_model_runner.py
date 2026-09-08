@@ -3874,6 +3874,12 @@ class GPUModelRunner(
 
     @contextmanager
     def synchronize_input_prep(self):
+        # The prior step's speculative postprocess owns the accepted-count
+        # D2H and still reads persistent block/index buffers. Order it before
+        # this step mutates any persistent batch state.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+
         if self.prepare_inputs_event is None:
             yield
             return
