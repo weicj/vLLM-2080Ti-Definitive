@@ -17,3 +17,7 @@
 - `safe` 是诊断或兼容性回退档，不是性能推荐路线。
 - FP16/default KV 是质量参考；INT8 和 TurboQuant KV 路线必须分别完成质量和容量验证。
 - 实验性或未验证路线必须明确标注，不能仅凭 profile 名称晋升为推荐配置。
+
+对 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)，
+实验性 TP2xPP4 路线有一组 6 张 T10 + 2 张 RTX 2080 Ti 的异构启动/容量参考：
+`GPU_UTIL=0.92` 下为 152,492 GPU KV tokens。

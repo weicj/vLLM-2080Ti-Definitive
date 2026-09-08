@@ -73,14 +73,20 @@ tok/s。</small> `-` 表示没有稳定测量值。详细证据见
 
 ### Qwen3.8 Flash-Next NVFP4 实验性 PP 路线
 
-以下路线使用 `.31` 的 8 张 Tesla T10（`0,2,3,4,6,7,8,9`），ModelOpt NVFP4
-经 SM75 Marlin W4A16 fallback，SSD PLE offload、FP16 KV、非 eager CUDA Graph，
-并统一设置 `max_num_batched_tokens=512`。
+模型：[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)。
+这是 SM75 上的实验性功能验证路线：NVFP4/Marlin、磁盘 PLE、FP16 KV、无 MTP、非 eager
+CUDA Graph。以下为仓库统一口径的固定 4K/128 形状中位数，仅用于对齐比较；受多卡通信复杂度
+和 CPU 能力限制，真实工作负载性能可能降到个位数 tok/s。
 
-| Profile | TP/PP | GPU KV tokens | 4K/128 prefill / decode tok/s |
-|---|---:|---:|---:|
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 121,139 | 1,615.30 / 21.99 |
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 131,872 | 1,979.79 / 10.74 |
+| Profile | TP/PP | 后端 | 上下文 / util | GPU KV tokens | Prefill / decode tok/s | 路线定位 |
+|---|---:|---|---:|---:|---:|---|
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | 102,591 | **2379.14 / 24.92** | 推荐均衡路线 |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | FlashQLA + PYNCCL | 90K / 0.96 | 100,031 | **1697.99 / 28.18** | Decode 优先 |
+| TP2xPP4 异构容量参考 | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | **152,492** | — | 6 张 T10 + 2 张 RTX 2080 Ti；仅作启动/容量参考 |
+
+TP2xPP4 是推荐的均衡路线；TP4xPP2 偏向 decode。CAR `auto` 仅用于 TP 组全量 NVLink 互联且 P2P 可达的情况，
+PCIe-only 组使用 NCCL/PYNCCL。PP stage 之间可混用显卡型号，但每个 TP 组必须 P2P 有效。
+真实 Agent/多轮性能和输出质量都应单独验证；启动前执行 `./launcher.sh --print-config`。
 
 两者均为实验性工程路线；TP2xPP2 不作为已验证 profile 发布。
 

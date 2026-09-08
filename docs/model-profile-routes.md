@@ -17,3 +17,7 @@ Every benchmark record must identify the exact checkpoint, weight precision, KV 
 - `safe` is a diagnosis or compatibility fallback and is not a performance recommendation.
 - FP16/default KV is the quality reference; INT8 and TurboQuant KV routes require their own quality and capacity evidence.
 - Experimental or unvalidated routes must remain documented as such and must not be promoted by profile naming alone.
+
+For [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4),
+the experimental TP2xPP4 route has a heterogeneous six-T10/two-RTX-2080-Ti
+startup/capacity reference of 152,492 GPU KV tokens at `GPU_UTIL=0.92`.

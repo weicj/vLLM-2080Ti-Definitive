@@ -76,14 +76,23 @@ was disabled.
 
 ### Qwen3.8 Flash-Next NVFP4 experimental PP routes
 
-These routes target eight Tesla T10 GPUs (`0,2,3,4,6,7,8,9`) on `.31` and
-use ModelOpt NVFP4 through the SM75 Marlin W4A16 fallback, SSD PLE offload,
-FP16 KV, non-eager CUDA Graphs, and `max_num_batched_tokens=512`.
+Model: [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4).
+Experimental SM75 functional-validation routes: NVFP4/Marlin, disk PLE, FP16
+KV, no MTP, non-eager CUDA Graphs. Results are fixed 4K/128 medians used to
+align with the repository benchmark format; real workloads can fall to
+single-digit tok/s when multi-GPU communication or CPU capacity is limiting.
 
-| Profile | TP/PP | GPU KV tokens | 4K/128 prefill / decode tok/s |
-|---|---:|---:|---:|
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 121,139 | 1,615.30 / 21.99 |
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 131,872 | 1,979.79 / 10.74 |
+| Profile | TP/PP | Backend | Context / util | GPU KV tokens | Prefill / decode tok/s | Route guidance |
+|---|---:|---|---:|---:|---:|---|
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | 102,591 | **2379.14 / 24.92** | Recommended balance |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | FlashQLA + PYNCCL | 90K / 0.96 | 100,031 | **1697.99 / 28.18** | Decode priority |
+| TP2xPP4 heterogeneous capacity reference | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | **152,492** | — | 6x T10 + 2x RTX 2080 Ti; startup/capacity only |
+
+TP2xPP4 is the recommended balance route; TP4xPP2 prioritizes decode.
+CAR `auto` is used only for fully NVLink-connected, P2P-valid TP groups;
+PCIe-only groups use NCCL/PYNCCL. PP stages can mix GPU models, but each TP
+group must remain P2P-valid. Validate real Agent/multi-turn workloads and
+output quality separately; use `./launcher.sh --print-config` before launch.
 
 Both are experimental engineering routes; TP2xPP2 is intentionally not
 shipped as a validated profile.
