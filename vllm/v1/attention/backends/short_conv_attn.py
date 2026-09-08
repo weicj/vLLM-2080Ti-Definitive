@@ -141,12 +141,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         self.spec_sequence_masks = torch.empty(
             (self.decode_cudagraph_max_bs,), dtype=torch.bool, device=device
         )
-        self.spec_token_indx = torch.empty(
-            (self.decode_cudagraph_max_tokens,), dtype=torch.int32, device=device
-        )
-        self.non_spec_token_indx = torch.empty(
-            (self.decode_cudagraph_max_tokens,), dtype=torch.int32, device=device
-        )
         self.spec_query_start_loc = torch.empty(
             (self.decode_cudagraph_max_bs + 1,), dtype=torch.int32, device=device
         )
@@ -252,11 +246,11 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     ) -> PleShortConvAttentionMetadata:
         m = common_attn_metadata
         spec_sequence_masks_cpu: torch.Tensor | None = None
-        # Detect speculative-decode requests. We use -1 to mark prefill and
-        # plain-decode requests, so any value >= 0 is a (multi-query)
-        # spec-decode request.
+        # Detect speculative-decode requests. We use -1 for prefill/plain
+        # decode and require at least one draft token for the speculative path;
+        # zero accepted drafts is an ordinary one-token decode.
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
-            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
+            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] > 0
             if bool(candidate_mask.any().item()):
                 spec_sequence_masks_cpu = candidate_mask
 

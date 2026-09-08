@@ -83,7 +83,10 @@ def test_qsa_sparse_paged_attention_fp16_matches_reference(
     torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not HAS_TRITON,
+    reason="requires NVIDIA CUDA and Triton",
+)
 def test_qsa_sparse_paged_attention_flash_next_capture_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,7 +135,10 @@ def test_qsa_sparse_paged_attention_flash_next_capture_shape(
     assert torch.isfinite(actual).all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not HAS_TRITON,
+    reason="requires NVIDIA CUDA and Triton",
+)
 def test_qsa_sm75_torch_cache_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -186,7 +192,10 @@ def test_qsa_sm75_torch_cache_fallback(
     assert first_positions[7].tolist() == [4, 4, 4]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not HAS_TRITON,
+    reason="requires NVIDIA CUDA and Triton",
+)
 def test_qsa_sm75_torch_topk_matches_torch_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -107,7 +107,18 @@ class DiskMappedPLEEmbedding(nn.Module):
             raise ValueError("invalid disk-mapped PLE embedding dimensions")
         root = Path(checkpoint_path)
         if not root.is_dir():
-            raise FileNotFoundError(f"PLE checkpoint directory not found: {root}")
+            # The normal model loader accepts a Hugging Face repo ID and
+            # resolves it to a local snapshot before opening weights.  PLE's
+            # disk-mapped reader can also be constructed directly, so mirror
+            # that behavior here instead of treating a repo ID as a directory.
+            try:
+                from huggingface_hub import snapshot_download
+
+                root = Path(snapshot_download(repo_id=str(checkpoint_path)))
+            except Exception as error:
+                raise FileNotFoundError(
+                    f"PLE checkpoint directory not found or downloadable: {root}"
+                ) from error
         index_path = root / "model.safetensors.index.json"
         if not index_path.is_file():
             raise FileNotFoundError(
