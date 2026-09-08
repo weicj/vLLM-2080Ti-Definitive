@@ -91,3 +91,6 @@ PCIe-only 组使用 NCCL/PYNCCL。PP stage 之间可混用显卡型号，但每�
 两者均为实验性工程路线；TP2xPP2 不作为已验证 profile 发布。
 
 选定 profile 后，启动服务前执行 `./launcher.sh --print-config` 检查最终生效的路线参数。
+
+异构 152,492-token 行使用 NVFP4 权重、FP16 KV、MTP=0、100K 上下文和非 eager CUDA Graph，
+测量方式是启动/健康检查/真实请求容量探测，不是吞吐测试。

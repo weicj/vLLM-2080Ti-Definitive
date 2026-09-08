@@ -776,6 +776,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
             cached_state[..., : self.conv_state_len] = safe_next_state
             conv_state.index_copy_(0, state_indices, cached_state)
+            # Block zero is the allocator's reserved null block. Padded graph
+            # rows are remapped there for safe gathers; restore its invariant
+            # after the fixed-shape write.
+            conv_state[NULL_BLOCK_ID].zero_()
 
         return output
 
@@ -955,6 +959,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
             existing_state[..., : self.conv_state_len] = safe_next_state
             conv_state.index_copy_(0, state_indices, existing_state)
+            conv_state[NULL_BLOCK_ID].zero_()
         return output
 
     def _short_conv_dilated_spec_batched(
@@ -1090,6 +1095,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
             cached_state[..., :state_capacity] = next_state
             conv_state.index_copy_(0, state_indices, cached_state)
+            conv_state[NULL_BLOCK_ID].zero_()
 
         return output
 

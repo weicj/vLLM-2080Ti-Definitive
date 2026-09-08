@@ -15,7 +15,7 @@ import zmq
 from cuda.bindings import driver as cuda_driver
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.distributed.parallel_state import get_dp_group, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.ple_offload_layer import (
     CpuGpuSemaphore,
@@ -57,6 +57,7 @@ class PleOffloadConnector:
         self.device = device
         self.dp_rank = get_dp_group().rank_in_group
         self.tp_rank = get_tp_group().rank_in_group
+        self.pipeline_rank = get_pp_group().rank_in_group
         self._layers = self._setup_layers(vllm_config, model)
 
         # Both runner paths stage into the same shared buffers. TP0 registers
@@ -205,6 +206,7 @@ class PleOffloadConnector:
             ),
             tp_rank=self.tp_rank,
             dp_rank=self.dp_rank,
+            pipeline_rank=self.pipeline_rank,
             gpu_output_buffers={
                 name: layer._gpu_output_buffer for name, layer in self._layers.items()
             },
@@ -383,6 +385,7 @@ class PleOffloadConnector:
             self._input_ready_event.record(torch.cuda.current_stream(self.device))
         request = PleOffloadRequest(
             dp_rank=self.dp_rank,
+            pipeline_rank=self.pipeline_rank,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
         )

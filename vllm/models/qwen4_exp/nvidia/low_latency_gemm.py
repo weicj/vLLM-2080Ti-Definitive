@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp decode GEMM selection on Blackwell.
+"""Qwen4Exp decode GEMM selection on SM75 and Blackwell.
 
 Dispatch follows Kimi-K3 and uses the local ``(N, K)`` shape and token count.
 Plans contain measured CUDA graph capture sizes; other token counts use the
 standard linear implementation.
 """
+
+import logging
 
 import torch
 from torch import nn
@@ -22,6 +24,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+from . import triton_gemv
+
+logger = logging.getLogger(__name__)
+_triton_dispatch_logged = False
 
 QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # GDN fused QKVZ projection, TP=4.
@@ -82,6 +89,10 @@ QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
 }
 
 
+def _is_sm75() -> bool:
+    return current_platform.is_device_capability((7, 5))
+
+
 def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
 
@@ -95,8 +106,23 @@ def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
         not envs.VLLM_BATCH_INVARIANT
         and _is_packed_row_major(x)
         and _is_packed_row_major(weight)
-        and x.dtype == torch.bfloat16
-        and weight.dtype == torch.bfloat16
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and weight.dtype in (torch.float16, torch.bfloat16)
+        and x.is_cuda
+        and weight.is_cuda
+        and x.device == weight.device
+        and x.shape[1] == weight.shape[1]
+    )
+
+
+def _triton_runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
+    return (
+        _is_sm75()
+        and x.shape[0] == 1
+        and _is_packed_row_major(x)
+        and _is_packed_row_major(weight)
+        and x.dtype == torch.float16
+        and weight.dtype == torch.float16
         and x.is_cuda
         and weight.is_cuda
         and x.device == weight.device
@@ -127,11 +153,26 @@ class Qwen4ExpLowLatencyEmbeddingMethod(
 
 
 def _qwen4_exp_low_latency_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    global _triton_dispatch_logged
+    if _triton_runtime_ok(x, weight) and triton_gemv.is_available():
+        # Triton is the supported SM75 path. CuTe DSL 4.7 starts at SM80.
+        if not _triton_dispatch_logged:
+            logger.info(
+                "Qwen4Exp low-latency dispatch: Triton SM75 M=1 shape=%sx%s",
+                weight.shape[0],
+                weight.shape[1],
+            )
+            _triton_dispatch_logged = True
+        return triton_gemv.gemv(x, weight)
+
     plan = QWEN4_EXP_GEMM_PLANS.get((weight.shape[0], weight.shape[1]))
     config = None if plan is None else plan.get(x.shape[0])
     if (
         config is not None
+        and _is_sm103()
         and _runtime_ok(x, weight)
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
         and shape_dynamic_skinny_gemm.is_available()
     ):
         return shape_dynamic_skinny_gemm(x, weight, config)
@@ -155,12 +196,20 @@ def enable_qwen4_exp_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    if dtype != torch.bfloat16 or not _is_sm103():
-        return
-    if not shape_dynamic_skinny_gemm.is_available():
+    is_sm75 = _is_sm75()
+    is_sm103 = _is_sm103()
+    if is_sm75:
+        if dtype != torch.float16 or not triton_gemv.is_available():
+            return
+    elif is_sm103:
+        if dtype != torch.bfloat16 or not shape_dynamic_skinny_gemm.is_available():
+            return
+    else:
         return
 
     warmup_configs: set[SkinnyGemmConfig] = set()
+    installed = 0
+    installed_shapes: set[tuple[int, int]] = set()
     for child in module.modules():
         is_linear = (
             isinstance(child, LinearBase)
@@ -182,7 +231,19 @@ def enable_qwen4_exp_low_latency_gemm(
             child.quant_method = Qwen4ExpLowLatencyLinearMethod()
         else:
             child.quant_method = Qwen4ExpLowLatencyEmbeddingMethod()
+        installed += 1
+        installed_shapes.add((weight.shape[0], weight.shape[1]))
         warmup_configs.update(plan.values())
 
-    if warmup_configs:
+    logger.info(
+        "Qwen4Exp low-latency GEMM enabled: arch=%s dtype=%s backend=%s "
+        "installed=%d shapes=%s",
+        "sm75" if is_sm75 else "sm103",
+        dtype,
+        "triton" if is_sm75 else "cute",
+        installed,
+        sorted(installed_shapes),
+    )
+
+    if is_sm103 and warmup_configs:
         shape_dynamic_skinny_gemm.request_warmup_configs(dtype, warmup_configs)

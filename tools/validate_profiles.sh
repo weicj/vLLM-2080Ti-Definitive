@@ -50,6 +50,7 @@ SKIP_MM_PROFILING|HF_OVERRIDES_JSON|ADDITIONAL_CONFIG_JSON|\
 SPECULATIVE_CONFIG|ATTENTION_BACKEND|DISABLE_HYBRID_KV_CACHE_MANAGER|\
 DISABLE_CUSTOM_ALL_REDUCE|\
 VLLM_ALLOW_LONG_MAX_MODEL_LEN|VLLM_FORCE_NVFP4_W4A16|VLLM_PLE_CPU_OFFLOAD|\
+VLLM_STATIC_PP_SINGLE_TOKEN|\
 VLLM_INT8KV_FA_PREFILL|\
 VLLM_INT8KV_FA_CONTINUATION_DEQUANT|VLLM_INT8KV_FA_CASCADE_DEQUANT|\
 VLLM_INT8KV_FA_CASCADE_TILE_TOKENS|\
@@ -128,14 +129,30 @@ while IFS= read -r -d '' file; do
   fi
 
   if [[ -n "$tp" || -n "$pp" || -n "$pp_partition" ]]; then
-    if [[ ! "$tp" =~ ^[1-9][0-9]*$ || ! "$pp" =~ ^[1-9][0-9]*$ ]]; then
-      echo "ERROR $rel: TP_SIZE and PP_SIZE must both be positive integers when a PP layout is specified" >&2
+    if [[ -n "$tp" && ! "$tp" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR $rel: TP_SIZE must be a positive integer" >&2
       ((errors += 1))
-    elif [[ -n "$pp_partition" ]]; then
+    fi
+    if [[ -n "$pp" && ! "$pp" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR $rel: PP_SIZE must be a positive integer" >&2
+      ((errors += 1))
+    fi
+
+    # launcher.sh defaults PP_SIZE to 1 and derives a missing TP_SIZE, so a
+    # route may legitimately provide only one of the two sizes.
+    effective_pp=${pp:-1}
+    if [[ -n "$pp_partition" && "$effective_pp" =~ ^[1-9][0-9]*$ ]]; then
       IFS=',' read -r -a partition_parts <<< "$pp_partition"
-      if (( ${#partition_parts[@]} != pp )); then
-        echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must contain PP_SIZE=$pp entries" >&2
+      if (( ${#partition_parts[@]} != effective_pp )); then
+        echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must contain PP_SIZE=$effective_pp entries" >&2
         ((errors += 1))
+      else
+        for partition in "${partition_parts[@]}"; do
+          if [[ ! "$partition" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR $rel: every VLLM_PP_LAYER_PARTITION entry must be a positive integer, got '$partition'" >&2
+            ((errors += 1))
+          fi
+        done
       fi
     fi
   fi

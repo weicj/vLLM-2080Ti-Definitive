@@ -18,7 +18,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.kv_cache_layout import KVCacheLayout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -207,14 +206,6 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
-
-    @property
-    def num_heads(self) -> int:
-        return self.num_kv_heads
-
-    @property
-    def state_content_size_bytes(self) -> int:
-        return self.page_size_bytes // max(1, self.block_size * self.num_heads)
 
     @property
     def unpadded_page_size_bytes(self) -> int:
@@ -804,6 +795,9 @@ class MambaSpec(KVCacheSpec):
         return all(
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
+            and spec.mamba_type == self.mamba_type
+            and spec.page_size_bytes == self.page_size_bytes
+            and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
 

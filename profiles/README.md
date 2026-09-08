@@ -94,6 +94,10 @@ PCIe-only groups use NCCL/PYNCCL. PP stages can mix GPU models, but each TP
 group must remain P2P-valid. Validate real Agent/multi-turn workloads and
 output quality separately; use `./launcher.sh --print-config` before launch.
 
+The heterogeneous 152,492-token row is an NVFP4-weight/FP16-KV, MTP=0,
+100K-context, non-eager CUDA Graph startup/health/real-request capacity probe;
+it is not a throughput benchmark.
+
 Both are experimental engineering routes; TP2xPP2 is intentionally not
 shipped as a validated profile.
 

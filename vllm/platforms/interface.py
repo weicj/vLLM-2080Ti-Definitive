@@ -855,11 +855,22 @@ class Platform:
             model_config.architecture,
             model_config=model_config,
         )
-        mamba_page_size = MambaSpec(
-            shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-            dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-            block_size=-1,
-        ).page_size_bytes
+        # Some hybrid models expose multiple state layouts (Qwen4Exp has GDN
+        # plus a TP-replicated PLE short-conv state).  Cache sizing must cover
+        # the largest page, otherwise the smaller GDN page is used to align
+        # attention blocks and the PLE binding later overruns its allocation.
+        get_mamba_specs = getattr(model_cls, "get_mamba_specs_from_config", None)
+        if get_mamba_specs is not None:
+            mamba_specs = tuple(get_mamba_specs(vllm_config))
+            mamba_page_size = max(
+                (spec.page_size_bytes for spec in mamba_specs), default=0
+            )
+        else:
+            mamba_page_size = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+                block_size=-1,
+            ).page_size_bytes
 
         if mamba_page_size == 0:
             return

@@ -39,7 +39,14 @@ class Qwen4ExpModelState(MambaHybridModelState):
         self.has_local_ple = any(
             getattr(module, "ple", None) is not None for module in model.modules()
         )
-        if self.has_local_ple and not get_pp_group().is_first_rank:
+        # Qwen4Exp advertises requires_raw_input_tokens, so every PP rank has
+        # the IDs needed by a local PLE layer.  Keep the guard for models that
+        # reuse this state class without that contract.
+        if (
+            self.has_local_ple
+            and not get_pp_group().is_first_rank
+            and not getattr(model, "requires_raw_input_tokens", False)
+        ):
             raise RuntimeError(
                 "N-gram PLE embedding must be placed on the first pipeline stage "
                 "because later stages do not receive raw input_ids."

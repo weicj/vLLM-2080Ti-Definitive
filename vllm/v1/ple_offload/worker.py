@@ -66,6 +66,10 @@ from vllm.v1.ple_offload.protocol import (
 
 logger = init_logger(__name__)
 
+# Keep the file-store directory alive for the isolated process and let
+# TemporaryDirectory clean it up when the process exits.
+_OFFLOAD_STORE_DIR: tempfile.TemporaryDirectory | None = None
+
 
 @contextlib.contextmanager
 def _without_pp_layer_partition() -> Iterator[None]:
@@ -81,6 +85,7 @@ def _without_pp_layer_partition() -> Iterator[None]:
 class PleOffloadOutputTarget:
     """GPU output destination and semaphore for one TP worker."""
 
+    pipeline_rank: int
     tp_rank: int
     gpu_output_buffer: torch.Tensor  # IPC-mapped GPU buffer for this TP worker
     sem: CpuGpuSemaphore  # semaphore paired with gpu_output_buffer
@@ -89,7 +94,7 @@ class PleOffloadOutputTarget:
 
 @dataclass
 class PleOffloadInputBuffers:
-    """Shared-memory input buffers registered for one DP rank."""
+    """Shared-memory input buffers registered for one (DP, PP) group."""
 
     input_ids_buf: torch.Tensor  # int32 (max_num_tokens,)
     query_start_loc_buf: torch.Tensor  # int32 (max_num_reqs + 1,)
@@ -133,7 +138,9 @@ def _init_offload_distributed() -> None:
     # VocabParallelEmbedding reads the TP process group during construction.
     # The offload process owns the full embedding table, so it uses an isolated
     # TP1/PP1 Gloo world and never joins the GPU workers' NCCL groups.
-    store_dir = tempfile.mkdtemp(prefix="vllm_ple_offload_")
+    global _OFFLOAD_STORE_DIR
+    _OFFLOAD_STORE_DIR = tempfile.TemporaryDirectory(prefix="vllm_ple_offload_")
+    store_dir = _OFFLOAD_STORE_DIR.name
     init_distributed_environment(
         world_size=1,
         rank=0,
@@ -342,14 +349,18 @@ class PleOffloadRunner:
         )
         # name -> PleOffloadLayer (CPU)
         self._layers: dict[str, PleOffloadLayer] = {}
-        # dp_rank -> layer_name -> one destination per TP rank
-        self._worker_targets: dict[int, dict[str, list[PleOffloadOutputTarget]]] = {}
-        # Each (dp_rank, layer_name) pair owns a separate pinned scratch buffer.
+        # (dp_rank, pipeline_rank) -> layer_name -> one destination per TP rank
+        self._worker_targets: dict[
+            tuple[int, int], dict[str, list[PleOffloadOutputTarget]]
+        ] = {}
+        # Each (dp_rank, pipeline_rank, layer_name) pair owns a separate pinned
+        # scratch buffer.
         # Sharing one buffer is unsafe because an asynchronous H2D copy may still
         # be reading it when another layer or DP rank starts writing.
-        self._pinned_bufs: dict[int, dict[str, torch.Tensor]] = {}
-        # Shared-memory inputs are registered once per DP rank by TP rank zero.
-        self._input_bufs: dict[int, PleOffloadInputBuffers] = {}
+        self._pinned_bufs: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+        # Shared-memory inputs are registered once per (DP, PP) pair by TP rank
+        # zero. Different PP stages have different local input buffers.
+        self._input_bufs: dict[tuple[int, int], PleOffloadInputBuffers] = {}
         self._load_weights()
 
     @property
@@ -370,6 +381,29 @@ class PleOffloadRunner:
         """
         model_config = self.vllm_config.model_config
         load_config = self.vllm_config.load_config
+        loader = get_model_loader(load_config)
+
+        # The GPU model loader resolves a Hugging Face repo ID to its local
+        # snapshot before opening weights.  PLE's disk-mapped embedding is
+        # constructed during model initialization and needs that same local
+        # directory immediately, so resolve it before constructing the meta
+        # model as well.  The offload process owns this config copy, therefore
+        # replacing ``model`` cannot alter the GPU workers' configuration.
+        if isinstance(loader, DefaultModelLoader):
+            resolved_model_path, _, _ = loader._prepare_weights(
+                model_config.model,
+                subfolder=None,
+                revision=model_config.revision,
+                fall_back_to_pt=True,
+                allow_patterns_overrides=None,
+            )
+            if resolved_model_path != model_config.model:
+                logger.info(
+                    "Resolved PLE checkpoint %s to local snapshot %s",
+                    model_config.model,
+                    resolved_model_path,
+                )
+                model_config.model = resolved_model_path
 
         # Step 1: build complete structure, while only PLE subtrees allocate CPU
         # memory. All transformer, MoE, and vision parameters remain on meta.
@@ -428,7 +462,6 @@ class PleOffloadRunner:
                     matched_checkpoint_tensors += 1
                     yield weight_name, tensor
 
-        loader = get_model_loader(load_config)
         if isinstance(loader, DummyModelLoader):
             logger.info(
                 "Initializing dummy weights for %d PleOffloadLayer(s) ...",
@@ -504,81 +537,138 @@ class PleOffloadRunner:
                 )
             registrations.append(item)
             logger.info(
-                "GPU worker %d registered (dp_rank=%d, tp_rank=%d, layers=%s).",
+                "GPU worker %d registered (dp_rank=%d, pp_rank=%d, "
+                "tp_rank=%d, layers=%s).",
                 item.worker_id,
                 item.dp_rank,
+                item.pipeline_rank,
                 item.tp_rank,
                 sorted(item.gpu_output_buffers),
             )
 
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        registrations_by_dp: dict[int, list[PleOffloadRegistration]] = {}
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        tp_size = parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
+        registrations_by_group: dict[
+            tuple[int, int], list[PleOffloadRegistration]
+        ] = {}
         for registration in registrations:
-            registrations_by_dp.setdefault(registration.dp_rank, []).append(
-                registration
-            )
-        if set(registrations_by_dp) != set(range(dp_size)):
-            raise RuntimeError(
-                f"Expected DP ranks {set(range(dp_size))}, "
-                f"got {set(registrations_by_dp)}"
-            )
-        for registration in registrations:
-            unknown_layers = set(registration.gpu_output_buffers).difference(
-                self.layer_names
-            )
-            if unknown_layers:
+            if not 0 <= registration.dp_rank < dp_size:
+                raise RuntimeError(f"Invalid registered DP rank {registration.dp_rank}")
+            if not 0 <= registration.pipeline_rank < pp_size:
                 raise RuntimeError(
-                    "Registered an unknown PLE layer: "
-                    f"{sorted(unknown_layers)}"
+                    f"Invalid registered PP rank {registration.pipeline_rank}"
                 )
-            targets_for_dp = self._worker_targets.setdefault(registration.dp_rank, {})
-            for layer_name, gpu_buffer in registration.gpu_output_buffers.items():
-                target = PleOffloadOutputTarget(
-                    tp_rank=registration.tp_rank,
-                    gpu_output_buffer=gpu_buffer,
-                    sem=CpuGpuSemaphore.from_ipc_tensor(
-                        registration.sem_flag_tensors[layer_name]
-                    ),
-                    copy_stream=torch.cuda.Stream(device=gpu_buffer.device),
-                )
-                targets_for_dp.setdefault(layer_name, []).append(target)
-            # All TP ranks in one DP group receive the same input, so buffers
-            # registered by TP rank zero are sufficient for that DP rank.
-            if registration.tp_rank == 0:
-                self._input_bufs.setdefault(registration.dp_rank, PleOffloadInputBuffers(
-                    input_ids_buf=registration.input_ids_buf,
-                    query_start_loc_buf=registration.query_start_loc_buf,
-                    ngram_context_buf=registration.ngram_context_buf,
-                ))
+            registrations_by_group.setdefault(
+                (registration.dp_rank, registration.pipeline_rank), []
+            ).append(registration)
 
-        if set(self._input_bufs) != set(range(dp_size)):
+        from vllm.distributed.utils import get_pp_indices
+
+        text_config = self.vllm_config.model_config.hf_text_config
+        ple_stage_ranks = {
+            pp_rank
+            for pp_rank in range(pp_size)
+            if any(
+                start <= int(layer_id) - 1 < end
+                for layer_id in text_config.ple_layer_ids
+                for start, end in (
+                    get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size),
+                )
+            )
+        }
+        expected_groups = {
+            (dp_rank, pp_rank)
+            for dp_rank in range(dp_size)
+            for pp_rank in ple_stage_ranks
+        }
+        if set(registrations_by_group) != expected_groups:
             raise RuntimeError(
-                "TP rank zero did not register PLE input buffers for every DP "
-                f"rank: expected={set(range(dp_size))}, got={set(self._input_bufs)}"
+                "PLE registration groups do not match the configured stages: "
+                f"expected={sorted(expected_groups)}, "
+                f"got={sorted(registrations_by_group)}"
             )
 
-        config = self.vllm_config.model_config.hf_text_config
+        config = text_config
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         embedding_dim = int(config.ple_embed_dim)
-        for dp_rank, layer_targets in self._worker_targets.items():
-            if set(layer_targets) != set(self.layer_names):
+        for group in sorted(expected_groups):
+            group_registrations = registrations_by_group[group]
+            if len(group_registrations) != tp_size:
                 raise RuntimeError(
-                    f"DP rank {dp_rank} did not register every PLE layer: "
-                    f"registered={sorted(layer_targets)}, expected={sorted(self.layer_names)}"
+                    f"PLE group {group} received {len(group_registrations)} "
+                    f"registrations, expected {tp_size}"
                 )
-            self._pinned_bufs[dp_rank] = {}
-            for layer_name, targets in layer_targets.items():
-                if len(targets) != tp_size or {
-                    target.tp_rank for target in targets
-                } != set(range(tp_size)):
+            tp_ranks = {registration.tp_rank for registration in group_registrations}
+            if tp_ranks != set(range(tp_size)):
+                raise RuntimeError(
+                    f"PLE group {group} received TP ranks {sorted(tp_ranks)}, "
+                    f"expected {list(range(tp_size))}"
+                )
+
+            layer_sets = [
+                set(registration.gpu_output_buffers)
+                for registration in group_registrations
+            ]
+            if any(layer_set != layer_sets[0] for layer_set in layer_sets[1:]):
+                raise RuntimeError(
+                    f"PLE group {group} has inconsistent layer registrations: "
+                    f"{[sorted(layer_set) for layer_set in layer_sets]}"
+                )
+            expected_layers = layer_sets[0]
+            unknown_layers = expected_layers.difference(self.layer_names)
+            if unknown_layers:
+                raise RuntimeError(
+                    f"PLE group {group} registered unknown layers: "
+                    f"{sorted(unknown_layers)}"
+                )
+
+            self._worker_targets[group] = {}
+            for registration in group_registrations:
+                for layer_name, gpu_buffer in registration.gpu_output_buffers.items():
+                    if layer_name not in registration.sem_flag_tensors:
+                        raise RuntimeError(
+                            f"PLE group {group} is missing semaphore for {layer_name}"
+                        )
+                    self._worker_targets[group].setdefault(layer_name, []).append(
+                        PleOffloadOutputTarget(
+                            pipeline_rank=registration.pipeline_rank,
+                            tp_rank=registration.tp_rank,
+                            gpu_output_buffer=gpu_buffer,
+                            sem=CpuGpuSemaphore.from_ipc_tensor(
+                                registration.sem_flag_tensors[layer_name]
+                            ),
+                            copy_stream=torch.cuda.Stream(device=gpu_buffer.device),
+                        )
+                    )
+                if registration.tp_rank == 0:
+                    if group in self._input_bufs:
+                        raise RuntimeError(
+                            f"Duplicate TP0 input registration for {group}"
+                        )
+                    self._input_bufs[group] = PleOffloadInputBuffers(
+                        input_ids_buf=registration.input_ids_buf,
+                        query_start_loc_buf=registration.query_start_loc_buf,
+                        ngram_context_buf=registration.ngram_context_buf,
+                    )
+
+            if set(self._worker_targets[group]) != expected_layers:
+                raise RuntimeError(
+                    f"PLE group {group} did not register all local layers: "
+                    f"registered={sorted(self._worker_targets[group])}, "
+                    f"expected={sorted(expected_layers)}"
+                )
+            self._pinned_bufs[group] = {}
+            for layer_name, targets in self._worker_targets[group].items():
+                if len(targets) != tp_size:
                     raise RuntimeError(
-                        f"PLE layer {layer_name} for DP rank {dp_rank} received "
+                        f"PLE layer {layer_name} for group {group} received "
                         f"TP ranks {[target.tp_rank for target in targets]}, "
                         f"expected {list(range(tp_size))}"
                     )
                 targets.sort(key=lambda target: target.tp_rank)
-                self._pinned_bufs[dp_rank][layer_name] = torch.empty(
+                self._pinned_bufs[group][layer_name] = torch.empty(
                     max_tokens,
                     embedding_dim,
                     dtype=self._layers[layer_name].get_offload_output_dtype(
@@ -587,10 +677,9 @@ class PleOffloadRunner:
                     pin_memory=True,
                 )
         logger.info(
-            "Registrations complete (dp_size=%d, tp_size=%d, layers=%s).",
-            dp_size,
+            "Registrations complete (groups=%s, tp_size=%d).",
+            sorted(expected_groups),
             tp_size,
-            sorted(self.layer_names),
         )
 
     @torch.inference_mode()
@@ -612,29 +701,36 @@ class PleOffloadRunner:
             except msgspec.DecodeError as error:
                 raise RuntimeError("Unexpected PLE offload request") from error
 
-            # One shared input buffer exists per DP rank. Its contents are
-            # valid for exactly one forward, so process each message before
-            # receiving another rather than coalescing same-DP requests.
+            # Each (DP, PP) input buffer is valid for exactly one forward, so
+            # process each message before receiving another rather than
+            # coalescing requests from the same group.
             self._handle_request(request)
 
     def _handle_request(self, request: PleOffloadRequest) -> None:
         """Compute and distribute the result for one DP request."""
-        dp_rank = request.dp_rank
-        if dp_rank not in self._worker_targets:
+        group = (request.dp_rank, request.pipeline_rank)
+        if group not in self._worker_targets:
             logger.warning(
-                "No PLE output targets for dp_rank=%d; skipping request.", dp_rank
+                "No PLE output targets for dp_rank=%d, pp_rank=%d; skipping request.",
+                request.dp_rank,
+                request.pipeline_rank,
             )
             return
+        input_bufs = self._input_bufs[group]
 
         # Speculative placeholders are not vocabulary IDs. Normalize each DP
         # input once before all PLE layers consume the shared buffer.
         if self._clamp_input_ids:
-            self._input_bufs[dp_rank].input_ids_buf[: request.num_tokens].clamp_min_(
+            input_bufs.input_ids_buf[: request.num_tokens].clamp_min_(
                 0
             )
 
         for layer_name, layer in self._layers.items():
-            targets = self._worker_targets[dp_rank][layer_name]
+            # Only the PLE layers owned by this PP stage have registered
+            # targets. Other layers belong to another request stream.
+            targets = self._worker_targets[group].get(layer_name)
+            if targets is None:
+                continue
             # The CPU must not overwrite a GPU output buffer until its
             # previous result has been consumed. The GPU runner resets the
             # flag after the complete model forward.
@@ -642,7 +738,6 @@ class PleOffloadRunner:
                 target.copy_stream.synchronize()
                 target.sem.wait_reset(target.copy_stream)
 
-            input_bufs = self._input_bufs[dp_rank]
             ngram_context = (
                 input_bufs.ngram_context_buf[: request.num_reqs]
                 if input_bufs.ngram_context_buf is not None
@@ -653,7 +748,7 @@ class PleOffloadRunner:
                 input_bufs.input_ids_buf[: request.num_tokens],
                 input_bufs.query_start_loc_buf[: request.num_reqs + 1],
                 ngram_context,
-                output_buffer=self._pinned_bufs[dp_rank][layer_name],
+                output_buffer=self._pinned_bufs[group][layer_name],
             )
             # The result is identical on every TP rank in this DP group.
             # Each copy stream signals only after its DMA completes.

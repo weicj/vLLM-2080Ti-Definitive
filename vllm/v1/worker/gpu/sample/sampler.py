@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
 
-
 class Sampler:
     def __init__(
         self,
@@ -66,6 +65,48 @@ class Sampler:
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
+
+    def can_use_local_greedy(self, input_batch: InputBatch) -> bool:
+        """Return whether sampling can consume model-local greedy token IDs."""
+        idx_mapping_np = input_batch.idx_mapping_np
+        if idx_mapping_np.size == 0 or self.compute_nans:
+            return False
+        states = self.sampling_states
+        if not np.all(states.temperature.np[idx_mapping_np] == 0.0):
+            return False
+        if np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np]):
+            return False
+        if np.any(self.penalties_state.use_penalty[idx_mapping_np]):
+            return False
+        if np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0):
+            return False
+        if np.any(states.min_p.np[idx_mapping_np] != 0.0):
+            return False
+        if states.max_num_logprobs(idx_mapping_np) != NO_LOGPROBS:
+            return False
+        compatible = self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) == 0
+        return compatible
+
+    def make_local_greedy_output(
+        self, sampled_token_ids: torch.Tensor, input_batch: InputBatch
+    ) -> SamplerOutput:
+        """Build a standard sampler result from TP-reduced greedy token IDs."""
+        assert sampled_token_ids.ndim == 1
+        assert sampled_token_ids.shape[0] == input_batch.num_reqs
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled_token_ids.view(-1, 1),
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
 
     def __call__(
         self,

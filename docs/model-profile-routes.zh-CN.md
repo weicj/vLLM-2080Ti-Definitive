@@ -20,4 +20,5 @@
 
 对 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)，
 实验性 TP2xPP4 路线有一组 6 张 T10 + 2 张 RTX 2080 Ti 的异构启动/容量参考：
-`GPU_UTIL=0.92` 下为 152,492 GPU KV tokens。
+`GPU_UTIL=0.92` 下为 152,492 GPU KV tokens。该记录使用 NVFP4 权重、FP16 KV、MTP=0、
+100K 上下文和非 eager CUDA Graph，测量方式是启动/健康检查/真实请求容量探测，不是吞吐测试。

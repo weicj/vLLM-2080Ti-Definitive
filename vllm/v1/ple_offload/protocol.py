@@ -19,10 +19,12 @@ class PleOffloadRegistration:
     worker_id: int
     tp_rank: int
     dp_rank: int
+    pipeline_rank: int
     # CUDA tensors are serialized through PyTorch CUDA IPC.
     gpu_output_buffers: dict[str, torch.Tensor]
     sem_flag_tensors: dict[str, torch.Tensor]
-    # CPU tensors are allocated in shared memory and registered once.
+    # CPU tensors are allocated in shared memory and registered once per
+    # (DP, PP) group by that group's TP rank zero.
     input_ids_buf: torch.Tensor
     query_start_loc_buf: torch.Tensor
     ngram_context_buf: torch.Tensor | None
@@ -33,6 +35,7 @@ class PleOffloadRequest:
     """Sent by each DP rank's TP rank zero at every inference step."""
 
     dp_rank: int
+    pipeline_rank: int
     num_tokens: int
     num_reqs: int
 

@@ -541,9 +541,16 @@ def _build_qsa_metadata_torch(
     return token_to_req, logical_positions, slot_mapping
 
 
+def _use_triton_qsa_metadata() -> bool:
+    """Keep the metadata Triton kernel off Turing's fragile QSA path."""
+    return HAS_TRITON and not current_platform.is_device_capability(75)
+
+
 # Resolve the fallback outside the per-step metadata hot path.
 build_qsa_metadata = (
-    build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
+    build_qsa_metadata_triton
+    if _use_triton_qsa_metadata()
+    else _build_qsa_metadata_torch
 )
 
 

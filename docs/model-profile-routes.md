@@ -21,3 +21,6 @@ Every benchmark record must identify the exact checkpoint, weight precision, KV 
 For [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4),
 the experimental TP2xPP4 route has a heterogeneous six-T10/two-RTX-2080-Ti
 startup/capacity reference of 152,492 GPU KV tokens at `GPU_UTIL=0.92`.
+The record uses NVFP4 weights, FP16 KV, MTP=0, a 100K context, non-eager CUDA
+Graph, and a startup/health/real-request capacity probe (not a throughput
+benchmark).

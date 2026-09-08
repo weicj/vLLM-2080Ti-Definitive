@@ -517,9 +517,16 @@ class Qwen4ExpModel(nn.Module):
         # the sampled single stream and the materialized multi-stream state.
         final_mixer = self.hyper_connection_mixer
         assert final_mixer is not None
-        multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(
-            hidden_states, block_output, injection
-        )
+        if block_output is None:
+            # A deepstack injection materializes the pending combine inside the
+            # layer loop.  There is no block/injection tuple left for the final
+            # mixer to consume, but it still must produce the normalized single
+            # stream used by the LM head.
+            _, sample_hidden_states, _ = final_mixer.mix(hidden_states)
+        else:
+            _, sample_hidden_states, _ = final_mixer.combine_and_mix(
+                hidden_states, block_output, injection
+            )
         return sample_hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -611,6 +618,7 @@ class Qwen4ExpForCausalLM(
             config.vocab_size,
             config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
+            quant_config=self.quant_config,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
@@ -771,6 +779,10 @@ class Qwen4ExpForCausalLM(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Return TP-reduced greedy token IDs without gathering full logits."""
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def get_mrope_input_positions(
         self,
@@ -969,6 +981,10 @@ class Qwen4ExpForConditionalGeneration(
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             self._clear_deepstack_input_embeds(inputs_embeds.size(0))
         return hidden_states
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Delegate TP-reduced greedy token selection to the language model."""
+        return self.language_model.get_top_tokens(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = self.hf_to_vllm_mapper | WeightsMapper(

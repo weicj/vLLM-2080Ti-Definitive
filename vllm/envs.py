@@ -298,6 +298,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_FORCE_NVFP4_W4A16: bool = False
     VLLM_PLE_CPU_OFFLOAD: bool = False
+    VLLM_STATIC_PP_SINGLE_TOKEN: bool = False
     VLLM_PLE_OFFLOAD_READY_TIMEOUT: float = 600.0
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
@@ -2030,6 +2031,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # implementation supports ModelRunner V1 and single-node TP only.
     "VLLM_PLE_CPU_OFFLOAD": lambda: (
         os.getenv("VLLM_PLE_CPU_OFFLOAD", "False").lower() in ("true", "1")
+    ),
+    # Bypass per-step CPU metadata exchange for preallocated PP decode buffers.
+    "VLLM_STATIC_PP_SINGLE_TOKEN": lambda: (
+        os.getenv("VLLM_STATIC_PP_SINGLE_TOKEN", "False").lower()
+        in ("true", "1")
     ),
     # Timeout for PLE weight loading and TP worker registration.
     "VLLM_PLE_OFFLOAD_READY_TIMEOUT": lambda: float(

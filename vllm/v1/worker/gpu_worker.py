@@ -174,7 +174,6 @@ class Worker(WorkerBase):
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         self._ple_offload_worker_handle: Any | None = None
         self._ple_offload_enabled = self._has_ple_layers()
-        self._ple_offload_local = False
         if envs.VLLM_PLE_CPU_OFFLOAD:
             if self._ple_offload_enabled:
                 self._validate_ple_offload_config()
@@ -183,9 +182,6 @@ class Worker(WorkerBase):
                     "VLLM_PLE_CPU_OFFLOAD is enabled, but this model has no PLE "
                     "layers; skipping PLE offload process creation."
                 )
-        # pending non-blocking PP send work from the previous iteration
-        self._pp_send_work: list[Handle] = []
-
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
@@ -206,6 +202,10 @@ class Worker(WorkerBase):
             unsupported.append(f"nnodes={parallel_config.nnodes}")
         if parallel_config.data_parallel_backend != "mp":
             unsupported.append(f"DP backend={parallel_config.data_parallel_backend}")
+        if parallel_config.distributed_executor_backend != "mp":
+            unsupported.append(
+                f"executor={parallel_config.distributed_executor_backend}"
+            )
         if parallel_config.data_parallel_size_local != parallel_config.data_parallel_size:
             unsupported.append("non-local DP")
         if parallel_config.prefill_context_parallel_size != 1:
@@ -241,7 +241,10 @@ class Worker(WorkerBase):
         text_config = self.model_config.hf_text_config
         pp_size = self.parallel_config.pipeline_parallel_size
         ple_stage_count = sum(
-            any(start <= layer_id < end for layer_id in text_config.ple_layer_ids)
+            any(
+                start <= int(layer_id) - 1 < end
+                for layer_id in text_config.ple_layer_ids
+            )
             for start, end in (
                 get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
                 for pp_rank in range(pp_size)
@@ -539,7 +542,7 @@ class Worker(WorkerBase):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
         if self._ple_offload_enabled:
-            self._ple_offload_local = self.model_runner._setup_ple_offload(
+            self.model_runner._setup_ple_offload(
                 self.parallel_config._ple_offload_ipc_path
             )
 
@@ -1133,18 +1136,14 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # ensure any previous non-blocking PP sends are complete
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
         parallel_config = self.vllm_config.parallel_config
+        pp_group = get_pp_group()
+        tp_group = get_tp_group()
 
         if (
             parallel_config.pipeline_parallel_size > 1
@@ -1175,13 +1174,27 @@ class Worker(WorkerBase):
                 )
             }
 
-        if forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = (
-                get_pp_group().irecv_tensor_dict(
-                    all_gather_group=get_tp_group(),
-                    all_gather_tensors=all_gather_tensors,
-                )
+        if forward_pass and not pp_group.is_first_rank:
+            use_static_pp = (
+                envs.VLLM_STATIC_PP_SINGLE_TOKEN
+                and num_scheduled_tokens == 1
+                and not all_gather_tensors
             )
+            if use_static_pp:
+                persistent = self.model_runner.intermediate_tensors
+                assert persistent is not None
+                tensor_dict, comm_handles, comm_postprocess = (
+                    pp_group.irecv_static_tensor_dict(
+                        persistent[:num_scheduled_tokens].tensors
+                    )
+                )
+            else:
+                tensor_dict, comm_handles, comm_postprocess = (
+                    pp_group.irecv_tensor_dict(
+                        all_gather_group=tp_group,
+                        all_gather_tensors=all_gather_tensors,
+                    )
+                )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -1208,16 +1221,24 @@ class Worker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         assert (
             parallel_config.distributed_executor_backend != "external_launcher"
-            and not get_pp_group().is_last_rank
+            and not pp_group.is_last_rank
         )
 
-        # launch non-blocking send of intermediate tensors
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
+        # The PP group retains asynchronous metadata and source tensors until
+        # the receiver has posted its matching tensor receives.
+        use_static_pp = (
+            envs.VLLM_STATIC_PP_SINGLE_TOKEN
+            and num_scheduled_tokens == 1
+            and not all_gather_tensors
         )
-
+        if use_static_pp:
+            pp_group.isend_static_tensor_dict(output.tensors)
+        else:
+            pp_group.isend_tensor_dict(
+                output.tensors,
+                all_gather_group=tp_group,
+                all_gather_tensors=all_gather_tensors,
+            )
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

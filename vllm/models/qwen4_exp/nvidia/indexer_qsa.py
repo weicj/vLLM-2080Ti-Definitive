@@ -15,6 +15,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -72,7 +73,8 @@ def _supports_fused_pre_indexer(
     rotary_dim = int(rotary_emb.rotary_dim)
     mrope_section = getattr(rotary_emb, "mrope_section", None)
     return (
-        bool(getattr(rotary_emb, "is_neox_style", False))
+        not current_platform.is_device_capability(75)
+        and bool(getattr(rotary_emb, "is_neox_style", False))
         and (
             not mrope_section
             or (

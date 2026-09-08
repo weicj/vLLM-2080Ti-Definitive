@@ -143,7 +143,16 @@ class MambaHybridModelState(DefaultModelState):
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups_by_spec(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
-            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+            plural_api = getattr(self.model, "get_mamba_state_copy_funcs", None)
+            if plural_api is not None:
+                copy_funcs = plural_api(mamba_types)
+            else:
+                # Older hybrid models expose the original singular API.  All
+                # such models use one pair of copy functions for their Mamba
+                # state, so adapt it to the type-indexed interface here.
+                singular_api = getattr(self.model, "get_mamba_state_copy_func")
+                funcs = singular_api()
+                copy_funcs = {mamba_type: funcs for mamba_type in mamba_types}
             validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
             self._mamba_state_copy_funcs = copy_funcs
         copy_funcs = self._mamba_state_copy_funcs

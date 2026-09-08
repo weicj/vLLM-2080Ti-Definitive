@@ -76,6 +76,7 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.speculative_config
                 else 0
             ),
+            tp_replicated=bool(getattr(self, "is_kv_cache_tp_replicated", False)),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 
@@ -13,6 +14,22 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
+_TORCH_SPARSE_WORKSPACE_BYTES = 128 * 1024 * 1024
+_TORCH_SELECT_WORKSPACE_BYTES = (
+    int(os.environ.get("VLLM_QSA_TORCH_SELECT_WORKSPACE_MB", "128"))
+    * 1024
+    * 1024
+)
+
+
+def _use_sm75_torch_fallback(env_name: str, device: torch.device) -> bool:
+    setting = os.environ.get(env_name, "auto").strip().lower()
+    if setting in {"1", "true", "yes", "on"}:
+        return True
+    if setting in {"0", "false", "no", "off"}:
+        return False
+    device_id = device.index if device.index is not None else 0
+    return current_platform.is_device_capability((7, 5), device_id=device_id)
 
 
 @triton.jit
@@ -253,7 +270,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     # Dynamic bounds avoid padded main-loop iterations for uneven splits.
     split_tile_start = split_id * NUM_TILES // NUM_SPLITS
     split_tile_end = (split_id + 1) * NUM_TILES // NUM_SPLITS
-    for tile in range(split_tile_start, split_tile_end):
+    for tile in tl.range(split_tile_start, split_tile_end):
         columns = tile * BLOCK_N + column_offsets
         logical_token = tl.load(
             indices_ptr + row * stride_indices_row + columns,
@@ -762,6 +779,19 @@ def qsa_select_paged_tokens(
     if not rows:
         return out
 
+    if _use_sm75_torch_fallback("VLLM_QSA_TORCH_SPARSE", q.device):
+        return _qsa_torch_select_paged_tokens(
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            token_topk,
+            compress_ratio,
+            out,
+        )
+
     columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
@@ -791,12 +821,26 @@ def qsa_select_paged_tokens(
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )
-        topk_op = (
-            torch.ops._C.cooperative_topk
-            if use_cooperative_topk
-            else torch.ops._C.persistent_topk
-        )
-        topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)
+        if _use_sm75_torch_fallback("VLLM_QSA_TORCH_TOPK", q.device):
+            top_indices = torch.topk(
+                logits, block_topk, dim=1, largest=True, sorted=True
+            ).indices
+            valid = top_indices < visible_blocks[row_slice].unsqueeze(1)
+            blocks.copy_(torch.where(valid, top_indices, -1).to(torch.int32))
+        else:
+            topk_op = (
+                torch.ops._C.cooperative_topk
+                if use_cooperative_topk
+                else torch.ops._C.persistent_topk
+            )
+            topk_op(
+                logits,
+                visible_blocks,
+                blocks,
+                topk_workspace,
+                block_topk,
+                columns,
+            )
         expand_qsa_block_indices_cuda(
             blocks,
             query_positions[row_slice],
@@ -805,6 +849,174 @@ def qsa_select_paged_tokens(
             compress_ratio,
             token_topk,
             out[row_slice],
+        )
+    return out
+
+
+def _qsa_torch_sparse_attention(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    """Reference grouped-GQA path for SM75 requests spanning cache pages."""
+
+    rows, num_query_heads, head_dim = q.shape
+    num_kv_heads = k_cache.shape[2]
+    page_size = k_cache.shape[1]
+    num_cache_blocks = k_cache.shape[0]
+    num_requests = block_table.shape[0]
+    group_size = num_query_heads // num_kv_heads
+
+    scale = head_dim**-0.5
+    selection_width = logical_indices.shape[1]
+    element_size = k_cache.element_size()
+    bytes_per_row = selection_width * (
+        head_dim * element_size
+        + group_size * (torch.float32.itemsize + element_size)
+        + 3 * torch.int64.itemsize
+        + 1
+    )
+    rows_per_chunk = max(1, _TORCH_SPARSE_WORKSPACE_BYTES // bytes_per_row)
+
+    for row_start in range(0, rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, rows)
+        row_slice = slice(row_start, row_end)
+        logical = logical_indices[row_slice].to(torch.int64)
+        safe_logical = logical.clamp(min=0)
+        logical_page = safe_logical // page_size
+        page_offset = safe_logical % page_size
+        request = token_to_req[row_slice]
+        safe_request = request.to(torch.int64).clamp(0, num_requests - 1)
+        safe_page = logical_page.clamp(0, block_table.shape[1] - 1)
+        physical_page = block_table[safe_request[:, None], safe_page]
+        valid = (
+            (request[:, None] >= 0)
+            & (request[:, None] < num_requests)
+            & (logical >= 0)
+            & (logical_page < block_table.shape[1])
+            & (physical_page >= 0)
+            & (physical_page < num_cache_blocks)
+        )
+        physical_page = physical_page.clamp(0, num_cache_blocks - 1)
+
+        for kv_head in range(num_kv_heads):
+            head_start = kv_head * group_size
+            head_end = head_start + group_size
+            query = q[row_slice, head_start:head_end, :]
+            keys = k_cache[physical_page, page_offset, kv_head, :]
+            scores = torch.matmul(query, keys.transpose(1, 2)).float()
+            scores.mul_(scale)
+            scores.masked_fill_(~valid[:, None, :], -float("inf"))
+            probabilities = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
+            values = v_cache[physical_page, page_offset, kv_head, :]
+            out[row_slice, head_start:head_end, :].copy_(
+                torch.matmul(probabilities, values)
+            )
+    return out
+
+
+def _qsa_torch_select_paged_tokens(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_topk: int,
+    compress_ratio: int,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    """Reference QSA selection path for SM75 long-page requests."""
+
+    rows = q.shape[0]
+    page_size = k_cache.shape[1]
+    num_pages = k_cache.shape[0]
+    num_requests = page_table.shape[0]
+    block_topk = token_topk // compress_ratio
+    columns = page_table.shape[1] * page_size
+    device = q.device
+    logical_columns = torch.arange(columns, device=device, dtype=torch.int64)
+    logical_page = logical_columns // page_size
+    page_offset = logical_columns % page_size
+    output_width = token_topk + compress_ratio - 1
+    columns_out = torch.arange(output_width, device=device, dtype=torch.int64)
+
+    score_bytes_per_row = columns * (
+        q.shape[2] * k_cache.element_size()
+        + q.shape[1] * (q.element_size() + torch.float32.itemsize)
+        + 4 * torch.int64.itemsize
+        + 16
+    )
+    expand_bytes_per_row = output_width * (12 * torch.int64.itemsize + 8)
+    bytes_per_row = max(score_bytes_per_row, expand_bytes_per_row)
+    rows_per_chunk = max(1, _TORCH_SELECT_WORKSPACE_BYTES // bytes_per_row)
+
+    for row_start in range(0, rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, rows)
+        row_slice = slice(row_start, row_end)
+        chunk_rows = row_end - row_start
+        request = token_to_req[row_slice]
+        safe_request = request.to(torch.int64).clamp(0, num_requests - 1)
+        physical_page = page_table[safe_request[:, None], logical_page[None, :]]
+        valid_page = (
+            (request[:, None] >= 0)
+            & (request[:, None] < num_requests)
+            & (physical_page >= 0)
+            & (physical_page < num_pages)
+        )
+        physical_page = physical_page.clamp(0, num_pages - 1)
+        keys = k_cache[physical_page, page_offset].squeeze(2)
+        scores = torch.matmul(keys, q[row_slice].transpose(1, 2)).float()
+        scores.clamp_min_(0.0)
+        scores = scores.sum(dim=-1).div_(math.sqrt(q.shape[2]))
+        query_pos = query_positions[row_slice].to(torch.int64)
+        visible = torch.minimum(
+            (query_pos + 1) // compress_ratio,
+            sequence_lengths[safe_request] // compress_ratio,
+        )
+        valid = valid_page & (logical_columns[None, :] < visible[:, None])
+        scores.masked_fill_(~valid, -float("inf"))
+        blocks = torch.topk(
+            scores, block_topk, dim=1, largest=True, sorted=True
+        ).indices
+        blocks = torch.where(blocks < visible[:, None], blocks, -1)
+
+        complete_blocks = torch.minimum(
+            torch.minimum(
+                (query_pos + 1) // compress_ratio,
+                sequence_lengths[safe_request] // compress_ratio,
+            ),
+            torch.full_like(query_pos, block_topk),
+        )
+        expanded_count = complete_blocks * compress_ratio
+        tail_start = ((query_pos + 1) // compress_ratio) * compress_ratio
+        tail_count = (query_pos + 1) - tail_start
+        expanded = columns_out[None, :] < expanded_count[:, None]
+        block_rank = columns_out[None, :] // compress_ratio
+        offset = columns_out[None, :] % compress_ratio
+        safe_rank = block_rank.clamp(max=block_topk - 1)
+        selected_blocks = blocks.gather(1, safe_rank.expand(chunk_rows, -1))
+        expanded_tokens = selected_blocks * compress_ratio + offset
+        tail_offset = columns_out[None, :] - expanded_count[:, None]
+        is_tail = (
+            (columns_out[None, :] >= expanded_count[:, None])
+            & (tail_offset < tail_count[:, None])
+            & (tail_offset < compress_ratio - 1)
+        )
+        tokens = torch.where(
+            expanded, expanded_tokens, tail_start[:, None] + tail_offset
+        )
+        valid_tokens = (
+            (expanded | is_tail)
+            & (tokens >= 0)
+            & (tokens < sequence_lengths[safe_request, None])
+        )
+        out[row_slice].copy_(
+            torch.where(valid_tokens, tokens, -1).to(torch.int32)
         )
     return out
 
@@ -854,6 +1066,17 @@ def qsa_sparse_paged_attention(
     assert out.stride(2) == 1
     if not q.shape[0]:
         return out
+
+    if _use_sm75_torch_fallback("VLLM_QSA_TORCH_SPARSE", q.device):
+        return _qsa_torch_sparse_attention(
+            q,
+            k_cache,
+            v_cache,
+            logical_indices,
+            block_table,
+            token_to_req,
+            out,
+        )
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
@@ -980,6 +1203,111 @@ def _qsa_sparse_launch_profile(
     return block_n, target_splits, partial_warps
 
 
+def _qsa_torch_store_cache_rows(
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rows: torch.Tensor,
+) -> None:
+    """Reference QSA cache store for SM75 long-page requests."""
+
+    page_size = cache.shape[1]
+    total_slots = cache.shape[0] * page_size
+    slots = slot_mapping.to(torch.int64)
+    valid = (slots >= 0) & (slots < total_slots)
+    safe_slots = slots.clamp(0, total_slots - 1)
+    blocks = torch.div(safe_slots, page_size, rounding_mode="floor")
+    tokens = safe_slots.remainder(page_size)
+    current = cache[blocks, tokens, 0, :]
+    cache[blocks, tokens, 0, :] = torch.where(valid[:, None], rows, current)
+
+
+def _qsa_torch_compress_groups_with_ratio(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    compressor_state_block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compress_ratio: int,
+    rope_cache: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference QSA group compression for SM75 long-page requests."""
+
+    rows = token_to_req.numel()
+    device = raw_keys.device
+    row_ids = torch.arange(rows, device=device, dtype=torch.int64)
+    requests = token_to_req.to(torch.int64)
+    num_requests = query_start_loc.numel() - 1
+    valid_request = (requests >= 0) & (requests < num_requests)
+    safe_requests = requests.clamp(0, num_requests - 1)
+    query_starts = query_start_loc[safe_requests].to(torch.int64)
+    query_ends = query_start_loc[safe_requests + 1].to(torch.int64)
+    end_positions = logical_positions.to(torch.int64)
+    chunk_starts = end_positions - (row_ids - query_starts)
+
+    state_blocks = compressor_state_block_table[safe_requests, 0].to(torch.int64)
+    valid_state_block = (state_blocks >= 0) & (
+        state_blocks < compressor_state_cache.shape[0]
+    )
+    safe_state_blocks = state_blocks.clamp(0, compressor_state_cache.shape[0] - 1)
+
+    offsets = torch.arange(compress_ratio, device=device, dtype=torch.int64)
+    positions = end_positions[:, None] - (compress_ratio - 1 - offsets)[None, :]
+    use_raw = positions >= chunk_starts[:, None]
+    raw_rows = query_starts[:, None] + positions - chunk_starts[:, None]
+    safe_raw_rows = raw_rows.clamp(0, rows - 1)
+    raw_values = raw_keys[safe_raw_rows, 0, :]
+
+    state_tokens = positions.remainder(compressor_state_cache.shape[1])
+    state_values = compressor_state_cache[
+        safe_state_blocks[:, None], state_tokens, 0, :
+    ]
+    state_values = torch.where(
+        valid_state_block[:, None, None],
+        state_values,
+        torch.zeros_like(state_values),
+    )
+
+    valid_row = (
+        valid_request
+        & (row_ids >= query_starts)
+        & (row_ids < query_ends)
+        & (end_positions >= compress_ratio - 1)
+        & (compressed_slots >= 0)
+    )
+    group_values = torch.where(use_raw[:, :, None], raw_values, state_values)
+    pooled = group_values.float().mean(dim=1, keepdim=True).to(raw_keys.dtype)
+    pooled = torch.where(valid_row[:, None, None], pooled, torch.zeros_like(pooled))
+
+    first_positions = end_positions - compress_ratio + 1
+    if rope_cache is None:
+        first = first_positions[:, None].expand(-1, 3)
+    else:
+        first_from_raw = first_positions >= chunk_starts
+        raw_first_rows = (
+            query_starts + first_positions - chunk_starts
+        ).clamp(0, rows - 1)
+        raw_first_positions = raw_positions[raw_first_rows, 0, :]
+        state_first_positions = rope_cache[
+            safe_state_blocks,
+            first_positions.remainder(compressor_state_cache.shape[1]),
+            0,
+            :,
+        ]
+        state_first_positions = torch.where(
+            valid_state_block[:, None],
+            state_first_positions,
+            torch.zeros_like(state_first_positions),
+        )
+        first = torch.where(
+            first_from_raw[:, None], raw_first_positions, state_first_positions
+        )
+    first = torch.where(valid_row[:, None], first, torch.zeros_like(first))
+    return pooled, first
+
+
 def qsa_store_cache_rows(
     cache: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -1000,6 +1328,9 @@ def qsa_store_cache_rows(
     if rows.shape != (slot_mapping.numel(), cache.shape[3]):
         raise ValueError("QSA cache rows and slots have incompatible shapes")
     if not rows.shape[0]:
+        return
+    if _use_sm75_torch_fallback("VLLM_QSA_TORCH_CACHE", cache.device):
+        _qsa_torch_store_cache_rows(cache, slot_mapping, rows)
         return
     _store_qsa_rows_kernel[(rows.shape[0],)](
         cache,
@@ -1088,6 +1419,19 @@ def qsa_compress_groups_with_ratio(
     first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
     if not rows:
         return pooled, first_positions
+    if _use_sm75_torch_fallback("VLLM_QSA_TORCH_CACHE", raw_keys.device):
+        return _qsa_torch_compress_groups_with_ratio(
+            raw_keys,
+            raw_positions,
+            compressor_state_cache,
+            compressor_state_block_table,
+            token_to_req,
+            query_start_loc,
+            logical_positions,
+            compressed_slots,
+            compress_ratio,
+            rope_cache,
+        )
     if rope_cache is None:
         rope_cache = compressor_state_cache
         load_rope_positions = False

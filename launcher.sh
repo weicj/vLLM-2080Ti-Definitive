@@ -315,6 +315,7 @@ ROUTE_PROFILE_KEYS=(
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
   VLLM_FORCE_NVFP4_W4A16
   VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
   VLLM_INT8KV_FA_CASCADE_DEQUANT
   VLLM_INT8KV_FA_CASCADE_TILE_TOKENS
   VLLM_INT8KV_FA_CONTINUATION_DEQUANT
@@ -378,6 +379,9 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
+  VLLM_FORCE_NVFP4_W4A16
+  VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
   VLLM_INT8KV_FA_CASCADE_DEQUANT
   VLLM_INT8KV_FA_CONTINUATION_DEQUANT
   VLLM_INT8KV_FA_PREFILL
@@ -746,6 +750,9 @@ save_manager_state() {
     printf 'DISABLE_CUSTOM_ALL_REDUCE=%q\n' "${DISABLE_CUSTOM_ALL_REDUCE:-}"
     printf 'DISABLE_LOG_STATS=%q\n' "${DISABLE_LOG_STATS:-}"
     printf 'VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%q\n' "${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-}"
+    printf 'VLLM_FORCE_NVFP4_W4A16=%q\n' "${VLLM_FORCE_NVFP4_W4A16:-}"
+    printf 'VLLM_PLE_CPU_OFFLOAD=%q\n' "${VLLM_PLE_CPU_OFFLOAD:-}"
+    printf 'VLLM_STATIC_PP_SINGLE_TOKEN=%q\n' "${VLLM_STATIC_PP_SINGLE_TOKEN:-}"
     printf 'MODE=%q\n' "${MODE:-normal}"
     printf 'PORT=%q\n' "${PORT:-8000}"
     printf 'SERVICE_SCOPE=%q\n' "${SERVICE_SCOPE:-local}"
@@ -1177,7 +1184,7 @@ enforce_parallelism_constraints() {
   # vLLM's PP async path currently accepts one sampled token per request.
   # MTP/rejection sampling returns multiple tokens, so PP + MTP must use the
   # synchronous scheduler until upstream supports that state transfer.
-  if [[ "$pp" =~ ^[2-9][0-9]*$ ]] && [[ "$mtp" =~ ^[1-9][0-9]*$ ]]; then
+  if [[ "$pp" =~ ^[0-9]+$ ]] && (( pp >= 2 )) && [[ "$mtp" =~ ^[1-9][0-9]*$ ]]; then
     if [[ "${NO_ASYNC_SCHEDULING:-0}" != "1" ]]; then
       NO_ASYNC_SCHEDULING=1
       PP_MTP_ASYNC_AUTO_DISABLED=1
@@ -1187,7 +1194,9 @@ enforce_parallelism_constraints() {
   # PLE CPU offload has one shared request/output slot per DP rank. The PP
   # async scheduler can advance a later microstep before that slot's reset is
   # visible to the CPU worker, leaving the pipeline waiting indefinitely.
-  if [[ "$pp" =~ ^[2-9][0-9]*$ ]] && [[ "${VLLM_PLE_CPU_OFFLOAD:-0}" == "1" || "${VLLM_PLE_CPU_OFFLOAD:-}" == "true" ]]; then
+  local ple_offload_value=${VLLM_PLE_CPU_OFFLOAD:-0}
+  ple_offload_value=${ple_offload_value,,}
+  if [[ "$pp" =~ ^[0-9]+$ ]] && (( pp >= 2 )) && [[ "$ple_offload_value" == "1" || "$ple_offload_value" == "true" || "$ple_offload_value" == "yes" || "$ple_offload_value" == "on" ]]; then
     if [[ "${NO_ASYNC_SCHEDULING:-0}" != "1" ]]; then
       NO_ASYNC_SCHEDULING=1
       PP_PLE_ASYNC_AUTO_DISABLED=1
@@ -2096,6 +2105,9 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" ATTENTION_BACKEND "${ATTENTION_BACKEND:-}"
   write_profile_entry "$target_file.tmp" DISABLE_HYBRID_KV_CACHE_MANAGER "${DISABLE_HYBRID_KV_CACHE_MANAGER:-}"
   write_profile_entry "$target_file.tmp" DISABLE_CUSTOM_ALL_REDUCE "${DISABLE_CUSTOM_ALL_REDUCE:-}"
+  write_profile_entry "$target_file.tmp" VLLM_FORCE_NVFP4_W4A16 "${VLLM_FORCE_NVFP4_W4A16:-}"
+  write_profile_entry "$target_file.tmp" VLLM_PLE_CPU_OFFLOAD "${VLLM_PLE_CPU_OFFLOAD:-}"
+  write_profile_entry "$target_file.tmp" VLLM_STATIC_PP_SINGLE_TOKEN "${VLLM_STATIC_PP_SINGLE_TOKEN:-}"
   mv "$target_file.tmp" "$target_file"
 
   PROFILE="$family_dir/$weight_dir/user/${safe_name}.env"

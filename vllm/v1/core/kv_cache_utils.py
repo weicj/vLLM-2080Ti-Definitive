@@ -665,12 +665,15 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Only non-align Mamba state breaks prefix-cache divisibility. Align mode
-    # deliberately supports state block sizes that differ from the attention
-    # block size and uses their GCD as the hash granularity.
+    # A non-align Mamba cache can only use finer hashes when its state block
+    # size matches the scheduler block.  ``all`` is valid in that case; only
+    # a divergent block size forces coarse scheduler-aligned hashing.  Align
+    # mode deliberately supports state blocks that differ from attention and
+    # uses their GCD as the hash granularity.
     if any(
         isinstance(g.kv_cache_spec, MambaSpec)
         and g.kv_cache_spec.mamba_cache_mode != "align"
+        and g.kv_cache_spec.block_size != cache_config.block_size
         for g in groups
     ):
         return scheduler_block_size, scheduler_block_size

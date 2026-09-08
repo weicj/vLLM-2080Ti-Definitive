@@ -210,8 +210,10 @@ class Qwen4ExpConfig(PretrainedConfig):
         rope_parameters: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        if text_config is not None:
-            kwargs.pop("split_ngram_parts", None)
+        # These fields belong to the language-model config even when a
+        # checkpoint stores them at the outer level.  Keep them while building
+        # ``text_config`` instead of silently falling back to defaults.
+        split_ngram_parts = kwargs.pop("split_ngram_parts", None)
 
         text_kwargs = (
             dict(kwargs)
@@ -229,11 +231,34 @@ class Qwen4ExpConfig(PretrainedConfig):
             self.vision_config = vision_config
 
         if isinstance(text_config, dict):
-            self.text_config = self.sub_configs["text_config"](**text_config)
+            nested_text_kwargs = dict(text_config)
+            if (
+                split_ngram_parts is not None
+                and "split_ngram_parts" not in nested_text_kwargs
+            ):
+                nested_text_kwargs["split_ngram_parts"] = split_ngram_parts
+            if (
+                rope_parameters is not None
+                and "rope_parameters" not in nested_text_kwargs
+            ):
+                nested_text_kwargs["rope_parameters"] = rope_parameters
+            self.text_config = self.sub_configs["text_config"](**nested_text_kwargs)
         elif text_config is None:
+            if split_ngram_parts is not None:
+                text_kwargs["split_ngram_parts"] = split_ngram_parts
+            if rope_parameters is not None:
+                text_kwargs["rope_parameters"] = rope_parameters
             self.text_config = self.sub_configs["text_config"](**text_kwargs)
         else:
             self.text_config = text_config
+            if split_ngram_parts is not None and not hasattr(
+                self.text_config, "split_ngram_parts"
+            ):
+                self.text_config.split_ngram_parts = split_ngram_parts
+            if rope_parameters is not None and not getattr(
+                self.text_config, "rope_parameters", None
+            ):
+                self.text_config.rope_parameters = rope_parameters
 
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id
