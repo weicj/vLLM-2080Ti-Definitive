@@ -73,6 +73,16 @@ def test_qwen4_exp_nested_config_preserves_ple_and_qsa_layout() -> None:
     assert config.architectures == ["Qwen4ExpForConditionalGeneration"]
 
 
+def test_qwen4_exp_text_config_preserves_legacy_rope_precedence() -> None:
+    legacy = {"rope_type": "yarn", "factor": 4.0}
+    newer = {"rope_type": "default", "factor": 1.0}
+
+    config = _text_config(rope_scaling=legacy, rope_parameters=newer)
+
+    assert config.rope_parameters["rope_type"] == "yarn"
+    assert config.rope_parameters["factor"] == 4.0
+
+
 def test_qwen4_exp_rejects_incomplete_qsa_config() -> None:
     with pytest.raises(ValueError, match="missing required fields"):
         _text_config(indexer_budget=None)

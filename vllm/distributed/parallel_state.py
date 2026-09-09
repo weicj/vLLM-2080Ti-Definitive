@@ -1077,6 +1077,23 @@ class GroupCoordinator:
             handles[0].wait()
             self._pending_isends.popleft()
 
+    def _drain_pending_isends(self) -> None:
+        """Wait for fire-and-forget sends before their process groups vanish."""
+
+        while self._pending_isends:
+            handles, _ = self._pending_isends.popleft()
+            for handle in handles[1:]:
+                handle.wait()
+            if handles:
+                handles[0].wait()
+
+        pending_static = getattr(self, "_pending_static_isends", None)
+        if pending_static is not None:
+            while pending_static:
+                handles, _ = pending_static.popleft()
+                for handle in handles:
+                    handle.wait()
+
     def isend_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
@@ -1347,6 +1364,7 @@ class GroupCoordinator:
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
+        self._drain_pending_isends()
         if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group

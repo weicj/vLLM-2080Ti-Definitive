@@ -775,10 +775,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 existing_base_state,
             )
             cached_state[..., : self.conv_state_len] = safe_next_state
+            # Invalid graph rows are remapped to the reserved NULL block above
+            # and retain its existing state.  Write the complete fixed-shape
+            # batch so this path remains CUDA-Graph capture safe; valid state
+            # indices are allocator-owned and never equal NULL_BLOCK_ID.
             conv_state.index_copy_(0, state_indices, cached_state)
-            # Block zero is the allocator's reserved null block. Padded graph
-            # rows are remapped there for safe gathers; restore its invariant
-            # after the fixed-shape write.
+            # Keep the reserved null row pristine.  This is a fixed-index
+            # write (unlike boolean advanced indexing), so it is safe during
+            # CUDA Graph capture while ensuring padded rows cannot affect a
+            # subsequent request.
             conv_state[NULL_BLOCK_ID].zero_()
 
         return output
@@ -958,6 +963,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 existing_base_state,
             )
             existing_state[..., : self.conv_state_len] = safe_next_state
+            # ``state_indices`` is fixed-shape and invalid rows point at the
+            # unchanged NULL block, keeping this write CUDA-Graph safe.
             conv_state.index_copy_(0, state_indices, existing_state)
             conv_state[NULL_BLOCK_ID].zero_()
         return output
@@ -1094,6 +1101,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 existing_state,
             )
             cached_state[..., :state_capacity] = next_state
+            # Invalid rows are mapped to the unchanged NULL block.  Keep the
+            # write fixed-shape so speculative decode is CUDA-Graph safe.
             conv_state.index_copy_(0, state_indices, cached_state)
             conv_state[NULL_BLOCK_ID].zero_()
 

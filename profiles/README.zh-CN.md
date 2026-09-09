@@ -19,6 +19,9 @@ profiles/
   qwen35b/
     w8a16/                 # Qwen3.x 35B FP8 权重
       normal/
+  qwen38flashnext/
+    w4a16/                 # Qwen3.8 Flash-Next NVFP4 权重
+      experimental/
 ```
 
 `w8a16` 表示 FP8 权重、FP16 激活；`w4a16` 表示 NVFP4 权重、FP16 激活。
@@ -80,17 +83,19 @@ CUDA Graph。以下为仓库统一口径的固定 4K/128 形状中位数，仅�
 
 | Profile | TP/PP | 后端 | 上下文 / util | GPU KV tokens | Prefill / decode tok/s | 路线定位 |
 |---|---:|---|---:|---:|---:|---|
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | 102,591 | **2379.14 / 24.92** | 推荐均衡路线 |
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | FlashQLA + PYNCCL | 90K / 0.96 | 100,031 | **1697.99 / 28.18** | Decode 优先 |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | 298,150 | **514.14 / 15.23** | 推荐均衡路线 |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | FlashQLA + PYNCCL | 90K / 0.92 | 196,170 | **330.64 / 16.44** | Decode 优先 |
 | TP2xPP4 异构容量参考 | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | **152,492** | — | 6 张 T10 + 2 张 RTX 2080 Ti；仅作启动/容量参考 |
 
-TP2xPP4 是推荐的均衡路线；TP4xPP2 偏向 decode。CAR `auto` 仅用于 TP 组全量 NVLink 互联且 P2P 可达的情况，
-PCIe-only 组使用 NCCL/PYNCCL。PP stage 之间可混用显卡型号，但每个 TP 组必须 P2P 有效。
+异构 152,492-token 行使用 NVFP4 权重、FP16 KV、MTP=0、100K 上下文和非 eager CUDA Graph，
+测量方式是启动/健康检查/真实请求容量探测，不是吞吐测试。
+
+TP2xPP4 是推荐的均衡路线；TP4xPP2 偏向 decode。已发布 profile 显式设置
+`DISABLE_CUSTOM_ALL_REDUCE=1`，因此即使 TP 组有 NVLink 也使用 NCCL/PYNCCL。
+当 profile 没有覆盖该设置时，launcher 的 CAR `auto` 才会用于全量 NVLink 且 P2P
+可达的 TP 组。PP stage 之间可混用显卡型号，但每个 TP 组必须 P2P 有效。
 真实 Agent/多轮性能和输出质量都应单独验证；启动前执行 `./launcher.sh --print-config`。
 
 两者均为实验性工程路线；TP2xPP2 不作为已验证 profile 发布。
 
 选定 profile 后，启动服务前执行 `./launcher.sh --print-config` 检查最终生效的路线参数。
-
-异构 152,492-token 行使用 NVFP4 权重、FP16 KV、MTP=0、100K 上下文和非 eager CUDA Graph，
-测量方式是启动/健康检查/真实请求容量探测，不是吞吐测试。

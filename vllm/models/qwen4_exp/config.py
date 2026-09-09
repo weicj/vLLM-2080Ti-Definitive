@@ -70,7 +70,10 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         self.rope_scaling = (
             rope_scaling or rope_parameters or normalized_rope_parameters
         )
-        self.rope_parameters = rope_parameters or normalized_rope_parameters
+        # Qwen3NextConfig resolves legacy ``rope_scaling`` before the newer
+        # ``rope_parameters`` when both are present.  Keep that canonical
+        # result so QSA and the parent config use identical RoPE settings.
+        self.rope_parameters = normalized_rope_parameters
         self.rope_theta = rope_theta
 
         self.hc_count = hc_count
@@ -264,9 +267,10 @@ class Qwen4ExpConfig(PretrainedConfig):
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
-        self.rope_parameters = rope_parameters or getattr(
-            self.text_config, "rope_parameters", {}
-        )
+        # Keep the outer view aligned with the already-normalized text config;
+        # that config applies the same legacy ``rope_scaling`` precedence as
+        # Qwen3NextConfig.
+        self.rope_parameters = getattr(self.text_config, "rope_parameters", {})
         super().__init__(**kwargs, tie_word_embeddings=tie_word_embeddings)
 
 

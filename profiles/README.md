@@ -20,6 +20,9 @@ profiles/
   qwen35b/
     w8a16/                 # Qwen3.x 35B FP8 weights
       normal/
+  qwen38flashnext/
+    w4a16/                 # Qwen3.8 Flash-Next NVFP4 weights
+      experimental/
 ```
 
 `w8a16` means FP8 weights with FP16 activations; `w4a16` means NVFP4 weights
@@ -84,15 +87,17 @@ single-digit tok/s when multi-GPU communication or CPU capacity is limiting.
 
 | Profile | TP/PP | Backend | Context / util | GPU KV tokens | Prefill / decode tok/s | Route guidance |
 |---|---:|---|---:|---:|---:|---|
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | 102,591 | **2379.14 / 24.92** | Recommended balance |
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | FlashQLA + PYNCCL | 90K / 0.96 | 100,031 | **1697.99 / 28.18** | Decode priority |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | 298,150 | **514.14 / 15.23** | Recommended balance |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | FlashQLA + PYNCCL | 90K / 0.92 | 196,170 | **330.64 / 16.44** | Decode priority |
 | TP2xPP4 heterogeneous capacity reference | 2x4 | FlashQLA + PYNCCL | 100K / 0.92 | **152,492** | — | 6x T10 + 2x RTX 2080 Ti; startup/capacity only |
 
 TP2xPP4 is the recommended balance route; TP4xPP2 prioritizes decode.
-CAR `auto` is used only for fully NVLink-connected, P2P-valid TP groups;
-PCIe-only groups use NCCL/PYNCCL. PP stages can mix GPU models, but each TP
-group must remain P2P-valid. Validate real Agent/multi-turn workloads and
-output quality separately; use `./launcher.sh --print-config` before launch.
+The shipped profiles explicitly set `DISABLE_CUSTOM_ALL_REDUCE=1`, so they use
+NCCL/PYNCCL even on NVLink. CAR `auto` is available from the launcher for
+fully NVLink-connected, P2P-valid TP groups when a profile does not override
+that setting. PP stages can mix GPU models, but each TP group must remain
+P2P-valid. Validate real Agent/multi-turn workloads and output quality
+separately; use `./launcher.sh --print-config` before launch.
 
 The heterogeneous 152,492-token row is an NVFP4-weight/FP16-KV, MTP=0,
 100K-context, non-eager CUDA Graph startup/health/real-request capacity probe;

@@ -225,7 +225,11 @@ def enable_qwen4_exp_low_latency_gemm(
         if weight is None or weight.dim() != 2:
             continue
         plan = QWEN4_EXP_GEMM_PLANS.get((weight.shape[0], weight.shape[1]))
-        if plan is None:
+        # The SM75 path is a runtime-gated Triton GEMV and does not use the
+        # SM103 CuTe plan table.  TP changes the local projection dimensions,
+        # so requiring a TP4 plan here would silently disable GEMV for TP2
+        # (and for otherwise valid unlisted local shapes).
+        if is_sm103 and plan is None:
             continue
         if is_linear:
             child.quant_method = Qwen4ExpLowLatencyLinearMethod()
@@ -233,7 +237,8 @@ def enable_qwen4_exp_low_latency_gemm(
             child.quant_method = Qwen4ExpLowLatencyEmbeddingMethod()
         installed += 1
         installed_shapes.add((weight.shape[0], weight.shape[1]))
-        warmup_configs.update(plan.values())
+        if plan is not None:
+            warmup_configs.update(plan.values())
 
     logger.info(
         "Qwen4Exp low-latency GEMM enabled: arch=%s dtype=%s backend=%s "

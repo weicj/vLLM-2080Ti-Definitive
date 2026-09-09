@@ -87,6 +87,35 @@ def test_qsa_sparse_paged_attention_fp16_matches_reference(
     not current_platform.is_cuda() or not HAS_TRITON,
     reason="requires NVIDIA CUDA and Triton",
 )
+def test_qsa_torch_sparse_attention_all_invalid_rows_are_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graph padding with no selected token must not produce NaNs."""
+    monkeypatch.setenv("VLLM_QSA_TORCH_SPARSE", "1")
+    device = torch.device("cuda")
+    q = torch.randn(2, 2, 16, dtype=torch.float16, device=device)
+    k_cache = torch.randn(2, 16, 1, 16, dtype=torch.float16, device=device)
+    v_cache = torch.randn_like(k_cache)
+    logical_indices = torch.tensor(
+        [[-1, -1, -1, -1], [0, 1, -1, -1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    block_table = torch.tensor([[0, 1]], dtype=torch.int32, device=device)
+    token_to_req = torch.zeros(2, dtype=torch.int32, device=device)
+
+    actual = qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical_indices, block_table, token_to_req
+    )
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not HAS_TRITON,
+    reason="requires NVIDIA CUDA and Triton",
+)
 def test_qsa_sparse_paged_attention_flash_next_capture_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,16 +228,19 @@ def test_qsa_sm75_torch_cache_fallback(
 def test_qsa_sm75_torch_topk_matches_torch_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    torch.manual_seed(11)
     device = torch.device("cuda")
     rows, num_heads, head_dim = 4, 6, 128
     page_size, num_pages = 16, 8
-    query = torch.randn(
-        rows, num_heads, head_dim, dtype=torch.float16, device=device
-    )
-    key_cache = torch.randn(
+    # Use well-separated scores so the reference matmul and Triton dot do not
+    # disagree on an exact top-k boundary due to accumulation order.
+    query = torch.zeros(rows, num_heads, head_dim, dtype=torch.float16, device=device)
+    query[..., 0] = 1
+    key_cache = torch.zeros(
         num_pages, page_size, 1, head_dim, dtype=torch.float16, device=device
     )
+    key_cache[..., 0] = torch.arange(
+        num_pages * page_size, dtype=torch.float16, device=device
+    ).reshape(num_pages, page_size, 1)
     page_table = torch.arange(
         num_pages, dtype=torch.int32, device=device
     ).unsqueeze(0)

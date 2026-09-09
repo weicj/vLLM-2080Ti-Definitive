@@ -187,12 +187,13 @@ class PPHandler:
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             num_reqs, num_sampled_tokens = sampled_token_ids.shape
-            if num_sampled_tokens > self.max_sample_len:
-                raise ValueError(
-                    "sampled token width exceeds the PP broadcast buffer: "
-                    f"{num_sampled_tokens} > {self.max_sample_len}"
-                )
-            if num_sampled_tokens < self.max_sample_len:
+            width_error = num_sampled_tokens > self.max_sample_len
+            if width_error:
+                # Keep the collective shape fixed even for malformed sampler
+                # output.  Raising before the broadcasts would leave every
+                # non-last PP rank blocked in ``receive``.
+                sampled_tokens = sampled_token_ids[:, : self.max_sample_len].contiguous()
+            elif num_sampled_tokens < self.max_sample_len:
                 sampled_tokens = sampled_token_ids.new_full(
                     (num_reqs, self.max_sample_len), -1
                 )
@@ -216,3 +217,9 @@ class PPHandler:
                 num_rejected,
             ):
                 tensor.record_stream(self.broadcast_stream)
+
+            if width_error:
+                raise ValueError(
+                    "sampled token width exceeds the PP broadcast buffer: "
+                    f"{num_sampled_tokens} > {self.max_sample_len}"
+                )

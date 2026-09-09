@@ -21,6 +21,29 @@ class FakeHead(FakeLinear):
     pass
 
 
+class FakeTensor:
+    def __init__(
+        self,
+        shape: tuple[int, int],
+        dtype: torch.dtype,
+        *,
+        is_cuda: bool = True,
+        device: str = "cuda:0",
+        contiguous: bool = True,
+    ) -> None:
+        self.shape = shape
+        self.dtype = dtype
+        self.is_cuda = is_cuda
+        self.device = device
+        self._stride = shape if not contiguous else (shape[1], 1)
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def stride(self) -> tuple[int, int]:
+        return self._stride
+
+
 def _make_module() -> tuple[nn.Module, object]:
     root = nn.Module()
     root.linear = FakeLinear(qwen4_gemm.UnquantizedLinearMethod(), 640, 2560)
@@ -46,7 +69,11 @@ def test_sm75_installs_fp16_triton_path(monkeypatch: pytest.MonkeyPatch) -> None
         root.lm_head.quant_method, qwen4_gemm.Qwen4ExpLowLatencyEmbeddingMethod
     )
     assert root.quantized.quant_method is quantized_method
-    assert type(root.unlisted.quant_method) is qwen4_gemm.UnquantizedLinearMethod
+    # SM75 GEMV installation is independent of the SM103 shape-plan table;
+    # this stands in for a TP2-local projection shape.
+    assert isinstance(
+        root.unlisted.quant_method, qwen4_gemm.Qwen4ExpLowLatencyLinearMethod
+    )
 
 
 def test_sm75_dispatches_only_runtime_eligible_gemv(
@@ -58,12 +85,31 @@ def test_sm75_dispatches_only_runtime_eligible_gemv(
         gemv=lambda x, weight: sentinel,
     )
     monkeypatch.setattr(qwen4_gemm, "triton_gemv", gemv)
-    monkeypatch.setattr(qwen4_gemm, "_triton_runtime_ok", lambda x, weight: True)
+    monkeypatch.setattr(qwen4_gemm, "_is_sm75", lambda: True)
 
-    x = torch.empty(1, 3)
-    weight = torch.empty(7, 3)
+    x = FakeTensor((1, 3), torch.float16)
+    weight = FakeTensor((7, 3), torch.float16)
+    assert qwen4_gemm._triton_runtime_ok(x, weight) is True
     assert qwen4_gemm._qwen4_exp_low_latency_gemm(x, weight) is sentinel
 
-    monkeypatch.setattr(qwen4_gemm, "_triton_runtime_ok", lambda x, weight: False)
-    actual = qwen4_gemm._qwen4_exp_low_latency_gemm(x, weight)
-    torch.testing.assert_close(actual, torch.nn.functional.linear(x, weight))
+    assert qwen4_gemm._triton_runtime_ok(
+        FakeTensor((2, 3), torch.float16), weight
+    ) is False
+    assert qwen4_gemm._triton_runtime_ok(
+        FakeTensor((1, 3), torch.bfloat16), weight
+    ) is False
+    assert qwen4_gemm._triton_runtime_ok(
+        FakeTensor((1, 3), torch.float16, contiguous=False), weight
+    ) is False
+    assert qwen4_gemm._triton_runtime_ok(
+        FakeTensor((1, 4), torch.float16), weight
+    ) is False
+    assert qwen4_gemm._triton_runtime_ok(
+        FakeTensor((1, 3), torch.float16, device="cuda:1"), weight
+    ) is False
+    assert qwen4_gemm._triton_runtime_ok(
+        FakeTensor((1, 3), torch.float16, is_cuda=False), weight
+    ) is False
+
+    monkeypatch.setattr(qwen4_gemm, "_is_sm75", lambda: False)
+    assert qwen4_gemm._triton_runtime_ok(x, weight) is False

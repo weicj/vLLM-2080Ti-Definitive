@@ -912,6 +912,13 @@ def _qsa_torch_sparse_attention(
             scores.mul_(scale)
             scores.masked_fill_(~valid[:, None, :], -float("inf"))
             probabilities = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
+            # Padded CUDA-graph rows can have no selected token.  Softmax over
+            # an all-`-inf` row is NaN; the Triton path emits zero for this
+            # case, so keep the torch fallback numerically equivalent.
+            valid_rows = valid.any(dim=-1).view(-1, 1, 1)
+            probabilities = torch.where(
+                valid_rows, probabilities, torch.zeros_like(probabilities)
+            )
             values = v_cache[physical_page, page_offset, kv_head, :]
             out[row_slice, head_start:head_end, :].copy_(
                 torch.matmul(probabilities, values)

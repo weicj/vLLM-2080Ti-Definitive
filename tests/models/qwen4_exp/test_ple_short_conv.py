@@ -42,3 +42,27 @@ def test_prefill_short_conv_ignores_cuda_graph_padding() -> None:
     torch.testing.assert_close(output[2:], torch.zeros_like(output[2:]))
     torch.testing.assert_close(conv_state[0], torch.zeros_like(conv_state[0]))
     torch.testing.assert_close(conv_state[1], torch.ones_like(conv_state[1]))
+
+
+def test_decode_short_conv_does_not_write_graph_padding_rows() -> None:
+    """A padded NULL block must not overwrite a live decode state."""
+    hidden_size = 4
+    layer = object.__new__(Qwen4ExpPLELayer)
+    layer.conv_state_len = 2
+    layer.short_conv_dilation = 1
+
+    conv_state = torch.zeros((3, hidden_size, 2))
+    conv_state[1].fill_(2.0)
+    conv_weights = torch.ones((hidden_size, 3))
+    output = layer._short_conv_dilated_decode_batched(
+        torch.ones((2, hidden_size)),
+        conv_state,
+        conv_weights,
+        torch.tensor([1, 0], dtype=torch.int32),
+        torch.tensor([True, False]),
+    )
+
+    assert output.shape == (2, hidden_size)
+    torch.testing.assert_close(conv_state[0], torch.zeros_like(conv_state[0]))
+    expected_state = torch.tensor([2.0, 1.0]).expand(hidden_size, -1)
+    torch.testing.assert_close(conv_state[1], expected_state)

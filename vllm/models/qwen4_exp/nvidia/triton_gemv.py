@@ -7,10 +7,18 @@ from __future__ import annotations
 
 import torch
 
+from vllm.triton_utils import HAS_TRITON
+
 try:
     import triton
     import triton.language as tl
 except ImportError:  # pragma: no cover - depends on the runtime environment
+    triton = None
+    tl = None
+
+# vLLM can disable Triton after its backend/driver probe even when the Python
+# package is importable.  Treat that state as unavailable for this kernel too.
+if not HAS_TRITON:
     triton = None
     tl = None
 
@@ -81,12 +89,12 @@ if triton is not None:
 
 
 def is_available() -> bool:
-    return triton is not None
+    return HAS_TRITON and triton is not None
 
 
 def gemv(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Compute ``x @ weight.T`` for contiguous FP16 2-D tensors."""
-    if triton is None:
+    if not is_available():
         raise RuntimeError("Triton is not available")
     if x.dim() != 2 or weight.dim() != 2 or x.shape[1] != weight.shape[1]:
         raise ValueError("invalid GEMV shapes")

@@ -214,6 +214,8 @@ class Worker(WorkerBase):
             unsupported.append(f"DCP={parallel_config.decode_context_parallel_size}")
         if parallel_config.use_ubatching:
             unsupported.append("ubatching/DBO")
+        if not self.use_v2_model_runner:
+            unsupported.append("Model Runner V2 required")
         if self.model_config.architecture not in {
             "Qwen4ExpForCausalLM",
             "Qwen4ExpForConditionalGeneration",

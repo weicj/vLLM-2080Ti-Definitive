@@ -468,6 +468,13 @@ class ParallelConfig:
             )
 
         if envs.VLLM_PLE_CPU_OFFLOAD and not self._ple_offload_ipc_path:
+            # ParallelConfig is created by EngineArgs in the controller and
+            # then serialized to every multiprocessing worker.  Generate the
+            # endpoint at that single construction point; workers consume the
+            # serialized value rather than constructing a fresh uuid4 path.
+            # PLE rejects independently-launched/external workers, so a
+            # per-rank config cannot silently split registrations across
+            # different sockets.
             self._ple_offload_ipc_path = get_open_zmq_ipc_path()
 
         if self.all2all_backend in ["pplx", "naive"]:
