@@ -287,6 +287,9 @@ ROUTE_PROFILE_KEYS=(
   MODEL_FAMILY
   PROFILE_GROUP
   MODEL_VARIANT
+  TP_SIZE
+  PP_SIZE
+  VLLM_PP_LAYER_PARTITION
   QUANTIZATION
   KV_CACHE_DTYPE
   MAX_MODEL_LEN
@@ -310,6 +313,9 @@ ROUTE_PROFILE_KEYS=(
   DISABLE_HYBRID_KV_CACHE_MANAGER
   DISABLE_CUSTOM_ALL_REDUCE
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
+  VLLM_FORCE_NVFP4_W4A16
+  VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
   VLLM_INT8KV_FA_CASCADE_DEQUANT
   VLLM_INT8KV_FA_CASCADE_TILE_TOKENS
   VLLM_INT8KV_FA_CONTINUATION_DEQUANT
@@ -373,6 +379,9 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
+  VLLM_FORCE_NVFP4_W4A16
+  VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
   VLLM_INT8KV_FA_CASCADE_DEQUANT
   VLLM_INT8KV_FA_CONTINUATION_DEQUANT
   VLLM_INT8KV_FA_PREFILL
@@ -589,7 +598,7 @@ reset_route_profile_fields() {
 
 profile_key_is_global() {
   case "$1" in
-MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|TP_SIZE|PP_SIZE|\
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
@@ -741,6 +750,9 @@ save_manager_state() {
     printf 'DISABLE_CUSTOM_ALL_REDUCE=%q\n' "${DISABLE_CUSTOM_ALL_REDUCE:-}"
     printf 'DISABLE_LOG_STATS=%q\n' "${DISABLE_LOG_STATS:-}"
     printf 'VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%q\n' "${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-}"
+    printf 'VLLM_FORCE_NVFP4_W4A16=%q\n' "${VLLM_FORCE_NVFP4_W4A16:-}"
+    printf 'VLLM_PLE_CPU_OFFLOAD=%q\n' "${VLLM_PLE_CPU_OFFLOAD:-}"
+    printf 'VLLM_STATIC_PP_SINGLE_TOKEN=%q\n' "${VLLM_STATIC_PP_SINGLE_TOKEN:-}"
     printf 'MODE=%q\n' "${MODE:-normal}"
     printf 'PORT=%q\n' "${PORT:-8000}"
     printf 'SERVICE_SCOPE=%q\n' "${SERVICE_SCOPE:-local}"
@@ -1172,10 +1184,22 @@ enforce_parallelism_constraints() {
   # vLLM's PP async path currently accepts one sampled token per request.
   # MTP/rejection sampling returns multiple tokens, so PP + MTP must use the
   # synchronous scheduler until upstream supports that state transfer.
-  if [[ "$pp" =~ ^[2-9][0-9]*$ ]] && [[ "$mtp" =~ ^[1-9][0-9]*$ ]]; then
+  if [[ "$pp" =~ ^[0-9]+$ ]] && (( pp >= 2 )) && [[ "$mtp" =~ ^[1-9][0-9]*$ ]]; then
     if [[ "${NO_ASYNC_SCHEDULING:-0}" != "1" ]]; then
       NO_ASYNC_SCHEDULING=1
       PP_MTP_ASYNC_AUTO_DISABLED=1
+    fi
+  fi
+
+  # PLE CPU offload has one shared request/output slot per DP rank. The PP
+  # async scheduler can advance a later microstep before that slot's reset is
+  # visible to the CPU worker, leaving the pipeline waiting indefinitely.
+  local ple_offload_value=${VLLM_PLE_CPU_OFFLOAD:-0}
+  ple_offload_value=${ple_offload_value,,}
+  if [[ "$pp" =~ ^[0-9]+$ ]] && (( pp >= 2 )) && [[ "$ple_offload_value" == "1" || "$ple_offload_value" == "true" || "$ple_offload_value" == "yes" || "$ple_offload_value" == "on" ]]; then
+    if [[ "${NO_ASYNC_SCHEDULING:-0}" != "1" ]]; then
+      NO_ASYNC_SCHEDULING=1
+      PP_PLE_ASYNC_AUTO_DISABLED=1
     fi
   fi
 }
@@ -2056,6 +2080,9 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
   write_profile_entry "$target_file.tmp" PROFILE_GROUP "${PROFILE_GROUP:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
+  write_profile_entry "$target_file.tmp" TP_SIZE "${TP_SIZE:-}"
+  write_profile_entry "$target_file.tmp" PP_SIZE "${PP_SIZE:-1}"
+  write_profile_entry "$target_file.tmp" VLLM_PP_LAYER_PARTITION "${VLLM_PP_LAYER_PARTITION:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
@@ -2081,6 +2108,9 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" ATTENTION_BACKEND "${ATTENTION_BACKEND:-}"
   write_profile_entry "$target_file.tmp" DISABLE_HYBRID_KV_CACHE_MANAGER "${DISABLE_HYBRID_KV_CACHE_MANAGER:-}"
   write_profile_entry "$target_file.tmp" DISABLE_CUSTOM_ALL_REDUCE "${DISABLE_CUSTOM_ALL_REDUCE:-}"
+  write_profile_entry "$target_file.tmp" VLLM_FORCE_NVFP4_W4A16 "${VLLM_FORCE_NVFP4_W4A16:-}"
+  write_profile_entry "$target_file.tmp" VLLM_PLE_CPU_OFFLOAD "${VLLM_PLE_CPU_OFFLOAD:-}"
+  write_profile_entry "$target_file.tmp" VLLM_STATIC_PP_SINGLE_TOKEN "${VLLM_STATIC_PP_SINGLE_TOKEN:-}"
   mv "$target_file.tmp" "$target_file"
 
   PROFILE="$family_dir/$weight_dir/user/${safe_name}.env"
@@ -3343,6 +3373,9 @@ set_sm75_runtime_env() {
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-"$FLASHQLA_ROOT/.torch_extensions_vllm_flashqla_legacy"}
   fi
   export FLASHINFER_ENABLE_AOT=${FLASHINFER_ENABLE_AOT:-1}
+  if [[ -n "${VLLM_PP_LAYER_PARTITION:-}" ]]; then
+    export VLLM_PP_LAYER_PARTITION
+  fi
   if [[ "${KV_CACHE_DTYPE:-}" == "int8_per_token_head" ]]; then
     export VLLM_INT8KV_FA_PREFILL=${VLLM_INT8KV_FA_PREFILL:-1}
     if [[ "$MODE" == "safe" ]]; then
@@ -3765,6 +3798,9 @@ run_compile_prewarm() {
     if [[ "${PP_MTP_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
       echo "Async scheduling: disabled automatically for PP + MTP compatibility"
     fi
+    if [[ "${PP_PLE_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
+      echo "Async scheduling: disabled automatically for PP + PLE compatibility"
+    fi
     echo "Command: $RUNTIME_ROOT/.venv/bin/python -m vllm.entrypoints.openai.api_server $args_text"
     echo "============================================================"
   } > "$prewarm_log"
@@ -3941,6 +3977,9 @@ launch_server() {
   echo "  MTP graph policy: VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
   if [[ "${PP_MTP_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
     echo "  Async scheduling: disabled automatically for PP + MTP compatibility"
+  fi
+  if [[ "${PP_PLE_ASYNC_AUTO_DISABLED:-0}" == "1" ]]; then
+    echo "  Async scheduling: disabled automatically for PP + PLE compatibility"
   fi
   echo "  TQ diagnostics: $(current_tq_diagnostics_label)"
   echo "  Strict tool calling: VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}"

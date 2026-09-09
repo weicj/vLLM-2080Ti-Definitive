@@ -114,6 +114,24 @@ class KVCacheSpec:
     block_size: int
 
     @property
+    def prefix_cacheable(self) -> bool:
+        """Whether this cache owner participates in prefix hashing."""
+        return True
+
+    @property
+    def tokens_per_state(self) -> int:
+        """Number of tokens represented by one stored state."""
+        return 1
+
+    @property
+    def num_states(self) -> int:
+        """Number of kernel states contained in one scheduler block."""
+        tokens_per_state = self.tokens_per_state
+        if tokens_per_state <= 0:
+            return 1
+        return max(1, self.block_size // tokens_per_state)
+
+    @property
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
@@ -350,6 +368,23 @@ class FullAttentionSpec(AttentionSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class CircularBufferSpec(FullAttentionSpec):
+    """One per-request ring page used by Qwen4-Exp QSA compression state."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config, max_len
+        return 1
+
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return
@@ -395,6 +430,10 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
+
+    @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
 
     def __post_init__(self):
         super().__post_init__()
@@ -714,6 +753,7 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    tp_replicated: bool = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -755,6 +795,9 @@ class MambaSpec(KVCacheSpec):
         return all(
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
+            and spec.mamba_type == self.mamba_type
+            and spec.page_size_bytes == self.page_size_bytes
+            and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
 
@@ -843,6 +886,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
 
     kv_cache_specs: dict[str, KVCacheSpec]
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
+
+    @property
+    def first_spec(self) -> KVCacheSpec:
+        return next(iter(self.kv_cache_specs.values()))
 
     @property
     def page_size_bytes(self) -> int:

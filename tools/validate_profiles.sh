@@ -26,7 +26,7 @@ read_profile_value() {
 
 profile_key_is_global() {
   case "$1" in
-    MODEL_DIR|PROFILE_DIR|PROFILE|PORT|SERVICE_SCOPE|GPU_DEVICES|TP_SIZE|\
+    MODEL_DIR|PROFILE_DIR|PROFILE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH)
@@ -41,6 +41,7 @@ VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH)
 profile_key_is_allowed() {
   case "$1" in
     SERVED_NAME|COMPATIBLE_MODES|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|\
+TP_SIZE|PP_SIZE|VLLM_PP_LAYER_PARTITION|\
 QUANTIZATION|KV_CACHE_DTYPE|MAX_MODEL_LEN|KV_CACHE_MEMORY_BYTES|GPU_UTIL|\
 MAX_BATCHED_TOKENS|LONG_PREFILL_TOKEN_THRESHOLD|\
 MAX_NUM_SEQS|PREFILL_BATCH_BARRIER|DISABLE_PREFIX_CACHING|MTP_K|\
@@ -48,7 +49,9 @@ MESSAGE_TYPE|MM_LIMIT_JSON|LANGUAGE_MODEL_ONLY|\
 SKIP_MM_PROFILING|HF_OVERRIDES_JSON|ADDITIONAL_CONFIG_JSON|\
 SPECULATIVE_CONFIG|ATTENTION_BACKEND|DISABLE_HYBRID_KV_CACHE_MANAGER|\
 DISABLE_CUSTOM_ALL_REDUCE|\
-VLLM_ALLOW_LONG_MAX_MODEL_LEN|VLLM_INT8KV_FA_PREFILL|\
+VLLM_ALLOW_LONG_MAX_MODEL_LEN|VLLM_FORCE_NVFP4_W4A16|VLLM_PLE_CPU_OFFLOAD|\
+VLLM_STATIC_PP_SINGLE_TOKEN|\
+VLLM_INT8KV_FA_PREFILL|\
 VLLM_INT8KV_FA_CONTINUATION_DEQUANT|VLLM_INT8KV_FA_CASCADE_DEQUANT|\
 VLLM_INT8KV_FA_CASCADE_TILE_TOKENS|\
 VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE|\
@@ -72,6 +75,9 @@ while IFS= read -r -d '' file; do
   compatible_modes=$(read_profile_value "$file" COMPATIBLE_MODES)
   kv=$(read_profile_value "$file" KV_CACHE_DTYPE)
   mtp=$(read_profile_value "$file" MTP_K)
+  tp=$(read_profile_value "$file" TP_SIZE)
+  pp=$(read_profile_value "$file" PP_SIZE)
+  pp_partition=$(read_profile_value "$file" VLLM_PP_LAYER_PARTITION)
   has_safe=0
 
   if [[ -n "$mode" ]]; then
@@ -120,6 +126,35 @@ while IFS= read -r -d '' file; do
         fi
         ;;
     esac
+  fi
+
+  if [[ -n "$tp" || -n "$pp" || -n "$pp_partition" ]]; then
+    if [[ -n "$tp" && ! "$tp" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR $rel: TP_SIZE must be a positive integer" >&2
+      ((errors += 1))
+    fi
+    if [[ -n "$pp" && ! "$pp" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR $rel: PP_SIZE must be a positive integer" >&2
+      ((errors += 1))
+    fi
+
+    # launcher.sh defaults PP_SIZE to 1 and derives a missing TP_SIZE, so a
+    # route may legitimately provide only one of the two sizes.
+    effective_pp=${pp:-1}
+    if [[ -n "$pp_partition" && "$effective_pp" =~ ^[1-9][0-9]*$ ]]; then
+      IFS=',' read -r -a partition_parts <<< "$pp_partition"
+      if (( ${#partition_parts[@]} != effective_pp )); then
+        echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must contain PP_SIZE=$effective_pp entries" >&2
+        ((errors += 1))
+      else
+        for partition in "${partition_parts[@]}"; do
+          if [[ ! "$partition" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR $rel: every VLLM_PP_LAYER_PARTITION entry must be a positive integer, got '$partition'" >&2
+            ((errors += 1))
+          fi
+        done
+      fi
+    fi
   fi
 done < <(find "$PROFILE_DIR" -type f -name '*.env' -print0 | sort -z)
 

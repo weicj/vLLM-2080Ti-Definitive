@@ -14,16 +14,56 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    CircularBufferManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def get_circular_buffer_manager(block_pool: BlockPool) -> CircularBufferManager:
+    spec = CircularBufferSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    return CircularBufferManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+
+
+def test_circular_buffer_allocates_one_page_for_request_lifetime():
+    block_pool = BlockPool(
+        num_gpu_blocks=8, enable_caching=False, hash_block_size=4
+    )
+    manager = get_circular_buffer_manager(block_pool)
+    initial_free_blocks = block_pool.get_num_free_blocks()
+
+    assert manager.get_num_blocks_to_allocate("req", 1024, [], 0, 0, 1024) == 1
+    new_blocks = manager.allocate_new_blocks("req", 1024, 1024)
+    assert len(new_blocks) == 1
+    assert len(manager.req_to_blocks["req"]) == 1
+    assert block_pool.get_num_free_blocks() == initial_free_blocks - 1
+
+    assert manager.get_num_blocks_to_allocate("req", 4096, [], 1024, 0, 4096) == 0
+    assert manager.allocate_new_blocks("req", 4096, 4096) == []
+    assert len(manager.req_to_blocks["req"]) == 1
+
+    manager.free("req")
+    assert "req" not in manager.req_to_blocks
+    assert block_pool.get_num_free_blocks() == initial_free_blocks
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):

@@ -45,6 +45,7 @@ from vllm.distributed.parallel_state import (
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
+    get_world_group,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -172,11 +173,113 @@ class Worker(WorkerBase):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        # pending non-blocking PP send work from the previous iteration
-        self._pp_send_work: list[Handle] = []
-
+        self._ple_offload_worker_handle: Any | None = None
+        self._ple_offload_enabled = self._has_ple_layers()
+        if envs.VLLM_PLE_CPU_OFFLOAD:
+            if self._ple_offload_enabled:
+                self._validate_ple_offload_config()
+            elif self.rank == 0 and self.parallel_config.data_parallel_rank == 0:
+                logger.warning(
+                    "VLLM_PLE_CPU_OFFLOAD is enabled, but this model has no PLE "
+                    "layers; skipping PLE offload process creation."
+                )
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+
+    def _has_ple_layers(self) -> bool:
+        text_config = self.model_config.hf_text_config
+        return bool(
+            envs.VLLM_PLE_CPU_OFFLOAD
+            and getattr(text_config, "ple_layer_ids", None)
+        )
+
+    def _validate_ple_offload_config(self) -> None:
+        """Reject execution modes that cannot preserve PLE IPC ordering."""
+        parallel_config = self.parallel_config
+        unsupported: list[str] = []
+        if not current_platform.is_cuda():
+            unsupported.append(f"device={current_platform.device_type}")
+        if parallel_config.nnodes != 1:
+            unsupported.append(f"nnodes={parallel_config.nnodes}")
+        if parallel_config.data_parallel_backend != "mp":
+            unsupported.append(f"DP backend={parallel_config.data_parallel_backend}")
+        if parallel_config.distributed_executor_backend != "mp":
+            unsupported.append(
+                f"executor={parallel_config.distributed_executor_backend}"
+            )
+        if parallel_config.data_parallel_size_local != parallel_config.data_parallel_size:
+            unsupported.append("non-local DP")
+        if parallel_config.prefill_context_parallel_size != 1:
+            unsupported.append(f"PCP={parallel_config.prefill_context_parallel_size}")
+        if parallel_config.decode_context_parallel_size != 1:
+            unsupported.append(f"DCP={parallel_config.decode_context_parallel_size}")
+        if parallel_config.use_ubatching:
+            unsupported.append("ubatching/DBO")
+        if not self.use_v2_model_runner:
+            unsupported.append("Model Runner V2 required")
+        if self.model_config.architecture not in {
+            "Qwen4ExpForCausalLM",
+            "Qwen4ExpForConditionalGeneration",
+        }:
+            unsupported.append("architecture")
+        if self.vllm_config.weight_transfer_config is not None:
+            unsupported.append("weight transfer")
+        if unsupported:
+            raise ValueError(
+                "VLLM_PLE_CPU_OFFLOAD does not support the requested "
+                f"configuration: {', '.join(unsupported)}"
+            )
+
+    def spawn_ple_offload(self) -> None:
+        """Spawn the node-local CPU worker before GPU model construction."""
+        if (
+            not self._ple_offload_enabled
+            or self.rank != 0
+            or self.parallel_config.data_parallel_rank != 0
+        ):
+            return
+        from vllm.distributed.utils import get_pp_indices
+        from vllm.v1.ple_offload.worker import PleOffloadWorker
+
+        text_config = self.model_config.hf_text_config
+        pp_size = self.parallel_config.pipeline_parallel_size
+        ple_stage_count = sum(
+            any(
+                start <= int(layer_id) - 1 < end
+                for layer_id in text_config.ple_layer_ids
+            )
+            for start, end in (
+                get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
+                for pp_rank in range(pp_size)
+            )
+        )
+        if ple_stage_count == 0:
+            raise RuntimeError("PLE layer IDs do not belong to a pipeline stage")
+        ipc_addr = self.parallel_config._ple_offload_ipc_path
+        if not ipc_addr:
+            raise RuntimeError("PLE offload IPC address was not initialized")
+        num_workers = (
+            self.parallel_config.data_parallel_size
+            * self.parallel_config.tensor_parallel_size
+            * ple_stage_count
+        )
+        logger.info(
+            "PleOffload: spawning CPU worker for %d PLE pipeline stage(s) "
+            "(%d registration(s), ipc_addr=%s).",
+            ple_stage_count,
+            num_workers,
+            ipc_addr,
+        )
+        self._ple_offload_worker_handle = PleOffloadWorker.make_process(
+            self.vllm_config, num_workers, ipc_addr
+        )
+
+    def wait_ple_offload_ready(self) -> None:
+        if self._ple_offload_worker_handle is None:
+            return
+        from vllm.v1.ple_offload.worker import PleOffloadWorker
+
+        PleOffloadWorker.wait_for_ready(self._ple_offload_worker_handle)
 
     def _get_sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
@@ -381,6 +484,12 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
+            # Keep the node-local PLE endpoint identical even when a custom
+            # executor reconstructs ParallelConfig independently per rank.
+            _synchronize_ple_offload_ipc_path(
+                self.parallel_config, self.rank, get_world_group()
+            )
+
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
 
@@ -441,6 +550,11 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        if self._ple_offload_enabled:
+            self.model_runner._setup_ple_offload(
+                self.parallel_config._ple_offload_ipc_path
+            )
+
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                 self.vllm_config.weight_transfer_config,
@@ -453,6 +567,8 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        if self._ple_offload_enabled:
+            raise NotImplementedError("Weight reload is not supported with PLE CPU offload")
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
@@ -1029,18 +1145,14 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # ensure any previous non-blocking PP sends are complete
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
         parallel_config = self.vllm_config.parallel_config
+        pp_group = get_pp_group()
+        tp_group = get_tp_group()
 
         if (
             parallel_config.pipeline_parallel_size > 1
@@ -1071,13 +1183,27 @@ class Worker(WorkerBase):
                 )
             }
 
-        if forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = (
-                get_pp_group().irecv_tensor_dict(
-                    all_gather_group=get_tp_group(),
-                    all_gather_tensors=all_gather_tensors,
-                )
+        if forward_pass and not pp_group.is_first_rank:
+            use_static_pp = (
+                envs.VLLM_STATIC_PP_SINGLE_TOKEN
+                and num_scheduled_tokens == 1
+                and not all_gather_tensors
             )
+            if use_static_pp:
+                persistent = self.model_runner.intermediate_tensors
+                assert persistent is not None
+                tensor_dict, comm_handles, comm_postprocess = (
+                    pp_group.irecv_static_tensor_dict(
+                        persistent[:num_scheduled_tokens].tensors
+                    )
+                )
+            else:
+                tensor_dict, comm_handles, comm_postprocess = (
+                    pp_group.irecv_tensor_dict(
+                        all_gather_group=tp_group,
+                        all_gather_tensors=all_gather_tensors,
+                    )
+                )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -1104,16 +1230,24 @@ class Worker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         assert (
             parallel_config.distributed_executor_backend != "external_launcher"
-            and not get_pp_group().is_last_rank
+            and not pp_group.is_last_rank
         )
 
-        # launch non-blocking send of intermediate tensors
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
+        # The PP group retains asynchronous metadata and source tensors until
+        # the receiver has posted its matching tensor receives.
+        use_static_pp = (
+            envs.VLLM_STATIC_PP_SINGLE_TOKEN
+            and num_scheduled_tokens == 1
+            and not all_gather_tensors
         )
-
+        if use_static_pp:
+            pp_group.isend_static_tensor_dict(output.tensors)
+        else:
+            pp_group.isend_tensor_dict(
+                output.tensors,
+                all_gather_group=tp_group,
+                all_gather_tensors=all_gather_tensors,
+            )
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1336,6 +1470,10 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        if self._ple_offload_worker_handle is not None:
+            self._ple_offload_worker_handle.close()
+            self._ple_offload_worker_handle = None
+
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
@@ -1397,3 +1535,20 @@ def init_worker_distributed_environment(
     # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
     ensure_ec_transfer_initialized(vllm_config)
+
+
+def _synchronize_ple_offload_ipc_path(
+    parallel_config: Any,
+    rank: int,
+    world_group: Any,
+) -> None:
+    """Broadcast rank zero's PLE IPC endpoint to every worker."""
+    if not envs.VLLM_PLE_CPU_OFFLOAD:
+        return
+    ipc_addr = world_group.broadcast_object(
+        parallel_config._ple_offload_ipc_path if rank == 0 else None,
+        src=0,
+    )
+    if not isinstance(ipc_addr, str) or not ipc_addr:
+        raise RuntimeError("PLE offload IPC address was not initialized")
+    parallel_config._ple_offload_ipc_path = ipc_addr

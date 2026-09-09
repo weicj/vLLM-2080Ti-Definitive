@@ -631,7 +631,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
         self.attention_groups.sort(
-            key=lambda g: not isinstance(g.spec, FullAttentionSpec)
+            key=lambda g: not (
+                isinstance(g.spec, FullAttentionSpec) and g.spec.prefix_cacheable
+            )
         )
 
         # Dense reference group for per-group lookups (None when the model
@@ -640,7 +642,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # per-group hits is not consistent at a single boundary (#46453).
         first = self.attention_groups[0]
         self.full_attention_group_id: int | None = (
-            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
+            first.group_ids[0]
+            if isinstance(first.spec, FullAttentionSpec)
+            and first.spec.prefix_cacheable
+            else None
         )
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).

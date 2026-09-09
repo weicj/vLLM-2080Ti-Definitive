@@ -522,6 +522,26 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert config.quant_method == "W4A16_NVFP4"
 
 
+def test_modelopt_nvfp4_config_can_force_w4a16_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The explicit fallback routes W4A4 checkpoints through Marlin."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4W4A16LinearMethod,
+    )
+
+    monkeypatch.setenv("VLLM_FORCE_NVFP4_W4A16", "1")
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert config.quant_method == "W4A16_NVFP4"
+    assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
+
+
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [("auto", MarlinNvFp4LinearKernel), ("humming", HummingNvFp4LinearKernel)],

@@ -27,7 +27,7 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import namedtuple
+from collections import deque, namedtuple
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -76,6 +76,26 @@ class Handle(Protocol):
     def is_completed(self) -> bool: ...
 
     def wait(self) -> None: ...
+
+
+class _RetainedHandle:
+    """Retain asynchronous CPU-send buffers until their work is drained."""
+
+    def __init__(self, works: list[Any], retained: tuple[torch.Tensor, ...]) -> None:
+        self._works = works
+        self._retained = retained
+        self._waited = False
+
+    def is_completed(self) -> bool:
+        return all(work.is_completed() for work in self._works)
+
+    def wait(self) -> None:
+        if self._waited:
+            return
+        for work in self._works:
+            work.wait()
+        self._waited = True
+        self._retained = ()
 
 
 def _split_tensor_dict(
@@ -532,6 +552,10 @@ class GroupCoordinator:
             and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
 
+        # Fire-and-forget pipeline sends must retain their metadata and source
+        # tensors until the receiver has posted the matching device receives.
+        self._pending_isends: deque[tuple[list[Handle], list[torch.Tensor]]] = deque()
+
     def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
         """Create a new device-side ProcessGroup with the same per-rank membership
         as this coordinator's `device_group`, but backed by a distinct communicator.
@@ -846,6 +870,28 @@ class GroupCoordinator:
 
         return None
 
+    def isend_object(self, obj: Any, dst: int) -> Handle:
+        """Asynchronously send a pickled object while retaining its buffers."""
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        assert dst != self.rank_in_group, (
+            "Invalid destination rank. Destination rank is the same "
+            "as the current rank."
+        )
+
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+        retained = (size_tensor, object_tensor)
+        works: list[Any] = []
+        for tensor in retained:
+            work = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=self.cpu_group
+            )
+            if work is not None:
+                works.append(work)
+        return _RetainedHandle(works, retained)
+
     def recv_object(self, src: int) -> Any:
         """Receive the input object list from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
@@ -1014,7 +1060,39 @@ class GroupCoordinator:
         )
         for handle in handles:
             handle.wait()
+        if self._pending_isends and self._pending_isends[-1][0] is handles:
+            self._pending_isends.pop()
         return None
+
+    def _reap_completed_isends(self) -> None:
+        while self._pending_isends:
+            handles, _ = self._pending_isends[0]
+            # The first handle owns CPU metadata. Device completion proves the
+            # peer has consumed that metadata and posted all matching receives.
+            tensor_handles = handles[1:]
+            if tensor_handles and not all(
+                handle.is_completed() for handle in tensor_handles
+            ):
+                break
+            handles[0].wait()
+            self._pending_isends.popleft()
+
+    def _drain_pending_isends(self) -> None:
+        """Wait for fire-and-forget sends before their process groups vanish."""
+
+        while self._pending_isends:
+            handles, _ = self._pending_isends.popleft()
+            for handle in handles[1:]:
+                handle.wait()
+            if handles:
+                handles[0].wait()
+
+        pending_static = getattr(self, "_pending_static_isends", None)
+        if pending_static is not None:
+            while pending_static:
+                handles, _ = pending_static.popleft()
+                for handle in handles:
+                    handle.wait()
 
     def isend_tensor_dict(
         self,
@@ -1048,12 +1126,13 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        self.send_object(metadata_list, dst=dst)
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
 
-        handles: list[Handle] = []
+        self._reap_completed_isends()
+        handles: list[Handle] = [self.isend_object(metadata_list, dst=dst)]
+        sent_tensors: list[torch.Tensor] = []
         for key, tensor in zip(tensor_keys, tensor_list):
             if tensor.numel() == 0:
                 continue
@@ -1070,7 +1149,44 @@ class GroupCoordinator:
             if tensor.is_cuda:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
             handles.append(handle)
+            sent_tensors.append(tensor)
 
+        self._pending_isends.append((handles, sent_tensors))
+        return handles
+
+    def isend_static_tensor_dict(
+        self,
+        tensor_dict: dict[str, torch.Tensor],
+        dst: int | None = None,
+    ) -> list[Handle]:
+        """Send CUDA tensors whose keys, shapes, and dtypes are pre-agreed."""
+        if self.world_size <= 1:
+            return []
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        assert not self.use_cpu_custom_send_recv
+
+        pending = getattr(self, "_pending_static_isends", None)
+        if pending is None:
+            self._pending_static_isends = pending = deque()
+        while pending and all(handle.is_completed() for handle in pending[0][0]):
+            pending.popleft()
+
+        handles: list[Handle] = []
+        sent_tensors: list[torch.Tensor] = []
+        for tensor in tensor_dict.values():
+            assert tensor.is_cuda, "static PP tensor transport is CUDA-only"
+            if tensor.numel() == 0:
+                continue
+            handle = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=self.device_group
+            )
+            tensor.record_stream(torch.cuda.current_stream(tensor.device))
+            handles.append(handle)
+            sent_tensors.append(tensor)
+        if handles:
+            pending.append((handles, sent_tensors))
         return handles
 
     def recv_tensor_dict(
@@ -1197,6 +1313,31 @@ class GroupCoordinator:
 
         return tensor_dict, handles, postprocess
 
+    def irecv_static_tensor_dict(
+        self,
+        tensor_dict: dict[str, torch.Tensor],
+        src: int | None = None,
+    ) -> tuple[dict[str, torch.Tensor] | None, list[Handle], list[Callable[[], None]]]:
+        """Receive directly into pre-agreed CUDA tensor buffers."""
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return None, [], []
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+        assert not self.use_cpu_custom_send_recv
+
+        handles: list[Handle] = []
+        for tensor in tensor_dict.values():
+            assert tensor.is_cuda, "static PP tensor transport is CUDA-only"
+            if tensor.numel() == 0:
+                continue
+            handles.append(
+                torch.distributed.irecv(
+                    tensor, src=self.ranks[src], group=self.device_group
+                )
+            )
+        return tensor_dict, handles, []
+
     def barrier(self):
         """Barrier synchronization among the group.
         NOTE: don't use `device_group` here! `barrier` in NCCL is
@@ -1223,6 +1364,7 @@ class GroupCoordinator:
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
+        self._drain_pending_isends()
         if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group

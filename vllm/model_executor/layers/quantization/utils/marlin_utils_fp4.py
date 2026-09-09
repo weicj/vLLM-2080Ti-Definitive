@@ -314,8 +314,14 @@ def _repack_marlin_experts(
     size_k: int,
     perm: torch.Tensor,
     is_a_8bit: bool,
+    reuse_source_storage: bool = False,
 ) -> torch.Tensor:
-    """Repack each expert to marlin format into a preallocated output."""
+    """Repack each expert to Marlin format.
+
+    The unpacked and repacked layouts have the same byte size when no
+    Marlin padding is required. Reuse that storage in the memory-constrained
+    case, keeping only one expert-sized temporary allocation alive.
+    """
     num_experts = weight.shape[0]
     out: torch.Tensor | None = None
     for i in range(num_experts):
@@ -329,12 +335,17 @@ def _repack_marlin_experts(
             is_a_8bit=is_a_8bit,
         )
         if out is None:
-            out = torch.empty(
-                (num_experts, *marlin_qweight.shape),
-                dtype=marlin_qweight.dtype,
-                device=marlin_qweight.device,
-            )
-        out[i] = marlin_qweight
+            if reuse_source_storage:
+                out = weight.view(torch.int32).reshape(
+                    num_experts, *marlin_qweight.shape
+                )
+            else:
+                out = torch.empty(
+                    (num_experts, *marlin_qweight.shape),
+                    dtype=marlin_qweight.dtype,
+                    device=marlin_qweight.device,
+                )
+        out[i].copy_(marlin_qweight)
     assert out is not None
     return out
 
@@ -403,23 +414,102 @@ def prepare_nvfp4_moe_layer_for_marlin(
     )
     perm = torch.empty(0, dtype=torch.int, device=device)
 
+    # W13 padding expands the layer before its Marlin output is allocated.
+    # Stage W2 on the host so the two raw weights do not compete for the last
+    # few megabytes on 16 GiB devices during that transient.
+    staged_w2: torch.Tensor | None = None
+    if padded_N != N and w2.is_cuda:
+        staged_w2 = w2.detach().cpu()
+        w2.data = torch.empty(0, dtype=w2.dtype, device=w2.device)
+        torch.cuda.empty_cache()
+
     # WEIGHT
     # Repack weights to marlin format
-    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
+    def repack_weight(source_weight: torch.Tensor, name: str) -> torch.Tensor:
+        source_shape = tuple(source_weight.shape)
+        # When padding is needed, stage the source on the host and process one
+        # expert at a time. Padding the complete rank-local tensor on GPU can
+        # exceed the remaining memory before the Marlin output is allocated.
+        needs_padding = padded_N != N
+        if needs_padding and source_weight.is_cuda:
+            source_cpu = source_weight.detach().cpu()
+            source_weight.data = torch.empty(
+                0, dtype=source_weight.dtype, device=source_weight.device
+            )
+            torch.cuda.empty_cache()
+        else:
+            source_cpu = None
+
+        weight = source_weight
         if "w13" in name:
             size_n, size_k = N * num_shards, K
-            assert weight.shape == (E, size_n, size_k // 2)
-            weight = pad_w13(weight)
+            assert source_shape == (E, size_n, size_k // 2)
             size_n = padded_N * num_shards
         else:
             size_n, size_k = K, N
-            assert weight.shape == (E, size_n, size_k // 2)
-            weight = pad_w2(weight, packing=2)
+            assert source_shape == (E, size_n, size_k // 2)
             size_k = padded_N
 
-        return _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
+        if source_cpu is not None:
+            out: torch.Tensor | None = None
+            for i in range(E):
+                expert = source_cpu[i].to(device=device)
+                if "w13" in name:
+                    expert = expert.view(num_shards, N, -1)
+                    expert = torch.nn.functional.pad(
+                        expert, (0, 0, 0, padded_N - N)
+                    ).reshape(num_shards * padded_N, -1)
+                else:
+                    expert = torch.nn.functional.pad(
+                        expert, (0, (padded_N - N) // 2)
+                    )
+                qweight = expert.view(torch.int32).T.contiguous()
+                marlin_qweight = ops.gptq_marlin_repack(
+                    b_q_weight=qweight,
+                    perm=perm,
+                    size_k=size_k,
+                    size_n=size_n,
+                    num_bits=4,
+                    is_a_8bit=is_a_8bit,
+                )
+                if out is None:
+                    out = torch.empty(
+                        (E, *marlin_qweight.shape),
+                        dtype=marlin_qweight.dtype,
+                        device=device,
+                    )
+                out[i].copy_(marlin_qweight)
+                del expert, qweight, marlin_qweight
+            assert out is not None
+            return out
+
+        if "w13" in name:
+            weight = pad_w13(weight)
+        else:
+            weight = pad_w2(weight, packing=2)
+
+        reuse_source_storage = weight.data_ptr() == source_weight.data_ptr()
+        if not reuse_source_storage:
+            # The padded copy is now the only input to the repack. Releasing
+            # the original before allocating the final Marlin layout avoids a
+            # full-layer transient peak on 16 GiB GPUs.
+            source_weight.data = torch.empty(
+                0, dtype=source_weight.dtype, device=source_weight.device
+            )
+            torch.cuda.empty_cache()
+
+        return _repack_marlin_experts(
+            weight,
+            size_n,
+            size_k,
+            perm,
+            is_a_8bit,
+            reuse_source_storage=reuse_source_storage,
+        )
 
     w13 = repack_weight(w13, "w13")
+    if staged_w2 is not None:
+        w2 = staged_w2.to(device=device)
     w2 = repack_weight(w2, "w2")
 
     # WEIGHT SCALES

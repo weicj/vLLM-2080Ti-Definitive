@@ -13,7 +13,6 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
-
 @dataclass
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
@@ -142,19 +141,19 @@ class PPHandler:
             sampled_tokens = torch.empty(
                 num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
             )
-            combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
             torch.distributed.broadcast(
                 sampled_tokens, src=self.last_rank, group=self.broadcast_group
             )
+            combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
-            event = self.broadcast_stream.record_event()
             num_sampled, num_rejected = combined.unbind(dim=0)
-            # Must record_stream since these were allocated on broadcast stream but
-            # later used on the main stream.
+            event = self.broadcast_stream.record_event()
             sampled_tokens.record_stream(self.main_stream)
             combined.record_stream(self.main_stream)
+            num_sampled.record_stream(self.main_stream)
+            num_rejected.record_stream(self.main_stream)
         self.queue[-1] = PendingRecv(
             event,
             sampled_tokens,
@@ -175,7 +174,8 @@ class PPHandler:
         input_batch: InputBatch,
     ) -> None:
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
+        need_sampled_mask = compute_need_sampled_mask(input_batch)
+        if need_sampled_mask is None:
             # No request needs sampled outputs for a subsequent decode step.
             return
 
@@ -186,8 +186,22 @@ class PPHandler:
 
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
+            num_reqs, num_sampled_tokens = sampled_token_ids.shape
+            width_error = num_sampled_tokens > self.max_sample_len
+            if width_error:
+                # Keep the collective shape fixed even for malformed sampler
+                # output.  Raising before the broadcasts would leave every
+                # non-last PP rank blocked in ``receive``.
+                sampled_tokens = sampled_token_ids[:, : self.max_sample_len].contiguous()
+            elif num_sampled_tokens < self.max_sample_len:
+                sampled_tokens = sampled_token_ids.new_full(
+                    (num_reqs, self.max_sample_len), -1
+                )
+                sampled_tokens[:, :num_sampled_tokens].copy_(sampled_token_ids)
+            else:
+                sampled_tokens = sampled_token_ids.contiguous()
             torch.distributed.broadcast(
-                sampled_token_ids.contiguous(),
+                sampled_tokens,
                 src=self.last_rank,
                 group=self.broadcast_group,
             )
@@ -195,5 +209,17 @@ class PPHandler:
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
-            for tensor in (sampled_token_ids, num_sampled, num_rejected):
+            combined.record_stream(self.broadcast_stream)
+            for tensor in (
+                sampled_token_ids,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+            ):
                 tensor.record_stream(self.broadcast_stream)
+
+            if width_error:
+                raise ValueError(
+                    "sampled token width exceeds the PP broadcast buffer: "
+                    f"{num_sampled_tokens} > {self.max_sample_len}"
+                )

@@ -837,6 +837,26 @@ class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
             rope_parameters.pop("mrope_interleaved", None)
 
 
+class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConfig):
+    """Apply the shared GDN cache dtype contract to Qwen4-Exp models."""
+
+
+class Qwen4ExpForCausalLMConfig(Qwen3_5ForCausalLMConfig):
+    """Apply text-only Qwen4-Exp cache and RoPE configuration rules."""
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+        # Text-only Qwen4-Exp requests use one-dimensional positions. Remove
+        # multimodal RoPE metadata if a shared checkpoint config contains it.
+        hf_text_config = vllm_config.model_config.hf_text_config
+        rope_parameters = getattr(hf_text_config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_parameters.pop("mrope_section", None)
+            rope_parameters.pop("mrope_interleaved", None)
+
+
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
     """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
@@ -960,6 +980,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
+    "Qwen4ExpForConditionalGeneration": Qwen4ExpForConditionalGenerationConfig,
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,

@@ -104,8 +104,9 @@ Available modes:
 - `aggressive`: highest-performance mode with increased quality risk.
 - `safe`: conservative fallback for troubleshooting and compatibility.
 
-The profile selects only route parameters. The launcher owns GPU selection,
-port, model path, chat template, and reasoning defaults.
+The profile selects route parameters. The launcher owns GPU selection, port,
+model path, chat template, and reasoning defaults; experimental profiles may
+also carry a validated TP/PP layout.
 
 ## MTP And KV Precision
 

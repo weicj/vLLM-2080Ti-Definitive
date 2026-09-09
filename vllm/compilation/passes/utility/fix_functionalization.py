@@ -228,6 +228,15 @@ class FixFunctionalizationPass(VllmInductorPass):
             ):
                 mutated_args = {1: "x"}
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "ple_offload_wait")
+                and at_target == torch.ops.vllm.ple_offload_wait.default
+            ):
+                # Preserve the alias write that orders the stream wait without
+                # leaving an auto_functionalized node for Inductor.
+                self.defunctionalize(
+                    graph, node, mutated_args={1: "hidden_states"}
+                )
             else:
                 continue  # skip the count
 

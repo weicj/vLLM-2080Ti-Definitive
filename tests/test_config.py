@@ -3,6 +3,7 @@
 
 import logging
 import os
+import pickle
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -261,6 +262,17 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_hybrid=True,
             ),
             False,
+        ),
+        (
+            SimpleNamespace(
+                model="RadixArk/Qwen3.8-Flash-Next-NVFP4",
+                architectures=["Qwen4ExpForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=True,
+                is_hybrid=True,
+            ),
+            True,
         ),
         (
             SimpleNamespace(
@@ -1575,6 +1587,14 @@ def test_fault_tolerance_requires_single_api_server():
 
     # Single API server (the FT-supported topology) is accepted.
     ParallelConfig(enable_fault_tolerance=True, _api_process_count=1)
+
+
+def test_ple_offload_ipc_path_survives_worker_config_serialization():
+    """All multiprocessing workers must use the controller's PLE endpoint."""
+    ipc_path = "ipc:///tmp/ple-offload-test"
+    config = ParallelConfig(_ple_offload_ipc_path=ipc_path)
+    worker_config = pickle.loads(pickle.dumps(config))
+    assert worker_config._ple_offload_ipc_path == ipc_path
 
 
 def test_renderer_num_workers_with_mm_cache():

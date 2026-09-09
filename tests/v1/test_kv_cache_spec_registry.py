@@ -14,6 +14,7 @@ from vllm.config import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    CircularBufferManager,
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
@@ -24,6 +25,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -83,6 +85,7 @@ class _TrulyUnregisteredSpec(KVCacheSpec):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
+    CircularBufferSpec: CircularBufferManager,
     TQFullAttentionSpec: FullAttentionManager,
     MLAAttentionSpec: FullAttentionManager,
     HiddenStateCacheSpec: FullAttentionManager,
@@ -96,6 +99,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 
 spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
     FullAttentionSpec: FullAttentionSpec,
+    CircularBufferSpec: CircularBufferSpec,
     TQFullAttentionSpec: FullAttentionSpec,
     MLAAttentionSpec: FullAttentionSpec,
     HiddenStateCacheSpec: FullAttentionSpec,
@@ -110,6 +114,9 @@ spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
 spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
     FullAttentionSpec: dict(
         block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    ),
+    CircularBufferSpec: dict(
+        block_size=4, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     ),
     TQFullAttentionSpec: dict(
         block_size=64,
