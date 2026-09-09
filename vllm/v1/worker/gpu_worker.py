@@ -45,6 +45,7 @@ from vllm.distributed.parallel_state import (
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
+    get_world_group,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -481,6 +482,12 @@ class Worker(WorkerBase):
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+            )
+
+            # Keep the node-local PLE endpoint identical even when a custom
+            # executor reconstructs ParallelConfig independently per rank.
+            _synchronize_ple_offload_ipc_path(
+                self.parallel_config, self.rank, get_world_group()
             )
 
             if self.use_v2_model_runner:
@@ -1528,3 +1535,20 @@ def init_worker_distributed_environment(
     # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
     ensure_ec_transfer_initialized(vllm_config)
+
+
+def _synchronize_ple_offload_ipc_path(
+    parallel_config: Any,
+    rank: int,
+    world_group: Any,
+) -> None:
+    """Broadcast rank zero's PLE IPC endpoint to every worker."""
+    if not envs.VLLM_PLE_CPU_OFFLOAD:
+        return
+    ipc_addr = world_group.broadcast_object(
+        parallel_config._ple_offload_ipc_path if rank == 0 else None,
+        src=0,
+    )
+    if not isinstance(ipc_addr, str) or not ipc_addr:
+        raise RuntimeError("PLE offload IPC address was not initialized")
+    parallel_config._ple_offload_ipc_path = ipc_addr

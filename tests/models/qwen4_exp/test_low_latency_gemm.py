@@ -56,10 +56,12 @@ def _make_module() -> tuple[nn.Module, object]:
 
 def test_sm75_installs_fp16_triton_path(monkeypatch: pytest.MonkeyPatch) -> None:
     root, quantized_method = _make_module()
+    capability = SimpleNamespace(
+        is_device_capability=lambda value: value == (7, 5),
+    )
     monkeypatch.setattr(qwen4_gemm, "LinearBase", FakeLinear)
     monkeypatch.setattr(qwen4_gemm, "ParallelLMHead", FakeHead)
-    monkeypatch.setattr(qwen4_gemm, "_is_sm75", lambda: True)
-    monkeypatch.setattr(qwen4_gemm, "_is_sm103", lambda: False)
+    monkeypatch.setattr(qwen4_gemm, "current_platform", capability)
     monkeypatch.setattr(qwen4_gemm.triton_gemv, "is_available", lambda: True)
 
     qwen4_gemm.enable_qwen4_exp_low_latency_gemm(root, torch.float16)
@@ -85,7 +87,10 @@ def test_sm75_dispatches_only_runtime_eligible_gemv(
         gemv=lambda x, weight: sentinel,
     )
     monkeypatch.setattr(qwen4_gemm, "triton_gemv", gemv)
-    monkeypatch.setattr(qwen4_gemm, "_is_sm75", lambda: True)
+    capability = SimpleNamespace(
+        is_device_capability=lambda value: value == (7, 5),
+    )
+    monkeypatch.setattr(qwen4_gemm, "current_platform", capability)
 
     x = FakeTensor((1, 3), torch.float16)
     weight = FakeTensor((7, 3), torch.float16)
@@ -111,5 +116,5 @@ def test_sm75_dispatches_only_runtime_eligible_gemv(
         FakeTensor((1, 3), torch.float16, is_cuda=False), weight
     ) is False
 
-    monkeypatch.setattr(qwen4_gemm, "_is_sm75", lambda: False)
+    capability.is_device_capability = lambda value: value == (10, 3)
     assert qwen4_gemm._triton_runtime_ok(x, weight) is False

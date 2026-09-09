@@ -8,6 +8,7 @@ import pytest
 
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import startup_plan
+from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -77,3 +78,19 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_ple_ipc_path_is_synchronized_from_rank_zero(monkeypatch):
+    monkeypatch.setattr(gpu_worker.envs, "VLLM_PLE_CPU_OFFLOAD", True)
+    calls = []
+
+    class _World:
+        def broadcast_object(self, value, src):
+            calls.append((value, src))
+            return "ipc:///tmp/rank-zero-ple"
+
+    config = SimpleNamespace(_ple_offload_ipc_path="ipc:///tmp/stale-rank-one")
+    gpu_worker._synchronize_ple_offload_ipc_path(config, rank=1, world_group=_World())
+
+    assert calls == [(None, 0)]
+    assert config._ple_offload_ipc_path == "ipc:///tmp/rank-zero-ple"
