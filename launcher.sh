@@ -634,7 +634,13 @@ apply_profile_overrides() {
   local preserved_values=()
   local preserve_key
   for preserve_key in "${preserve_route_env_keys[@]}"; do
-    if [[ -z "$(read_profile_value "$file" "$preserve_key")" && ${!preserve_key+x} ]]; then
+    # Only carry over a preserved value when it is actually set to something
+    # non-empty. Exporting an empty string here (e.g. after switching away from
+    # a TurboQuant route) makes the TurboQuant backend read "" instead of its
+    # default during attention-backend discovery, which aborts startup with
+    # "VLLM_TURBOQUANT_DECODE_BLOCK_KV must be one of: 1, 2, 4, 8, 16".
+    if [[ -z "$(read_profile_value "$file" "$preserve_key")" \
+      && ${!preserve_key+x} && -n "${!preserve_key}" ]]; then
       preserved_keys+=("$preserve_key")
       preserved_values+=("${!preserve_key}")
     fi
