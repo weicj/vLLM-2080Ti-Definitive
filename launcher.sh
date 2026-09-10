@@ -3119,6 +3119,23 @@ set_mode_default() {
   unset "CONFIG_OVERRIDE_UNSET[$key]"
 }
 
+# FULL decode CUDA-graph replay for hybrid Mamba/GDN models is not safe when
+# speculative decoding (native MTP / EAGLE) is active: the recurrent-state
+# update topology is captured once and then reused across changing speculative
+# acceptance patterns, which corrupts the GDN state and makes the model read a
+# scrambled context (issue #24; see CHANGELOG v0.1.3). Keep the fast/aggressive
+# modes on PIECEWISE whenever speculative decoding is enabled, and leave the
+# old peak-throughput route to an explicit VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=1
+# opt-in. Without speculative decoding the flag is a no-op for Mamba models, so
+# the previous default is preserved for non-MTP routes.
+set_mamba_spec_full_cudagraph_default() {
+  if (( ${MTP_K:-0} > 0 )) || [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 0
+  else
+    set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
+  fi
+}
+
 apply_mode() {
   normalize_mode
   case "$MODE" in
@@ -3132,13 +3149,13 @@ apply_mode() {
       set_mode_default ENFORCE_EAGER 0
       set_mode_default DISABLE_LOG_STATS 1
       set_mode_default VLLM_SM75_SPEC_SYNC_MODE safe
-      set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
+      set_mamba_spec_full_cudagraph_default
       ;;
     aggressive)
       set_mode_default ENFORCE_EAGER 0
       set_mode_default DISABLE_LOG_STATS 1
       set_mode_default VLLM_SM75_SPEC_SYNC_MODE nosync
-      set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
+      set_mamba_spec_full_cudagraph_default
       ;;
     safe)
       set_mode_default ENFORCE_EAGER 1
