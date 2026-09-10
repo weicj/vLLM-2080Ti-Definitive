@@ -634,7 +634,13 @@ apply_profile_overrides() {
   local preserved_values=()
   local preserve_key
   for preserve_key in "${preserve_route_env_keys[@]}"; do
-    if [[ -z "$(read_profile_value "$file" "$preserve_key")" && ${!preserve_key+x} ]]; then
+    # Only carry over a preserved value when it is actually set to something
+    # non-empty. Exporting an empty string here (e.g. after switching away from
+    # a TurboQuant route) makes the TurboQuant backend read "" instead of its
+    # default during attention-backend discovery, which aborts startup with
+    # "VLLM_TURBOQUANT_DECODE_BLOCK_KV must be one of: 1, 2, 4, 8, 16".
+    if [[ -z "$(read_profile_value "$file" "$preserve_key")" \
+      && ${!preserve_key+x} && -n "${!preserve_key}" ]]; then
       preserved_keys+=("$preserve_key")
       preserved_values+=("${!preserve_key}")
     fi
@@ -3119,6 +3125,23 @@ set_mode_default() {
   unset "CONFIG_OVERRIDE_UNSET[$key]"
 }
 
+# FULL decode CUDA-graph replay for hybrid Mamba/GDN models is not safe when
+# speculative decoding (native MTP / EAGLE) is active: the recurrent-state
+# update topology is captured once and then reused across changing speculative
+# acceptance patterns, which corrupts the GDN state and makes the model read a
+# scrambled context (issue #24; see CHANGELOG v0.1.3). Keep the fast/aggressive
+# modes on PIECEWISE whenever speculative decoding is enabled, and leave the
+# old peak-throughput route to an explicit VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=1
+# opt-in. Without speculative decoding the flag is a no-op for Mamba models, so
+# the previous default is preserved for non-MTP routes.
+set_mamba_spec_full_cudagraph_default() {
+  if (( ${MTP_K:-0} > 0 )) || [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 0
+  else
+    set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
+  fi
+}
+
 apply_mode() {
   normalize_mode
   case "$MODE" in
@@ -3132,13 +3155,13 @@ apply_mode() {
       set_mode_default ENFORCE_EAGER 0
       set_mode_default DISABLE_LOG_STATS 1
       set_mode_default VLLM_SM75_SPEC_SYNC_MODE safe
-      set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
+      set_mamba_spec_full_cudagraph_default
       ;;
     aggressive)
       set_mode_default ENFORCE_EAGER 0
       set_mode_default DISABLE_LOG_STATS 1
       set_mode_default VLLM_SM75_SPEC_SYNC_MODE nosync
-      set_mode_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
+      set_mamba_spec_full_cudagraph_default
       ;;
     safe)
       set_mode_default ENFORCE_EAGER 1
