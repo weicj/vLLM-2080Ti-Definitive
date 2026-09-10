@@ -3,6 +3,21 @@
 This changelog tracks the fork release version for vLLM 2080 Ti Definitive
 Edition. It is separate from the upstream vLLM package version.
 
+## Unreleased
+
+- Keeps `fast`/`aggressive` launcher modes on PIECEWISE whenever native MTP /
+  speculative decoding is enabled. Full decode CUDA-graph replay for hybrid
+  Mamba/GDN layers is only exposed through the documented unsafe peak-throughput
+  route, because the graph-captured recurrent-state update topology is reused
+  across changing speculative acceptance patterns and deterministically scrambles
+  the model context (e.g. `123 + 456` answered as `1 + 2 = 3`). Explicit
+  `VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=1` still opts into the old route.
+- Shares the target FlashInfer workspace buffer with the draft attention builders.
+  The draft layer previously allocated a second lazily-sized
+  `VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE` (~394 MiB) workspace after the KV cache
+  had claimed the remaining GPU memory, which could OOM the first request at high
+  `--gpu-memory-utilization`.
+
 ## v0.1.17 - 2026-08-24
 
 - Merges [PR #125](https://github.com/weicj/vLLM-2080Ti-Definitive/pull/125), deduplicating named-tool streaming fallback output and preserving `finish_reason=length` for truncated tool calls.
