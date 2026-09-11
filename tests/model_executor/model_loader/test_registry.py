@@ -2,11 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader import get_model_loader, register_model_loader
+from vllm.model_executor.model_loader import (
+    default_loader,
+    get_model_loader,
+    register_model_loader,
+)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
@@ -70,17 +75,72 @@ def test_default_loader_rejects_multithread_with_non_lazy_strategy():
     ],
 )
 def test_default_loader_rejects_specialized_loader_for_exl3_ngram_streaming(
-    monkeypatch: pytest.MonkeyPatch, load_format: str, extra_config: dict
+    monkeypatch: pytest.MonkeyPatch, tmp_path, load_format: str, extra_config: dict
 ) -> None:
+    from safetensors.torch import save_file
+
+    save_file(
+        {
+            "model.ngram_embedding.shard_0.trellis": torch.ones(2, 2),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
     monkeypatch.setenv("VLLM_EXL3_NGRAM_STREAM", "1")
 
     with pytest.raises(ValueError, match="requires the default safetensors"):
-        DefaultModelLoader(
-            LoadConfig(
-                load_format=load_format,
-                model_loader_extra_config=extra_config,
-            )
+        list(
+            DefaultModelLoader(
+                LoadConfig(
+                    load_format=load_format,
+                    model_loader_extra_config=extra_config,
+                )
+            )._get_weights_iterator(DefaultModelLoader.Source(str(tmp_path), None))
         )
+
+
+@pytest.mark.parametrize(
+    ("load_format", "extra_config"),
+    [
+        ("auto", {"enable_multithread_load": True}),
+        ("fastsafetensors", {}),
+        ("instanttensor", {}),
+    ],
+)
+def test_default_loader_allows_specialized_loader_without_exl3_ngram(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    load_format: str,
+    extra_config: dict,
+) -> None:
+    from safetensors.torch import save_file
+
+    save_file(
+        {"model.layers.0.weight": torch.ones(2, 2)},
+        str(tmp_path / "model.safetensors"),
+    )
+    monkeypatch.setenv("VLLM_EXL3_NGRAM_STREAM", "1")
+    loader = DefaultModelLoader(
+        LoadConfig(
+            load_format=load_format,
+            model_loader_extra_config=extra_config,
+        )
+    )
+    iterator_name = (
+        "multi_thread_safetensors_weights_iterator"
+        if extra_config.get("enable_multithread_load")
+        else f"{load_format}_weights_iterator"
+    )
+    monkeypatch.setattr(
+        default_loader,
+        iterator_name,
+        lambda *_args, **_kwargs: iter([("model.layers.0.weight", torch.ones(2, 2))]),
+    )
+
+    weights = list(
+        loader._get_weights_iterator(DefaultModelLoader.Source(str(tmp_path), None))
+    )
+    assert [name for name, _ in weights] == ["model.layers.0.weight"]
+    assert torch.equal(weights[0][1], torch.ones(2, 2))
 
 
 def test_default_loader_explicit_safetensors_does_not_misread_pt(tmp_path):
