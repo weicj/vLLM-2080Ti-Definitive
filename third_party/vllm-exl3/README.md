@@ -287,9 +287,11 @@ Until it's tagged, install straight from `main` to get it:
 pip install git+https://github.com/vcruz305/vllm-exl3@main
 ```
 
-Install a compatible vLLM runtime and ExLlamaV3 first. The wheel does not
-bundle `exllamav3_ext`; verify that the extension built for the target GPU is
-available before starting vLLM:
+Install the compatible vLLM fork separately; the plugin deliberately does not
+depend on the upstream `vllm` PyPI distribution. The wheel requires
+`exllamav3>=1.4`, which provides the architecture-specific `exllamav3_ext`
+extension. Verify that the extension built for the target GPU is available
+before starting vLLM:
 
 ```bash
 python -c "import exllamav3_ext"

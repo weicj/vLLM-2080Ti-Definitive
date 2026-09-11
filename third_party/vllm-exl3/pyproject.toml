@@ -8,7 +8,7 @@ version = "0.4.0"
 description = "EXL3 (ExLlamaV3 trellis/MCG) quantization plugin for vLLM fork runtimes"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["vllm"]
+dependencies = ["exllamav3>=1.4"]
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Victor Cruz" }]

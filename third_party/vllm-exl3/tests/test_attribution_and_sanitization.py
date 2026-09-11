@@ -61,6 +61,7 @@ def test_package_version_and_metadata():
 
     assert 'version = "0.4.0"' in pyproject, "pyproject.toml version is not 0.4.0"
     assert 'name = "vllm-exl3"' in pyproject, "pyproject.toml name is not vllm-exl3"
+    assert 'dependencies = ["exllamav3>=1.4"]' in pyproject
 
     setup_path = os.path.join(REPO_ROOT, "setup.py")
     with open(setup_path, "r", encoding="utf-8") as f:
