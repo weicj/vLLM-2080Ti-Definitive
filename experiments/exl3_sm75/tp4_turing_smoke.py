@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 import torch
@@ -65,7 +66,8 @@ def run_job(generator: Generator, input_ids: torch.Tensor, stops: list[int]) -> 
                 finished = result
     if finished is None:
         raise RuntimeError("generation completed without EOS")
-    if EXPECTED_ANSWER not in text:
+    normalized = re.sub(r"\s+", "", text).strip().rstrip(".")
+    if normalized != EXPECTED_ANSWER:
         raise RuntimeError(f"unexpected answer for arithmetic smoke: {text!r}")
     return {
         "text": text,
