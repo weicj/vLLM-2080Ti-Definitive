@@ -5,8 +5,10 @@ import os
 from unittest.mock import patch
 
 import pytest
+import torch
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.envs import (
     disable_envs_cache,
     enable_envs_cache,
@@ -61,6 +63,21 @@ def test_custom_allreduce_pcie_opt_in(
     else:
         monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", value)
     assert envs.VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE is expected
+
+
+@pytest.mark.parametrize("world_size", [4, 6, 8])
+def test_custom_allreduce_pcie_opt_in_allows_supported_world_sizes(
+    monkeypatch: pytest.MonkeyPatch, world_size: int
+) -> None:
+    monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", "1")
+    custom_ar = object.__new__(CustomAllreduce)
+    custom_ar.disabled = False
+    custom_ar._ptr = 0
+    custom_ar.world_size = world_size
+    custom_ar.fully_connected = False
+    custom_ar.max_size = 1024
+
+    assert custom_ar.should_custom_ar(torch.empty(128, dtype=torch.float16))
 
 
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):

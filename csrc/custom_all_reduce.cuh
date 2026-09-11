@@ -304,6 +304,8 @@ class CustomAllreduce {
         } else {                                        \
           KL(ngpus, cross_device_reduce_2stage);        \
         }                                               \
+      } else {                                          \
+        KL(ngpus, cross_device_reduce_2stage);          \
       }                                                 \
     }                                                   \
     break;                                              \
