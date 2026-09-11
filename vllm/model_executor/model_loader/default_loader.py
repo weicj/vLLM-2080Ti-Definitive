@@ -8,6 +8,7 @@ from collections.abc import Generator, Iterable
 from typing import cast
 
 import torch
+from safetensors.torch import safe_open
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -124,20 +125,6 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{load_config.safetensors_load_strategy!r}; the multi-thread "
                 "loader only implements the default lazy strategy."
             )
-        if os.environ.get("VLLM_EXL3_NGRAM_STREAM", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        ) and (
-            extra_config.get("enable_multithread_load")
-            or load_config.load_format in ("fastsafetensors", "instanttensor")
-        ):
-            raise ValueError(
-                "VLLM_EXL3_NGRAM_STREAM requires the default safetensors "
-                "loader because the selected loader cannot skip the SSD "
-                "n-gram trellis before materializing it."
-            )
-
     def _prepare_weights(
         self,
         model_name_or_path: str,
@@ -254,6 +241,20 @@ class DefaultModelLoader(BaseModelLoader):
 
         return hf_folder, hf_weights_files, use_safetensors
 
+    @staticmethod
+    def _has_streamed_exl3_ngram_trellis(weights_files: list[str]) -> bool:
+        """Check safetensors headers without materializing any tensor data."""
+        for weight_file in weights_files:
+            if not weight_file.endswith(".safetensors"):
+                continue
+            with safe_open(weight_file, framework="pt") as handle:
+                if any(
+                    ".ngram_embedding.shard_" in name and name.endswith(".trellis")
+                    for name in handle.keys()
+                ):
+                    return True
+        return False
+
     def _get_weights_iterator(
         self, source: "Source"
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -266,6 +267,24 @@ class DefaultModelLoader(BaseModelLoader):
             source.fall_back_to_pt,
             source.allow_patterns_overrides,
         )
+        stream_ngram = os.environ.get("VLLM_EXL3_NGRAM_STREAM", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if (
+            stream_ngram
+            and (
+                extra_config.get("enable_multithread_load")
+                or self.load_config.load_format in ("fastsafetensors", "instanttensor")
+            )
+            and self._has_streamed_exl3_ngram_trellis(hf_weights_files)
+        ):
+            raise ValueError(
+                "VLLM_EXL3_NGRAM_STREAM requires the default safetensors "
+                "loader because the selected loader cannot skip the SSD "
+                "n-gram trellis before materializing it."
+            )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
