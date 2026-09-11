@@ -49,6 +49,38 @@ from .ops.ple import ple_ngram_ids
 logger = init_logger(__name__)
 
 
+def _supports_custom_ple_embedding(
+    quant_config: QuantizationConfig | None,
+) -> bool:
+    """Whether a quantizer provides a PLE-specific embedding method."""
+    return bool(getattr(quant_config, "supports_ple_embedding", False))
+
+
+def _resolve_ple_embedding_method(
+    quant_config: QuantizationConfig | None,
+    layer: nn.Module,
+    prefix: str,
+    fallback: "Qwen4ExpPLEEmbeddingMethod",
+) -> QuantizeMethodBase:
+    """Use an opt-in external PLE method, or the native fallback."""
+    if not _supports_custom_ple_embedding(quant_config):
+        return fallback
+    assert quant_config is not None
+    quant_method = quant_config.get_quant_method(layer, prefix)
+    return fallback if quant_method is None else quant_method
+
+
+def _disable_ple_embedding_tp(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> bool:
+    """Whether a quantizer requires a replicated PLE table."""
+    if quant_config is None:
+        return False
+    selector = getattr(quant_config, "disable_embedding_tensor_parallel", None)
+    return bool(selector(prefix)) if callable(selector) else False
+
+
 class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
     """ETP-sharded PLE table shared by device and pinned-host backends."""
 
@@ -62,23 +94,34 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         params_dtype: torch.dtype,
         padding_size: int,
         prefix: str,
+        quant_config: QuantizationConfig | None,
         embedding_method: "Qwen4ExpPLEEmbeddingMethod",
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
     ) -> None:
         del num_ngram_heads, max_total_tokens
+        embedding_method = _resolve_ple_embedding_method(
+            quant_config,
+            self,
+            prefix,
+            embedding_method,
+        )
         super().__init__(
             num_embeddings,
             embedding_dim,
             params_dtype=params_dtype,
             padding_size=padding_size,
             prefix=prefix,
+            disable_tp=_disable_ple_embedding_tp(quant_config, prefix),
             quant_method=embedding_method,
             parallel_group=get_etp_group(),
         )
         self.embedding_method = embedding_method
         self.data_parallel_rank = data_parallel_rank
+        if self.disable_tp:
+            self.etp_data_parallel_size = 1
+            return
         tp_size = get_tp_group().world_size
         if self.tp_size % tp_size:
             raise ValueError(
@@ -103,7 +146,10 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
         """Delegate storage-format conversion to the embedding method."""
-        return self.embedding_method.dequantize(self, embeddings, output_dtype)
+        dequantize = getattr(self.embedding_method, "dequantize", None)
+        if callable(dequantize):
+            return dequantize(self, embeddings, output_dtype)
+        return embeddings.to(output_dtype)
 
     def _get_dp_gather_slot(self, local_num_tokens: int) -> tuple[int, int]:
         """Return the per-DP slot size and this rank's slot offset."""
@@ -174,6 +220,8 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         if embedding_dtype == "float8_e4m3fn":
             return Qwen4ExpPLEFp8EmbeddingMethod()
         if quant_config is None:
+            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if _supports_custom_ple_embedding(quant_config):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(quant_config, ModelOptMixedPrecisionConfig):
             if quant_config._resolve_quant_algo(prefix) == "FP8":
@@ -711,6 +759,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             params_dtype=params_dtype,
             padding_size=divisor,
             prefix=embedding_prefix,
+            quant_config=quant_config,
             embedding_method=embedding_quant_method,
             num_ngram_heads=self.ngram_heads,
             max_total_tokens=max_total_tokens,
@@ -721,7 +770,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             "Initialized PLE embedding %s: quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
-            type(embedding_quant_method).__name__,
+            type(self.ngram_embedding.embedding_method).__name__,
             weight.dtype,
             weight.device,
             weight.is_pinned(),
