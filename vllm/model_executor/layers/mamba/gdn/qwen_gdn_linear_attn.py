@@ -1584,7 +1584,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if attn_metadata_raw is None:
             v_dim = core_attn_out.shape[-1] * core_attn_out.shape[-2]
-            self._warmup_prefill_kernels(qkvz, v_dim)
+            if os.environ.get("VLLM_SKIP_GDN_PREFILL_WARMUP") != "1":
+                self._warmup_prefill_kernels(qkvz, v_dim)
             return
 
         assert isinstance(attn_metadata_raw, dict)
@@ -1640,7 +1641,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         attn_metadata_raw = forward_context.attn_metadata
 
         if attn_metadata_raw is None:
-            self._warmup_prefill_kernels(mixed_qkv, 0)
+            if os.environ.get("VLLM_SKIP_GDN_PREFILL_WARMUP") != "1":
+                self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
         assert isinstance(attn_metadata_raw, dict)
