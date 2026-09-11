@@ -44,6 +44,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    PaddedMergedColumnParallelLinear,
+    PaddedRowParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -56,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -68,6 +71,19 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _padded_intermediate_size(
+    intermediate_size: int,
+    tp_size: int,
+    quant_config: QuantizationConfig | None,
+) -> int:
+    """Return an intermediate size that has integral TP partitions."""
+    alignment = int(getattr(quant_config, "tp_partition_alignment", 1))
+    if alignment < 1:
+        raise ValueError("TP partition alignment must be positive.")
+    partition_alignment = tp_size * alignment if tp_size > 1 else 1
+    return cdiv(intermediate_size, partition_alignment) * partition_alignment
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -83,23 +99,52 @@ class Qwen2MoeMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
+        tp_size = 1 if is_sequence_parallel else get_tensor_model_parallel_world_size()
+        padded_intermediate_size = _padded_intermediate_size(
+            intermediate_size, tp_size, quant_config
+        )
+        use_padded_tp = padded_intermediate_size != intermediate_size
+        gate_up_proj_cls = (
+            PaddedMergedColumnParallelLinear
+            if use_padded_tp
+            else MergedColumnParallelLinear
+        )
+        gate_up_proj_kwargs = {}
+        if use_padded_tp:
+            gate_up_proj_kwargs["padded_output_sizes"] = [
+                padded_intermediate_size
+            ] * 2
+
+        self.gate_up_proj = gate_up_proj_cls(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
             disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
+            **gate_up_proj_kwargs,
         )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
-            prefix=f"{prefix}.down_proj",
-        )
+        if use_padded_tp:
+            self.down_proj = PaddedRowParallelLinear(
+                intermediate_size,
+                padded_intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                disable_tp=is_sequence_parallel,
+                prefix=f"{prefix}.down_proj",
+            )
+        else:
+            self.down_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                disable_tp=is_sequence_parallel,
+                prefix=f"{prefix}.down_proj",
+            )
         if hidden_act != "silu":
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
