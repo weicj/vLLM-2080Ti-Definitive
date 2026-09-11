@@ -80,6 +80,21 @@ def test_custom_allreduce_pcie_opt_in_allows_supported_world_sizes(
     assert custom_ar.should_custom_ar(torch.empty(128, dtype=torch.float16))
 
 
+@pytest.mark.parametrize("world_size", [4, 6, 8])
+def test_custom_allreduce_pcie_is_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch, world_size: int
+) -> None:
+    monkeypatch.delenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", raising=False)
+    custom_ar = object.__new__(CustomAllreduce)
+    custom_ar.disabled = False
+    custom_ar._ptr = 0
+    custom_ar.world_size = world_size
+    custom_ar.fully_connected = False
+    custom_ar.max_size = 1024
+
+    assert not custom_ar.should_custom_ar(torch.empty(128, dtype=torch.float16))
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
