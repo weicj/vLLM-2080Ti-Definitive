@@ -61,6 +61,28 @@ def test_default_loader_rejects_multithread_with_non_lazy_strategy():
         )
 
 
+@pytest.mark.parametrize(
+    ("load_format", "extra_config"),
+    [
+        ("auto", {"enable_multithread_load": True}),
+        ("fastsafetensors", {}),
+        ("instanttensor", {}),
+    ],
+)
+def test_default_loader_rejects_specialized_loader_for_exl3_ngram_streaming(
+    monkeypatch: pytest.MonkeyPatch, load_format: str, extra_config: dict
+) -> None:
+    monkeypatch.setenv("VLLM_EXL3_NGRAM_STREAM", "1")
+
+    with pytest.raises(ValueError, match="requires the default safetensors"):
+        DefaultModelLoader(
+            LoadConfig(
+                load_format=load_format,
+                model_loader_extra_config=extra_config,
+            )
+        )
+
+
 def test_default_loader_explicit_safetensors_does_not_misread_pt(tmp_path):
     # Explicit safetensors must not fall back to a .pt and open it as safetensors.
     (tmp_path / "model.pt").write_bytes(b"\x00\x00\x00\x00")
