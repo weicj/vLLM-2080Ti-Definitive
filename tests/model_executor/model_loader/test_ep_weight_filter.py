@@ -4,6 +4,7 @@
 
 import glob
 import tempfile
+from unittest.mock import patch
 
 import huggingface_hub.constants
 import pytest
@@ -17,6 +18,38 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
+
+
+def test_eager_loader_skips_streamed_exl3_ngram_before_materializing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safetensors.torch import save_file
+
+    weights_file = tmp_path / "model.safetensors"
+    trellis_name = "model.ngram_embedding.shard_0.trellis"
+    save_file(
+        {
+            "model.layers.0.mlp.down_proj.weight": torch.ones(2, 2),
+            trellis_name: torch.ones(64, 64),
+        },
+        str(weights_file),
+    )
+    monkeypatch.setenv("VLLM_EXL3_NGRAM_STREAM", "1")
+
+    with patch(
+        "vllm.model_executor.model_loader.weight_utils.load",
+        side_effect=AssertionError("eager load must not materialize the trellis"),
+    ):
+        loaded = dict(
+            safetensors_weights_iterator(
+                [str(weights_file)],
+                False,
+                safetensors_load_strategy="eager",
+            )
+        )
+
+    assert set(loaded) == {"model.layers.0.mlp.down_proj.weight"}
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for parse_expert_id
