@@ -124,6 +124,19 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{load_config.safetensors_load_strategy!r}; the multi-thread "
                 "loader only implements the default lazy strategy."
             )
+        if os.environ.get("VLLM_EXL3_NGRAM_STREAM", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ) and (
+            extra_config.get("enable_multithread_load")
+            or load_config.load_format in ("fastsafetensors", "instanttensor")
+        ):
+            raise ValueError(
+                "VLLM_EXL3_NGRAM_STREAM requires the default safetensors "
+                "loader because the selected loader cannot skip the SSD "
+                "n-gram trellis before materializing it."
+            )
 
     def _prepare_weights(
         self,
