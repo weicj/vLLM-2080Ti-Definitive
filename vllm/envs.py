@@ -1225,6 +1225,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # so that vLLM can verify if p2p is actually working.
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
+    # Allow vLLM's IPC-based custom all-reduce on PCIe-only TP groups. This is
+    # opt-in because the default policy prefers NCCL for more than two GPUs
+    # without an NVLink-complete topology.
+    "VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE": lambda: (
+        os.environ.get("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", "0").strip().lower()
+        in ("1", "true", "yes", "on")
+    ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
     # selection
