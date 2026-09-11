@@ -27,6 +27,7 @@ USE_PER_DEVICE = [
 ]
 MAX_NEW_TOKENS = int(os.environ.get("BENCH_OUTPUT_TOKENS", "32"))
 MAX_CONTEXT = int(os.environ.get("BENCH_CACHE_TOKENS", "512"))
+EXPECTED_ANSWER = "42"
 
 
 def prompt_ids(tokenizer: Tokenizer) -> torch.Tensor:
@@ -64,6 +65,8 @@ def run_job(generator: Generator, input_ids: torch.Tensor, stops: list[int]) -> 
                 finished = result
     if finished is None:
         raise RuntimeError("generation completed without EOS")
+    if EXPECTED_ANSWER not in text:
+        raise RuntimeError(f"unexpected answer for arithmetic smoke: {text!r}")
     return {
         "text": text,
         "token_ids": token_ids,
@@ -81,6 +84,10 @@ def main() -> None:
         raise RuntimeError(f"expected four visible GPUs, found {torch.cuda.device_count()}")
     if len(USE_PER_DEVICE) != 4:
         raise ValueError("BENCH_USE_PER_DEVICE must provide exactly four values")
+    if os.environ.get("VLLM_EXL3_EXPERIMENT_BOOTSTRAP") == "1":
+        from vllm_exl3 import register
+
+        register()
 
     config = Config.from_directory(MODEL_DIR)
     model = Model.from_config(config)
