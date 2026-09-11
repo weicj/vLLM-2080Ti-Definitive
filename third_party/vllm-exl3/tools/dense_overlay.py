@@ -355,7 +355,11 @@ def main():
     ap.add_argument("--out", help="overlay pack directory to create")
     ap.add_argument("--root", default="model.language_model.", help="tensor-name root of the language model")
     ap.add_argument("--skip-layers", default="45", help="comma list of layer indices to leave untouched (MTP)")
-    ap.add_argument("--prefix-rewrite", default=None, help="OLD:NEW rewrite of config key prefixes")
+    ap.add_argument(
+        "--prefix-rewrite",
+        default="model.language_model.:language_model.model.",
+        help="OLD:NEW rewrite of config key prefixes",
+    )
     ap.add_argument("--draft-layers", default="", help="comma list of layers served by the MTP draft module")
     ap.add_argument("--draft-prefix-rewrite", default=None, help="OLD:NEW rewrite of config key prefixes for --draft-layers")
     ap.add_argument("--tag", default="", help="suffix for the overlay file name (stack a second overlay on an overlay pack)")

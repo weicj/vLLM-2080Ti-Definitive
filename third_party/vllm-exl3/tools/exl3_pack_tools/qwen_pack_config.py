@@ -91,6 +91,8 @@ def main():
     suffixes = set()
     for prefix, k in scan["dense_k_by_prefix"].items():
         variants = {prefix}
+        if prefix == "lm_head":
+            variants.add("language_model.lm_head")
         head, _, leaf = prefix.rpartition(".")
         if leaf in fused:
             variants.add(f"{head}.{fused[leaf]}")
@@ -104,6 +106,13 @@ def main():
                 if m:
                     variants.add(f"mtp.layers.{n_main + int(m.group(1))}." + v[m.end():])
         for v in variants:
+            previous = dense_layers.get(v)
+            if previous is not None and previous["bits"] != int(k):
+                print(
+                    "REFUSE: fused dense projections disagree in K for "
+                    f"{v}: {previous['bits']} vs {int(k)}"
+                )
+                return 2
             dense_layers[v] = {"bits": int(k)}
             tail = v.split(".")
             suffixes.add(".".join(tail[-2:]) if len(tail) >= 2 else v)
@@ -115,7 +124,6 @@ def main():
         "quant_method": "exl3",
         "bits": int(base),
         "codebook": codebook,
-        "head_bits": int(q.get("head_bits", 16)),
         "scope": "native_all_linears",
         "layer_bits": layer_bits,
         "non_routed_exl3": {
@@ -157,7 +165,7 @@ def main():
     print(f"experts: base K={base}, layer overrides={len(layer_bits)} {layer_bits if len(layer_bits) < 20 else '(many)'}")
     print(f"dense linears mapped: {len(dense_layers)}; K distribution:",
           dict(collections.Counter(v['bits'] for v in dense_layers.values())))
-    print(f"codebook={codebook} head_bits={new_q['head_bits']}")
+    print(f"codebook={codebook} head_bits={new_q.get('head_bits')}")
     print("ngram_embedding:", new_q.get("ngram_embedding"))
     if args.dry_run:
         print("dry run, config.json untouched")
