@@ -102,7 +102,9 @@ def test_local_markdown_links_resolve():
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        local_links = re.findall(r"\[.*?\]\((?!https?://)(.*?)\)", content)
+        content = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+        content = re.sub(r"`[^`]*`", "", content)
+        local_links = re.findall(r"(?<!!)\[[^]]*\]\((?!https?://)([^)]*)\)", content)
         for link in local_links:
             clean = link.split("#")[0].strip()
             if clean:

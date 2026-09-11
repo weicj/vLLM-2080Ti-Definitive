@@ -5,10 +5,11 @@ EXL3 (ExLlamaV3 trellis/MCG) quantization serving support for vLLM fork runtimes
 
 This product contains and derives from MIT-licensed software by other authors:
   - Mia's AI Lab ([@MiaAI-Lab](https://github.com/MiaAI-Lab); @plotarmordev),
-    GLM-5.3-Flash-EXL3-2x-DGX-Sparks: routed-expert EXL3 serving path,
-    pointer tables, and Fat GEMM CUDA kernels (Copyright (c) 2026 Mia's AI Lab)
+    GLM-5.3-Flash-EXL3-2x-DGX-Sparks: routed-expert EXL3 serving path and
+    pointer-table logic (Copyright (c) 2026 Mia's AI Lab)
   - ExLlamaV3 by Turboderp ([@turboderp](https://github.com/turboderp), [turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3)): EXL3 trellis format,
-    MCG codebook, and low-bit quantization math (Copyright (c) 2025 Turboderp)
+    MCG codebook, low-bit quantization math, and the runtime kernels invoked
+    through `exllamav3_ext` (Copyright (c) 2025 Turboderp)
   - ExLlamaV3's row-wise n-gram embedding codec (ngram_codec.py / ngram_dequant),
     reimplemented as a torch fallback in src/vllm_exl3/exl3.py (Copyright (c) 2025 Turboderp)
 Their copyright and permission notices are reproduced in THIRD_PARTY_NOTICES.md,

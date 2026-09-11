@@ -14,6 +14,8 @@
 
 - Fat-expert prefill path (`apply_exl3_batched_fat`, experts with more than `VLLM_EXL3_FAT_THRESHOLD` routed rows in a chunk): the branch for packs whose gate and up projections carry distinct `suh` rotations handed column slices of the shared `gate_up` scratch buffer to `ext.hgemm` and `ext.had_r_128`. Those kernels index contiguous row-major operands, so the expert output was uncorrelated with the reference (relative error 1.3, cosine 0.01 on a Qwen3.8-Flash-Next expert) while short prompts, which never reach that path, looked normal. Prompt log-likelihood over a 6000-token corpus was mean NLL 4.21 through vLLM against 0.94 through exllamav3 on the same pack; with the fix it is 0.943. The branch now runs on contiguous fp32 temporaries. Packs with a shared gate/up `suh` (fused gate_up quantization) were not affected. Regression test: `tests/test_fat_distinct_suh.py`.
 
+### Added
+
 - Add `Exl3EmbeddingMethod` for row-wise n-gram embedding tables
   (`ngram_embedding`), decoded through the compiled
   `exllamav3_ext.ngram_dequant` kernel or a pure-torch fallback
@@ -52,8 +54,6 @@
   vLLM's routed-experts loader / custom-op registration; thank
   turboderp for the Qwen3.8-Flash-Next-exl3 pack used to validate this
   release.
-
-### Added
 
 - `VLLM_EXL3_PREFILL_SYNC=<max_rows>`: synchronizes the device before each EXL3
   dense or routed-expert call whose row count is between 2 and max_rows (never

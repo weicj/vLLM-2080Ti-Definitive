@@ -42,9 +42,8 @@ different quant_method gets silently overridden by vLLM — always fix the pack
 config, never work around it in code.
 
 ## Build / test
-- Native build (DGX Spark GB10 / Blackwell): `pip install -e . --no-build-isolation` or `python setup.py build_ext --inplace` compiles `vllm_exl3_c` native kernels.
-- Pure Python wheel build (optional fallback): `VLLM_EXL3_NO_CUDA=1 python -m build --wheel` produces `py3-none-any` wheel for environments without CUDA compilers.
-- Unit tests: `python -m pytest` executes tests, auto-skipping CUDA kernels when running in CPU or non-compiled environments.
+- The plugin is pure Python. Build a wheel with `python -m build --wheel`; EXL3 compute is provided by the separately installed `exllamav3_ext` runtime.
+- Unit tests: `python -m pytest` executes CPU reference and plugin-contract checks. GPU tests skip when CUDA or the ExLlamaV3 runtime is unavailable.
 - Dense-linear tests (need a GPU + exllamav3, no pytest):
   `python tests/test_exl3_linear.py` prints `EXL3_LINEAR_TP_TEST PASS`,
   `EXL3_LINEAR_TEST PASS`, `EXL3_LINEAR_MIXED_TEST PASS`.

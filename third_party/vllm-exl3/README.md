@@ -24,11 +24,12 @@ If you use this plugin, please credit **vcruz305**.
 
 ## Scope (read this first)
 
-This is **not** a plugin for stock vLLM. Upstream vLLM declined EXL3 support
-([vllm-project/vllm#19896](https://github.com/vllm-project/vllm/issues/19896)),
-and this plugin targets vLLM **fork lineages** that provide the
-`RoutedExperts` fused-MoE layer family. It also
-requires
+Upstream vLLM has not accepted EXL3 support
+([vllm-project/vllm#19896](https://github.com/vllm-project/vllm/issues/19896)).
+This plugin works on stock vLLM only for architectures that already expose the
+needed fused-MoE layer, such as the serving-proven DeepSeek-V4 path. Models
+using the `RoutedExperts` family, including GLM-5.3, require a compatible vLLM
+fork. Every deployment also requires
 [exllamav3](https://github.com/turboderp-org/exllamav3) with its compiled
 `exllamav3_ext` kernels for your GPU arch.
 
@@ -284,6 +285,14 @@ Until it's tagged, install straight from `main` to get it:
 
 ```bash
 pip install git+https://github.com/vcruz305/vllm-exl3@main
+```
+
+Install a compatible vLLM runtime and ExLlamaV3 first. The wheel does not
+bundle `exllamav3_ext`; verify that the extension built for the target GPU is
+available before starting vLLM:
+
+```bash
+python -c "import exllamav3_ext"
 ```
 
 Prebuilt wheels ship alongside the runtime wheels on Hugging Face for fast

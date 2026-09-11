@@ -20,6 +20,7 @@ try:
     import pytest
     torch = pytest.importorskip("torch")
 except ImportError:  # the serving venv has no pytest; run as a script instead
+    import torch
 
     class _Skip(Exception):
         pass
@@ -55,9 +56,9 @@ def _reference_weight(ext, trellis, suh, svh):
     return w
 
 
-def _patch_tp(monkeypatch_module, rank=0, size=1):
-    monkeypatch_module.get_tensor_model_parallel_rank = lambda: rank
-    monkeypatch_module.get_tensor_model_parallel_world_size = lambda: size
+def _patch_tp(monkeypatch, dist, rank=0, size=1):
+    monkeypatch.setattr(dist, "get_tensor_model_parallel_rank", lambda: rank)
+    monkeypatch.setattr(dist, "get_tensor_model_parallel_world_size", lambda: size)
 
 
 def _run_layer(method, in_features, shards, shard_ids, gen, device, ext):
@@ -90,7 +91,7 @@ def _run_layer(method, in_features, shards, shard_ids, gen, device, ext):
     return layer, x, w_ref
 
 
-def test_exl3_linear_basic():
+def test_exl3_linear_basic(monkeypatch):
     try:
         import exllamav3_ext as ext
     except ImportError:
@@ -101,7 +102,7 @@ def test_exl3_linear_basic():
 
     from vllm_exl3.exl3 import Exl3Config, Exl3LinearMethod
 
-    _patch_tp(dist)
+    _patch_tp(monkeypatch, dist)
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(1234)
     cfg = Exl3Config(bits=2, non_routed_exl3={"modules": ["o_proj"], "bits": K})
@@ -137,7 +138,7 @@ def test_exl3_linear_basic():
     print(f"EXL3_LINEAR_TEST PASS worst_rel_l2={worst:.4e}")
 
 
-def test_exl3_linear_tp_slicing():
+def test_exl3_linear_tp_slicing(monkeypatch):
     """Column/row TP slicing through the real loaders on CPU (tp_size=2, tp_rank=1)."""
     try:
         import vllm.distributed as dist
@@ -147,41 +148,38 @@ def test_exl3_linear_tp_slicing():
         pytest.skip("vllm / vllm_exl3 not importable")
     from vllm.model_executor.layers.linear import RowParallelLinear
 
-    _patch_tp(dist, rank=1, size=2)
-    try:
-        cfg = Exl3Config(bits=K)
-        method = Exl3LinearMethod(cfg, bits=K)
-        gen = torch.Generator().manual_seed(7)
-        full_in, full_out = 512, 256
+    _patch_tp(monkeypatch, dist, rank=1, size=2)
+    cfg = Exl3Config(bits=K)
+    method = Exl3LinearMethod(cfg, bits=K)
+    gen = torch.Generator().manual_seed(7)
+    full_in, full_out = 512, 256
 
-        # column-parallel: this rank owns the upper half of N (trellis dim1, svh)
-        layer = torch.nn.Module()
-        method.create_weights(layer, full_in, [full_out // 2], full_in, full_out, torch.bfloat16)
-        trellis = _rand_trellis(full_in // 16, full_out // 16, gen, "cpu")
-        suh, svh = _signs(full_in, gen, "cpu"), _signs(full_out, gen, "cpu")
-        layer.trellis.weight_loader(layer.trellis, trellis)
-        layer.suh.weight_loader(layer.suh, suh)
-        layer.svh.weight_loader(layer.svh, svh)
-        assert torch.equal(layer.trellis.data, trellis[:, full_out // 32 :, :])
-        assert torch.equal(layer.suh.data[0], suh)
-        assert torch.equal(layer.svh.data, svh[full_out // 2 :])
+    # column-parallel: this rank owns the upper half of N (trellis dim1, svh)
+    layer = torch.nn.Module()
+    method.create_weights(layer, full_in, [full_out // 2], full_in, full_out, torch.bfloat16)
+    trellis = _rand_trellis(full_in // 16, full_out // 16, gen, "cpu")
+    suh, svh = _signs(full_in, gen, "cpu"), _signs(full_out, gen, "cpu")
+    layer.trellis.weight_loader(layer.trellis, trellis)
+    layer.suh.weight_loader(layer.suh, suh)
+    layer.svh.weight_loader(layer.svh, svh)
+    assert torch.equal(layer.trellis.data, trellis[:, full_out // 32 :, :])
+    assert torch.equal(layer.suh.data[0], suh)
+    assert torch.equal(layer.svh.data, svh[full_out // 2 :])
 
-        # row-parallel: this rank owns the upper half of K (trellis dim0, suh)
-        layer = RowParallelLinear.__new__(RowParallelLinear)
-        torch.nn.Module.__init__(layer)
-        method.create_weights(layer, full_in // 2, [full_out], full_in, full_out, torch.bfloat16)
-        layer.trellis.weight_loader(layer.trellis, trellis)
-        layer.suh.weight_loader(layer.suh, suh)
-        layer.svh.weight_loader(layer.svh, svh)
-        assert torch.equal(layer.trellis.data, trellis[full_in // 32 :, :, :])
-        assert torch.equal(layer.suh.data[0], suh[full_in // 2 :])
-        assert torch.equal(layer.svh.data, svh)
-        print("EXL3_LINEAR_TP_TEST PASS")
-    finally:
-        _patch_tp(dist)
+    # row-parallel: this rank owns the upper half of K (trellis dim0, suh)
+    layer = RowParallelLinear.__new__(RowParallelLinear)
+    torch.nn.Module.__init__(layer)
+    method.create_weights(layer, full_in // 2, [full_out], full_in, full_out, torch.bfloat16)
+    layer.trellis.weight_loader(layer.trellis, trellis)
+    layer.suh.weight_loader(layer.suh, suh)
+    layer.svh.weight_loader(layer.svh, svh)
+    assert torch.equal(layer.trellis.data, trellis[full_in // 32 :, :, :])
+    assert torch.equal(layer.suh.data[0], suh[full_in // 2 :])
+    assert torch.equal(layer.svh.data, svh)
+    print("EXL3_LINEAR_TP_TEST PASS")
 
 
-def test_exl3_linear_mixed_mul1():
+def test_exl3_linear_mixed_mul1(monkeypatch):
     """6-shard mixed layer with bf16_shards [3,4,5] and mul1 codebook."""
     try:
         import exllamav3_ext as ext
@@ -193,7 +191,7 @@ def test_exl3_linear_mixed_mul1():
 
     from vllm_exl3.exl3 import Exl3Config, Exl3LinearMethod
 
-    _patch_tp(dist)
+    _patch_tp(monkeypatch, dist)
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(4321)
 
@@ -309,10 +307,23 @@ def test_exl3_linear_mixed_mul1():
 
 
 if __name__ == "__main__":
+    class DirectMonkeyPatch:
+        def __init__(self):
+            self.originals = []
+
+        def setattr(self, target, name, value):
+            self.originals.append((target, name, getattr(target, name)))
+            setattr(target, name, value)
+
+        def undo(self):
+            for target, name, value in reversed(self.originals):
+                setattr(target, name, value)
+
     failed = False
     for fn in (test_exl3_linear_tp_slicing, test_exl3_linear_basic, test_exl3_linear_mixed_mul1):
+        monkeypatch = DirectMonkeyPatch()
         try:
-            fn()
+            fn(monkeypatch)
         except Exception as e:  # noqa: BLE001
             if type(e).__name__ == "_Skip":
                 print(f"SKIP {fn.__name__}: {e}")
@@ -322,4 +333,6 @@ if __name__ == "__main__":
             traceback.print_exc()
             print(f"FAIL {fn.__name__}: {e}")
             failed = True
+        finally:
+            monkeypatch.undo()
     sys.exit(1 if failed else 0)

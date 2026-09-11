@@ -74,7 +74,7 @@ def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
         return 1
-    root = os.path.join(sys.argv[1], "models", "qwen4_exp", "nvidia")
+    root = os.path.join(sys.argv[1], "model_executor", "models", "qwen4_exp", "nvidia")
     ok = patch(os.path.join(root, "model.py"), MODEL_OLD, MODEL_NEW)
     ok = patch(os.path.join(root, "ple_layer.py"), PLE_OLD, PLE_NEW) and ok
     return 0 if ok else 1

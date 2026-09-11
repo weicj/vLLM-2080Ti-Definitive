@@ -55,10 +55,10 @@ def main():
     ngram = {}
     for _, name, dtype, shape in tensors:
         m = ngram_re.match(name)
-        if m and len(shape) == 2:
+        if m:
             t = ngram.setdefault(m.group(1), {"shards": set(), "shapes": set(), "dtypes": set(), "aux": {}})
             t["shards"].add(int(m.group(2)))
-            t["shapes"].add((int(shape[0]), int(shape[1])))
+            t["shapes"].add(tuple(int(s) for s in shape))
             t["dtypes"].add(dtype)
     for _, name, dtype, shape in tensors:
         for root, t in ngram.items():
@@ -72,6 +72,11 @@ def main():
             ngram_problems.append(f"{root}: shard indices not contiguous ({shards[:5]}...)")
         if len(t["shapes"]) != 1 or t["dtypes"] != {"I16"}:
             ngram_problems.append(f"{root}: shard shapes/dtypes not uniform: {t['shapes']} {t['dtypes']}")
+            continue
+        if len(t["shapes"]) != 1 or len(next(iter(t["shapes"]))) != 2:
+            ngram_problems.append(
+                f"{root}: shard shapes must be 2D, got {sorted(t['shapes'])}"
+            )
             continue
         rows, words = next(iter(t["shapes"]))
         if (words - 1) * 16 % NGRAM_ROW_DIM:

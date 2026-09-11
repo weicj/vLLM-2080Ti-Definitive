@@ -42,6 +42,17 @@ def main() -> None:
     if not (root / "bindings.cpp").is_file():
         raise SystemExit(f"not an ExLlamaV3 extension source directory: {root}")
 
+    # Check all source anchors before writing generated replacements.
+    for relative in ("cpu/moe_handoff.cu", "parallel/all_reduce_cpu.cu"):
+        path = root / relative
+        if not path.is_file():
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "std::this_thread::yield();" in source:
+            continue
+        if source.count("__builtin_ia32_pause();") != 1:
+            raise SystemExit(f"expected one x86 pause block in {path}")
+
     write(
         root / "avx2_target.h",
         """#pragma once

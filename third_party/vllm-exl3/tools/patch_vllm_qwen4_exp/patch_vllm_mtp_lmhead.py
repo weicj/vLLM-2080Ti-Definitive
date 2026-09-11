@@ -27,7 +27,15 @@ NEW = """                self.lm_head = ParallelLMHead(
 
 
 def main():
-    path = os.path.join(sys.argv[1], "models", "qwen4_exp", "nvidia", "mtp.py")
+    if len(sys.argv) != 2:
+        print(__doc__)
+        return 1
+    path = os.path.join(
+        sys.argv[1], "model_executor", "models", "qwen4_exp", "nvidia", "mtp.py"
+    )
+    if not os.path.isfile(path):
+        print(f"ERROR: {path} not found")
+        return 1
     src = open(path, encoding="utf-8").read()
     if NEW in src:
         print(f"already patched: {path}")

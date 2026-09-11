@@ -7,6 +7,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+defaults:
+  run:
+    working-directory: third_party/vllm-exl3
+
 jobs:
   lint-and-syntax:
     name: Lint & Python Bytecode Compilation
@@ -24,11 +28,9 @@ jobs:
         run: |
           echo "Validating bytecode compilation across repository..."
           python -m py_compile setup.py
-          for f in src/**/*.py tools/*.py tests/*.py; do
-            if [ -f "$f" ]; then
-              echo "Compiling $f"
-              python -m py_compile "$f"
-            fi
+          find src tools tests -name '*.py' -print0 | while IFS= read -r -d '' f; do
+            echo "Compiling $f"
+            python -m py_compile "$f"
           done
 
   doc-integrity-and-links:
@@ -66,7 +68,9 @@ jobs:
 
           # 2. Check local relative links in README.md
           readme = Path("README.md").read_text(encoding="utf-8")
-          local_links = re.findall(r'\[.*?\]\((?!https?://)(.*?)\)', readme)
+          readme = re.sub(r'```.*?```', '', readme, flags=re.DOTALL)
+          readme = re.sub(r'`[^`]*`', '', readme)
+          local_links = re.findall(r'(?<!!)\[[^]]*\]\((?!https?://)([^)]*)\)', readme)
           missing = []
           for link in local_links:
               clean = link.split("#")[0].strip()
@@ -142,5 +146,5 @@ jobs:
 
       - name: Build SDist and Pure-Python Wheel
         run: |
-          VLLM_EXL3_NO_CUDA=1 python -m build --sdist --wheel
+          python -m build --sdist --wheel
           ls -la dist/

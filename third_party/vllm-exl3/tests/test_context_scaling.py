@@ -16,7 +16,13 @@ def test_mla_kv_cache_exact_bytes_and_gib(context_len, expected_gib):
 
 
 def test_256k_context_fits_with_physical_safety_margin():
-    result = validate_context_scaling(262144)
+    result = validate_context_scaling(
+        262144,
+        model_weights_gb=95.4,
+        total_mem_gb=128.0,
+        mem_util=0.90,
+        chunk_size=2048,
+    )
     assert result["fits"] is True
     assert result["safety_margin_gb"] > 18.0
     assert result["kv_cache_gb"] == pytest.approx(6.046875)

@@ -29,7 +29,15 @@ NEW = """            orig_to_new_substr={
 
 
 def main():
-    path = os.path.join(sys.argv[1], "models", "qwen4_exp", "nvidia", "model.py")
+    if len(sys.argv) != 2:
+        print(__doc__)
+        return 1
+    path = os.path.join(
+        sys.argv[1], "model_executor", "models", "qwen4_exp", "nvidia", "model.py"
+    )
+    if not os.path.isfile(path):
+        print(f"ERROR: {path} not found")
+        return 1
     src = open(path, encoding="utf-8").read()
     if '".attn.k_proj.": None' in src:
         print(f"already patched: {path}")

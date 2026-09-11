@@ -4,8 +4,6 @@ import math
 
 import pytest
 
-torch = pytest.importorskip("torch")
-
 from vllm_exl3.dequant import (
     decode_codebook_bits_py,
     decode_mcg_py,
@@ -70,6 +68,7 @@ def test_nan_conversion_and_half_decoding() -> None:
     ],
 )
 def test_float_to_half_bits_matches_torch(value: float) -> None:
+    torch = pytest.importorskip("torch")
     expected = int(
         torch.tensor(value, dtype=torch.float32).half().view(torch.int16).item()
     ) & 0xFFFF
@@ -79,6 +78,18 @@ def test_float_to_half_bits_matches_torch(value: float) -> None:
         assert (expected & 0x7C00) == 0x7C00 and expected & 0x03FF
     else:
         assert actual == expected
+
+
+def test_float_to_half_bits_full_finite_half_domain_matches_torch() -> None:
+    torch = pytest.importorskip("torch")
+    values = [
+        half_bits_to_float_py(bits)
+        for bits in range(1 << 16)
+        if bits & 0x7C00 != 0x7C00
+    ]
+    expected = torch.tensor(values, dtype=torch.float32).half().view(torch.int16)
+    actual = [float_to_half_bits_py(value) for value in values]
+    assert actual == [int(bits) & 0xFFFF for bits in expected.tolist()]
 
 
 @pytest.mark.parametrize(

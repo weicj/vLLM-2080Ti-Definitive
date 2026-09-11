@@ -45,9 +45,11 @@ print("fc2 out", tuple(y2.shape), "finite:", bool(y2.isfinite().all()), "mean |y
 ok &= tuple(y2.shape) == (8, 1152) and bool(y2.isfinite().all())
 # padded input rows must not matter: garbage in the padded input columns must change nothing
 h_junk = h_pad.clone()
-h_junk[:, 4304:] = 0.0
+h_junk[:, 4304:] = 1.2345
 y2b = fc2.forward(h_junk.contiguous(), {}, out_dtype=torch.float32)
-print("fc2 identical with zero padding rows:", torch.equal(y2, y2b))
+padding_independent = torch.equal(y2, y2b)
+print("fc2 identical with junk padding rows:", padding_independent)
 print("plugin helpers:", hasattr(X, "_exl3_pad128") and X._exl3_pad128(4304) == 4352, "| flags plumbing:", "_exl3_codebook_flags" in open(X.__file__).read())
+ok &= padding_independent
 ok &= hasattr(X, "_exl3_pad128") and "_exl3_codebook_flags" in open(X.__file__).read()
 print("PAD_CHECK:", "PASS" if ok else "FAIL")
