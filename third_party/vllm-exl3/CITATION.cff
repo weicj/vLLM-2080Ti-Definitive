@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "vllm-exl3"
+type: software
+authors:
+  - family-names: Cruz
+    given-names: Victor
+    alias: vcruz305
+repository-code: "https://github.com/vcruz305/vllm-exl3"
+license: Apache-2.0

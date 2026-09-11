@@ -1,0 +1,8 @@
+dist/
+build/
+__pycache__/
+*.egg-info/
+*.pyc
+
+# Dual-agent sync state
+.agent-sync/
