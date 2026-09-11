@@ -65,6 +65,16 @@ from vllm.model_executor.layers.quantization.torchao import torchao_version_at_l
 
 logger = init_logger(__name__)
 
+
+def _should_skip_streamed_exl3_ngram_trellis(name: str) -> bool:
+    """Exclude the opt-in EXL3 PLE table from generic weight loading."""
+    return (
+        os.environ.get("VLLM_EXL3_NGRAM_STREAM", "").strip().lower()
+        in ("1", "true", "yes")
+        and ".ngram_embedding.shard_" in name
+        and name.endswith(".trellis")
+    )
+
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
 # lock files in the temp directory will be automatically deleted when the
@@ -274,6 +284,14 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
+        # Transformers preserves the EXL3 method metadata from config.json but
+        # discards its large tensor_storage ledger. EXL3 needs that ledger to
+        # select the per-linear trellis format, so load the dedicated config
+        # file below when the inline copy is incomplete.
+        exl3_tensor_storage_missing = (
+            model_config.quantization == "exl3"
+            and not hf_quant_config.get("tensor_storage")
+        )
         # `model_config.quantization_config` may be set alongside a checkpoint
         # quant config: the checkpoint determines `quant_cls`, and the user's
         # QuantizationConfigArgs is consulted by individual quant methods
@@ -283,7 +301,7 @@ def get_quant_config(
         # not contain the per-layer quantized_layers map.  Newer checkpoints
         # embed it directly; older ones keep it only in hf_quant_config.json.
         # If it is missing, fall through to the file-based loading path.
-        if (
+        if exl3_tensor_storage_missing or (
             model_config.quantization == "modelopt_mixed"
             and "quantized_layers" not in hf_quant_config
         ):
@@ -851,6 +869,7 @@ def safetensors_weights_iterator(
     this rank are skipped **before** reading from disk, which drastically
     reduces storage I/O for MoE models under EP.
     """
+
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
@@ -931,11 +950,24 @@ def safetensors_weights_iterator(
         bar_format=_BAR_FORMAT,
     ):
         if safetensors_load_strategy == "eager":
-            with open(st_file, "rb") as f:
-                state_dict = load(f.read())
-            for name, param in state_dict.items():
-                if not should_skip_weight(name, local_expert_ids):
-                    yield name, param
+            if os.environ.get("VLLM_EXL3_NGRAM_STREAM", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                with safe_open(st_file, framework="pt") as f:
+                    for name in f.keys():  # noqa: SIM118
+                        if should_skip_weight(
+                            name, local_expert_ids
+                        ) or _should_skip_streamed_exl3_ngram_trellis(name):
+                            continue
+                        yield name, f.get_tensor(name)
+            else:
+                with open(st_file, "rb") as f:
+                    state_dict = load(f.read())
+                for name, param in state_dict.items():
+                    if not should_skip_weight(name, local_expert_ids):
+                        yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -951,7 +983,9 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if should_skip_weight(
+                        name, local_expert_ids
+                    ) or _should_skip_streamed_exl3_ngram_trellis(name):
                         continue
                     state_dict[name] = f.get_tensor(name)
 
@@ -969,7 +1003,9 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if should_skip_weight(
+                        name, local_expert_ids
+                    ) or _should_skip_streamed_exl3_ngram_trellis(name):
                         continue
                     param = f.get_tensor(name)
                     yield name, param

@@ -210,6 +210,18 @@ def _get_ple_embedding_quant_method(
     return Qwen4ExpPLEFp8EmbeddingMethod()
 
 
+def _disable_ple_embedding_tp(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> bool:
+    """Whether a quantizer needs the PLE hash table replicated per TP rank."""
+
+    if quant_config is None:
+        return False
+    selector = getattr(quant_config, "disable_embedding_tensor_parallel", None)
+    return bool(selector(prefix)) if callable(selector) else False
+
+
 class Qwen4ExpNGramEmbedding(PleOffloadLayer):
     def __init__(
         self,
@@ -290,15 +302,19 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
                 scale_dtype=params_dtype or torch.float16,
             )
         else:
+            embedding_prefix = f"{prefix}.ngram_embedding"
+            quant_method = _get_ple_embedding_quant_method(
+                quant_config, embedding_prefix
+            )
             self.ngram_embedding = VocabParallelEmbedding(
                 padded_vocab_size,
                 self.head_dim,
                 params_dtype=params_dtype,
                 padding_size=divisor,
-                prefix=f"{prefix}.ngram_embedding",
-                quant_method=_get_ple_embedding_quant_method(
-                    quant_config, f"{prefix}.ngram_embedding"
-                ),
+                quant_config=quant_config if quant_method is None else None,
+                prefix=embedding_prefix,
+                quant_method=quant_method,
+                disable_tp=_disable_ple_embedding_tp(quant_config, embedding_prefix),
             )
         self.register_buffer(
             "positions_buffer",
@@ -559,6 +575,18 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
                     tp_end=embedding.shard_indices.org_vocab_end_index,
                 )
                 loaded.add("ngram_embedding.weight")
+                continue
+            if (
+                getattr(
+                    getattr(self.ngram_embedding, "quant_method", None),
+                    "stream_from_disk",
+                    False,
+                )
+                and name.startswith(shard_prefix)
+                and name.endswith(".trellis")
+            ):
+                # The EXL3 method opens its own read-only safetensors mappings.
+                # Avoid putting tens of GiB of packed PLE rows on a GPU worker.
                 continue
             regular_weights.append((name, loaded_weight))
 
