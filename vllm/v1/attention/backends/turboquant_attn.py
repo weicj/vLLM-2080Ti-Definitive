@@ -177,8 +177,13 @@ _TQ_FORCE_DECODE_SDPA_MAX_QK_CELLS = int(
     os.getenv("VLLM_TURBOQUANT_FORCE_DECODE_SDPA_MAX_QK_CELLS", "131072")
 )
 _TQ_CUDAGRAPH_SPEC_DECODE_SAFE = (
-    os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE", "0") == "1"
+    envs.VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE
 )
+_TQ_SPEC_DECODE_CHUNK_SIZE = envs.VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
+if _TQ_SPEC_DECODE_CHUNK_SIZE not in (1, 2, 4, 8):
+    raise ValueError(
+        "VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE must be one of 1, 2, 4, or 8"
+    )
 _TQ_DEBUG_MIXED = os.getenv("VLLM_TURBOQUANT_DEBUG_MIXED", "0") == "1"
 _SKIP_PREFILL_STORE_FOR_PROFILING = (
     os.getenv("VLLM_TURBOQUANT_SKIP_PREFILL_STORE", "0") == "1"
@@ -1429,28 +1434,33 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             synth_seq_lens = (
                 attn_metadata.seq_lens[i : i + 1] - q_len + rel_seq_lens
             ).contiguous()
-            synth_bt = (
-                attn_metadata.block_table[i : i + 1]
-                .expand(q_len, -1)
-                .contiguous()
-            )
-            output[q_start:q_end] = triton_turboquant_decode_attention(
-                query=query[q_start:q_end],
-                kv_cache=kv_cache,
-                block_table=synth_bt,
-                seq_lens=synth_seq_lens,
-                Pi=Pi,
-                centroids=centroids,
-                scale=self.scale,
-                mse_bits=self.tq_config.key_mse_bits,
-                key_packed_size=self.tq_config.key_packed_size,
-                value_quant_bits=self.tq_config.effective_value_quant_bits,
-                key_fp8=self.tq_config.key_fp8,
-                norm_correction=self.tq_config.norm_correction,
-                PiT=PiT,
-                max_num_kv_splits=self.max_num_kv_splits,
-                sliding_window=self._decode_sliding_window,
-            ).to(query.dtype)
+            request_block_table = attn_metadata.block_table[i : i + 1]
+            # Multi-token target verification is causal: each row must see a
+            # progressively longer prefix. Chunking keeps the same synthetic
+            # sequence lengths while reducing graph replay overhead on SM75.
+            for chunk_start in range(0, q_len, _TQ_SPEC_DECODE_CHUNK_SIZE):
+                chunk_end = min(chunk_start + _TQ_SPEC_DECODE_CHUNK_SIZE, q_len)
+                chunk_len = chunk_end - chunk_start
+                synth_bt = request_block_table.expand(chunk_len, -1).contiguous()
+                output[q_start + chunk_start : q_start + chunk_end] = (
+                    triton_turboquant_decode_attention(
+                        query=query[q_start + chunk_start : q_start + chunk_end],
+                        kv_cache=kv_cache,
+                        block_table=synth_bt,
+                        seq_lens=synth_seq_lens[chunk_start:chunk_end],
+                        Pi=Pi,
+                        centroids=centroids,
+                        scale=self.scale,
+                        mse_bits=self.tq_config.key_mse_bits,
+                        key_packed_size=self.tq_config.key_packed_size,
+                        value_quant_bits=self.tq_config.effective_value_quant_bits,
+                        key_fp8=self.tq_config.key_fp8,
+                        norm_correction=self.tq_config.norm_correction,
+                        PiT=PiT,
+                        max_num_kv_splits=self.max_num_kv_splits,
+                        sliding_window=self._decode_sliding_window,
+                    ).to(query.dtype)
+                )
 
         return output
 

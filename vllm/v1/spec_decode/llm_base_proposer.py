@@ -383,11 +383,54 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
-    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _expand_allowed_token_ids_mask(
+        self,
+        num_hidden_state_rows: int,
+        sampling_metadata: SamplingMetadata | None,
+    ) -> torch.Tensor | None:
+        if (
+            sampling_metadata is None
+            or sampling_metadata.allowed_token_ids_mask is None
+        ):
+            return None
+
+        allowed_token_ids_mask = sampling_metadata.allowed_token_ids_mask
+        num_requests = allowed_token_ids_mask.shape[0]
+        if num_hidden_state_rows == num_requests:
+            return allowed_token_ids_mask
+        if num_requests == 0 or num_hidden_state_rows % num_requests != 0:
+            raise ValueError(
+                "Draft sampling rows do not align with allowed_token_ids_mask."
+            )
+        repeat_factor = num_hidden_state_rows // num_requests
+        return allowed_token_ids_mask.repeat_interleave(repeat_factor, dim=0)
+
+    def _greedy_sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata | None = None,
+    ) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
+        allowed_token_ids_mask = self._expand_allowed_token_ids_mask(
+            hidden_states.shape[0], sampling_metadata
+        )
+        if allowed_token_ids_mask is not None:
+            if self.use_local_argmax_reduction and hasattr(
+                self.model, "get_top_tokens_with_mask"
+            ):
+                return self.model.get_top_tokens_with_mask(
+                    hidden_states, allowed_token_ids_mask
+                )
+            logits = self.model.compute_logits(hidden_states)
+            assert logits is not None
+            logits.masked_fill_(allowed_token_ids_mask, float("-inf"))
+            return logits.argmax(dim=-1)
+
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
-        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+        logits = self.model.compute_logits(hidden_states)
+        assert logits is not None
+        return logits.argmax(dim=-1)
 
     def propose(
         self,
@@ -469,7 +512,9 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            draft_token_ids = self._greedy_sample(sample_hidden_states)
+            draft_token_ids = self._greedy_sample(
+                sample_hidden_states, sampling_metadata
+            )
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
@@ -484,7 +529,7 @@ class SpecDecodeBaseProposer:
             # (which read via _get_positions) use the correct values.
             self.positions[:batch_size] = positions
 
-        draft_token_ids = self._greedy_sample(sample_hidden_states)
+        draft_token_ids = self._greedy_sample(sample_hidden_states, sampling_metadata)
 
         if self.allowed_attn_types is not None:
             for group_md in per_group_attn_metadata:
@@ -584,7 +629,9 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
+            draft_token_ids = self._greedy_sample(
+                last_hidden_states[:batch_size], sampling_metadata
+            )
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
@@ -1373,11 +1420,15 @@ class SpecDecodeBaseProposer:
                     f"{self.model.__class__.__name__} does not implement "
                     "get_top_tokens()."
                 )
-            # Warn if draft model has vocab remapping, which forces fallback
-            # to the full-logits path (negating the optimization).
+            supports_vocab_remap_local_argmax = getattr(
+                self.model,
+                "_map_draft_ids_to_target_ids",
+                None,
+            ) is not None
             if (
                 hasattr(self.model, "draft_id_to_target_id")
                 and self.model.draft_id_to_target_id is not None
+                and not supports_vocab_remap_local_argmax
             ):
                 logger.warning(
                     "use_local_argmax_reduction is enabled but draft model "
@@ -1387,8 +1438,14 @@ class SpecDecodeBaseProposer:
                 )
             else:
                 logger.info(
-                    "Using local argmax reduction for draft token generation "
-                    "(communication: O(2*tp_size) vs O(vocab_size))."
+                    "Using local argmax reduction for draft token generation%s "
+                    "(communication: O(2*tp_size) vs O(vocab_size)).",
+                    " with vocab remapping support"
+                    if (
+                        hasattr(self.model, "draft_id_to_target_id")
+                        and self.model.draft_id_to_target_id is not None
+                    )
+                    else "",
                 )
 
     @torch.inference_mode()

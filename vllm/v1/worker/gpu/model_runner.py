@@ -174,11 +174,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
-            if self.speculative_config.method == "eagle3":
-                # EAGLE3 may require auxiliary hidden states from target model outputs.
+            if self.speculative_config.method in ("eagle3", "dflash"):
+                # EAGLE3 and DFlash consume auxiliary target hidden states.
                 self.use_aux_hidden_state_outputs = True
                 if self.use_pp:
-                    raise ValueError("EAGLE3 with pipeline parallel is not supported.")
+                    raise ValueError(
+                        f"{self.speculative_config.method} with pipeline parallel "
+                        "is not supported."
+                    )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -629,7 +632,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
             )
             if self.speculator is not None:
-                self.speculator.capture(captured_attn_states)
+                # Eagle consumes the target capture state; DFlash builds a
+                # dedicated query graph and intentionally ignores it.
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.method == "dflash"
+                ):
+                    self.speculator.capture()
+                else:
+                    self.speculator.capture(captured_attn_states)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

@@ -108,6 +108,7 @@ class LogitsProcessor(PluggableLayer):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        disallowed_token_ids_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Vocab-parallel argmax without all-gathering full logits.
 
@@ -127,6 +128,26 @@ class LogitsProcessor(PluggableLayer):
             logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
         if self.scale != 1.0:
             logits = logits * self.scale
+
+        if disallowed_token_ids_mask is not None:
+            if disallowed_token_ids_mask.shape[0] != hidden_states.shape[0]:
+                raise ValueError(
+                    "disallowed_token_ids_mask batch does not match hidden states."
+                )
+            shard_indices = lm_head.shard_indices
+            shard_mask = disallowed_token_ids_mask[
+                :,
+                shard_indices.org_vocab_start_index : shard_indices.org_vocab_end_index,
+            ]
+            if shard_mask.shape[1] != logits.shape[-1]:
+                padded_mask = torch.ones(
+                    (shard_mask.shape[0], logits.shape[-1]),
+                    dtype=torch.bool,
+                    device=logits.device,
+                )
+                padded_mask[:, : shard_mask.shape[1]] = shard_mask
+                shard_mask = padded_mask
+            logits.masked_fill_(shard_mask, float("-inf"))
 
         # Mask out padding entries beyond org_vocab_size on this shard.
         num_pad = lm_head.shard_indices.num_org_vocab_padding
@@ -154,6 +175,53 @@ class LogitsProcessor(PluggableLayer):
         max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
         top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
         return top_tokens.squeeze(-1).to(torch.int64)
+
+    def get_top_k_tokens(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        k: int,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return global vocabulary top-k ids and scores without full gather.
+
+        DFlash2's candidate selector scores only the head's local top-k.  On
+        tensor-parallel runs this exchanges those k candidates per rank, rather
+        than materializing the complete vocabulary logits on every rank.
+        """
+        if k <= 0:
+            raise ValueError(f"k must be positive, got {k}.")
+        if self.scale <= 0.0 and self.scale != 1.0:
+            raise ValueError(
+                "The local top-k reduction optimization is not supported for "
+                "non-positive logit scaling factors."
+            )
+
+        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        num_pad = lm_head.shard_indices.num_org_vocab_padding
+        if num_pad > 0:
+            logits[..., -num_pad:] = -float("inf")
+
+        local_k = min(k, logits.shape[-1])
+        values, ids = torch.topk(logits, local_k, dim=-1)
+        ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
+
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1:
+            values = tensor_model_parallel_all_gather(values, dim=-1)
+            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+            global_k = min(k, values.shape[-1])
+            values, selected = torch.topk(values, global_k, dim=-1)
+            ids = ids.gather(-1, selected)
+
+        # Scaling and soft capping are monotonic for valid DFlash2 configs,
+        # hence they may be applied after selecting the top-k entries.
+        values = values.float()
+        if self.soft_cap is not None:
+            values = torch.tanh(values / self.soft_cap) * self.soft_cap
+        if self.scale != 1.0:
+            values = values * self.scale
+        return ids, values
 
     def extra_repr(self) -> str:
         s = f"vocab_size={self.vocab_size}"

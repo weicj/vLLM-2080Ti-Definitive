@@ -34,6 +34,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    SlidingWindowSpec,
+)
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
@@ -45,6 +50,53 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+_DFLASH_VALID_LAYER_TYPES = frozenset({"full_attention", "sliding_attention"})
+
+
+def _get_dflash_layer_types(config: Qwen3Config) -> tuple[str, ...]:
+    layer_types = getattr(config, "layer_types", None)
+    if layer_types is None:
+        return ("full_attention",) * config.num_hidden_layers
+    if len(layer_types) != config.num_hidden_layers:
+        raise ValueError(
+            f"DFlash layer_types length {len(layer_types)} does not match "
+            f"num_hidden_layers {config.num_hidden_layers}."
+        )
+    invalid = set(layer_types) - _DFLASH_VALID_LAYER_TYPES
+    if invalid:
+        raise ValueError(f"Invalid DFlash layer_type(s): {sorted(invalid)}.")
+    if "sliding_attention" in layer_types and not getattr(
+        config, "sliding_window", None
+    ):
+        raise ValueError(
+            "DFlash sliding_attention layers require `sliding_window` in config."
+        )
+    return tuple(layer_types)
+
+
+class DFlashAttention(Attention):
+    """Attention with DFlash-specific KV allocation semantics.
+
+    The compute path keeps the layer's configured sliding window. The KV cache
+    spec is widened to full attention because DFlash writes every context KV
+    before drafting and cannot evict old context blocks from draft layers.
+    """
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if isinstance(spec, SlidingWindowSpec):
+            return FullAttentionSpec(
+                block_size=spec.block_size,
+                num_kv_heads=spec.num_kv_heads,
+                head_size=spec.head_size,
+                head_size_v=getattr(spec, "head_size_v", spec.head_size),
+                dtype=spec.dtype,
+                kv_quant_mode=spec.kv_quant_mode,
+                page_size_padded=spec.page_size_padded,
+            )
+        return spec
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -66,6 +118,7 @@ class DFlashQwen3Attention(nn.Module):
         attention_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        sliding_window: int | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -109,13 +162,14 @@ class DFlashQwen3Attention(nn.Module):
             max_position=max_position,
             rope_parameters=rope_parameters,
         )
-        self.attn = Attention(
+        self.attn = DFlashAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
         )
@@ -158,12 +212,17 @@ class DFlashQwen3DecoderLayer(nn.Module):
         config: Qwen3Config,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        layer_type: str = "full_attention",
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.layer_type = layer_type
         set_default_rope_theta(config, default_theta=1000000)
         attn_type = AttentionType.DECODER
+        sliding_window = (
+            config.sliding_window if layer_type == "sliding_attention" else None
+        )
 
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
@@ -175,6 +234,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
+            sliding_window=sliding_window,
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
@@ -215,6 +275,10 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
+    # DFlash2 overrides this with the local-convolution decoder layer while
+    # retaining the same context-KV and residual plumbing.
+    decoder_layer_cls = DFlashQwen3DecoderLayer
+
     def __init__(
         self,
         *,
@@ -243,12 +307,14 @@ class DFlashQwen3Model(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
+        self.layer_types = _get_dflash_layer_types(self.config)
         self.layers = nn.ModuleList(
             [
-                DFlashQwen3DecoderLayer(
+                self.decoder_layer_cls(
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                     config=self.config,
+                    layer_type=self.layer_types[layer_idx],
                 )
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
@@ -565,6 +631,47 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         logits_new[:, targets] = logits
         return logits_new
 
+    def _map_draft_ids_to_target_ids(
+        self,
+        draft_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.draft_id_to_target_id is None:
+            return draft_token_ids
+        target_offsets = self.draft_id_to_target_id[draft_token_ids]
+        return draft_token_ids + target_offsets
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return target token ids without gathering the full vocab when possible."""
+        draft_token_ids = self.logits_processor.get_top_tokens(
+            self.lm_head, hidden_states
+        )
+        return self._map_draft_ids_to_target_ids(draft_token_ids)
+
+    def get_top_tokens_with_mask(
+        self,
+        hidden_states: torch.Tensor,
+        allowed_token_ids_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply target-vocab token constraints during draft argmax."""
+        draft_mask = allowed_token_ids_mask
+        if self.draft_id_to_target_id is not None:
+            draft_token_ids = torch.arange(
+                self.config.draft_vocab_size,
+                device=allowed_token_ids_mask.device,
+                dtype=torch.long,
+            )
+            target_token_ids = draft_token_ids + self.draft_id_to_target_id
+            draft_mask = allowed_token_ids_mask[:, target_token_ids]
+        draft_token_ids = self.logits_processor.get_top_tokens(
+            self.lm_head,
+            hidden_states,
+            disallowed_token_ids_mask=draft_mask,
+        )
+        return self._map_draft_ids_to_target_ids(draft_token_ids)
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
@@ -585,6 +692,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         needs_squeeze = hidden_states.dim() == 1
         if needs_squeeze:
             hidden_states = hidden_states.unsqueeze(0)
+        fc_weight = getattr(self.model.fc, "weight", None)
+        fc_dtype = fc_weight.dtype if fc_weight is not None else hidden_states.dtype
+        if hidden_states.dtype != fc_dtype:
+            # RMSNorm/native paths can upcast aux hidden states to fp32.
+            hidden_states = hidden_states.to(dtype=fc_dtype)
         result = self.model.fc(hidden_states)
         if needs_squeeze:
             result = result.squeeze(0)

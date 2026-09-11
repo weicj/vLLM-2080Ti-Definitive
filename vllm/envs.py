@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_TURBOQUANT_MAX_KV_SPLITS: int | None = None
     VLLM_TURBOQUANT_K8V4_FP8_FORMAT: str = "auto"
     VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE: bool = False
+    VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE: int = 1
     VLLM_TURBOQUANT_SKIP_PREFILL_STORE: bool = False
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -137,6 +138,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
+    VLLM_DISABLE_TILELANG: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -856,6 +858,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE": lambda: bool(
         int(os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE", "0"))
     ),
+    "VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE": lambda: int(
+        os.getenv("VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE", "1")
+    ),
     "VLLM_TURBOQUANT_SKIP_PREFILL_STORE": lambda: bool(
         int(os.getenv("VLLM_TURBOQUANT_SKIP_PREFILL_STORE", "0"))
     ),
@@ -1132,6 +1137,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
+    ),
+    "VLLM_DISABLE_TILELANG": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_TILELANG", "0"))
     ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.
