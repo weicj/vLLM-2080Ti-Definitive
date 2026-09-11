@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -286,6 +288,11 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+        # The FLA Triton RMSNorm JIT can deadlock four concurrent SM75 ranks
+        # during the first request. Keep this opt-in experiment fallback exact
+        # and local to the Turing EXL3 qualification lane.
+        if os.environ.get("VLLM_SM75_FLA_NATIVE_NORM") == "1":
+            return self.forward_native(x, z)
         from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
             rmsnorm_fn,
         )
