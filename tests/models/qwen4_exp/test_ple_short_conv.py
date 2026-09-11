@@ -4,7 +4,21 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+from vllm.models.qwen4_exp.nvidia.ple_layer import (
+    Qwen4ExpPLELayer,
+    _disable_ple_embedding_tp,
+)
+
+
+def test_ple_embedding_tp_can_be_disabled_by_a_quantizer() -> None:
+    class StreamedEmbeddingQuantizer:
+        def disable_embedding_tensor_parallel(self, prefix: str) -> bool:
+            return prefix.endswith("ngram_embedding")
+
+    quantizer = StreamedEmbeddingQuantizer()
+    assert _disable_ple_embedding_tp(quantizer, "layers.1.ngram_embedding")
+    assert not _disable_ple_embedding_tp(quantizer, "layers.1.key_proj")
+    assert not _disable_ple_embedding_tp(None, "layers.1.ngram_embedding")
 
 
 def test_prefill_short_conv_ignores_cuda_graph_padding() -> None:
