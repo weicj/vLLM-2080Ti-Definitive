@@ -359,7 +359,6 @@ class ReplicatedLinear(LinearBase):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-
         self.quant_method.create_weights(
             self,
             self.input_size,
@@ -1048,6 +1047,26 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
                                                            padded_output_sizes)):
             raise ValueError("Padded output sizes must be >= logical output sizes.")
         self.logical_output_sizes = output_sizes
+        tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
+        tp_rank = 0 if disable_tp else get_tensor_model_parallel_rank()
+        if hasattr(self, "local_starts"):
+            self.logical_output_partition_starts = self.local_starts
+            self.logical_output_partition_sizes = self.local_sizes
+        else:
+            self.logical_output_partition_sizes = [
+                max(
+                    0,
+                    min(
+                        padded_size // tp_size,
+                        logical_size - tp_rank * (padded_size // tp_size),
+                    ),
+                )
+                for logical_size, padded_size in zip(output_sizes, padded_output_sizes)
+            ]
+            self.logical_output_partition_starts = [
+                tp_rank * (padded_size // tp_size)
+                for padded_size in padded_output_sizes
+            ]
         super().__init__(
             input_size=input_size,
             output_sizes=padded_output_sizes,
@@ -1173,6 +1192,8 @@ class ExplicitPaddedMergedColumnParallelLinear(PaddedMergedColumnParallelLinear)
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        self.logical_output_partition_starts = local_starts
+        self.logical_output_partition_sizes = local_sizes
 
     def _copy_padded_output_shard(
         self,
@@ -2190,6 +2211,26 @@ class PaddedRowParallelLinear(RowParallelLinear):
         if padded_input_size < input_size:
             raise ValueError("Padded input size must be >= logical input size.")
         self.logical_input_size = input_size
+        # Inputs produced by a padded column-parallel predecessor keep their
+        # logical columns at the beginning of each rank-local physical slot.
+        # Consumers that load a packed format need this independently from the
+        # global checkpoint source start below.
+        self.logical_input_partition_physical_offset = 0
+        tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
+        tp_rank = 0 if disable_tp else get_tensor_model_parallel_rank()
+        input_partition_size = padded_input_size // tp_size
+        if hasattr(self, "local_start"):
+            self.logical_input_partition_start = self.local_start
+            self.logical_input_partition_size = self.local_size
+        else:
+            self.logical_input_partition_start = tp_rank * input_partition_size
+            self.logical_input_partition_size = max(
+                0,
+                min(
+                    input_partition_size,
+                    input_size - self.logical_input_partition_start,
+                ),
+            )
         super().__init__(
             input_size=padded_input_size,
             output_size=output_size,
