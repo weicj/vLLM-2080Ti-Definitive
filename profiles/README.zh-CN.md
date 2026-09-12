@@ -51,5 +51,37 @@ token 数；文件名中的并发数和 `K` 形式的上下文要分别匹配 `M
 `MAX_MODEL_LEN`；KV 与消息类型后缀也要匹配对应字段。手写完成后，先运行
 `bash tools/validate_profiles.sh` 校验，再使用该 Profile。
 
-选择 profile 后，可执行 `./launcher.sh --print-config` 检查最终生效的路线参数，
-然后再启动服务。
+### [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
+
+| Profile | 启动模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
+|---|---|---:|---|---:|---|---:|---:|
+| `qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-only.env` | normal | 240K | FP8 | 3 | text-only | 463,890 | 1433.2 / 76.8 |
+| `qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
+| `qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
+| `qwen27b/w4a16/fast/tq4nc-262K-mtp3-text-only.env` | fast | 262K | TQ4NC | 3 | text-only | 732,381 | 1402.9 / 103.5 |
+
+### 并发测试路线（NVFP4 纯文本）
+
+| Profile | 模式 | 上下文 | KV/MTP | GPU KV tokens | C1 | C2 | C4 | C8 | 证据 |
+|---|---|---:|---|---:|---:|---:|---:|---:|---|
+| `qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 / 0 | 518,191 | 1372.1 / 42.0 | 1507.4 / 80.4 | 1535.9 / 152.0 | 1523.4 / 270.8 | 完整窗口正式测试 |
+| `qwen27b/w4a16/fast/tq4nc-262K-mtp3-text-only.env` | fast | 262K | TQ4NC / 3 | 732,381 | 1402.9 / 103.5 | 1449.1 / 180.4 | 1460.0 / 220.7 | 1449.1 / 347.3 | 完整窗口正式测试 |
+
+每个 C 单元格均为 `prefill / 完整窗口 aggregate decode` tok/s，并已关闭 prefix cache。
+
+### [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)
+
+| Profile | 启动模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
+|---|---|---:|---|---:|---|---:|---:|
+| `qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 273,586 | 7378 / 128.7 |
+| `qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env` | normal | 136K | FP16 | 0 | text+image | 146,485 | 5965.8 / 127.6 |
+
+### Qwen3.8 Flash-Next EXL3 TP2xPP2
+
+`qwen38flashnext/exl3/experimental/tp2pp2-ssd-nomtp-text.env` 是四张 T10
+上的首个 EXL3 功能验证路线，复用 Qwen4Exp Flash-Next 的 PP 实现，并由
+launcher 自动打开 SSD PLE n-gram streaming。启动前请按
+[`docs/usage/exl3_turing.md`](../docs/usage/exl3_turing.md) 安装固定版本的
+`vllm-exl3-turing` 与 `exllamav3-turing`。在 TP2xPP2 通过 CUDA Graph、输出
+一致性和 EXL3 loader 路径检查前，不记录吞吐数字。
+选定 profile 后，启动服务前执行 `./launcher.sh --print-config` 检查最终生效的路线参数。
