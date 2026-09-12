@@ -18,10 +18,8 @@ fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
                       torch::stable::Tensor& rank_data, int64_t rank,
                       bool fully_connected) {
   int world_size = fake_ipc_ptrs.size();
-  if (world_size > vllm::kMaxCustomCollectiveRanks)
-    throw std::invalid_argument("world size > 16 is not supported");
-  if (world_size % 2 != 0)
-    throw std::invalid_argument("Odd num gpus is not supported for now");
+  if (world_size < 2 || world_size > vllm::kMaxCustomCollectiveRanks)
+    throw std::invalid_argument("world size must be in [2, 16]");
   if (rank < 0 || rank >= world_size)
     throw std::invalid_argument("invalid rank passed in");
 

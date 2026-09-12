@@ -58,7 +58,7 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 
 class CustomAllreduce:
-    _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8, 16]
+    _SUPPORTED_WORLD_SIZES = list(range(2, 17))
     _DEFAULT_ALL_GATHER_MAX_SIZE = 2 * 1024 * 1024
     _DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES = {
         2: 8 * 1024 * 1024,
@@ -180,18 +180,6 @@ class CustomAllreduce:
             physical_device_ids = [t.item() for t in gather_list]
             assert current_platform.is_cuda_alike()
             fully_connected = current_platform.is_fully_connected(physical_device_ids)
-        if (
-            same_node
-            and world_size > 2
-            and not fully_connected
-            and not envs.VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE
-        ):
-            logger.warning(
-                "Custom allreduce is disabled because it's not supported on"
-                " more than two PCIe-only GPUs. To silence this warning, "
-                "specify disable_custom_all_reduce=True explicitly."
-            )
-            return
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
@@ -240,9 +228,9 @@ class CustomAllreduce:
         self.max_size = max_size
         self.max_all_gather_size = max_all_gather_size
         if max_mnnvl_all_gather_size is None:
-            max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES[
-                world_size
-            ]
+            max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES.get(
+                world_size, self._DEFAULT_ALL_GATHER_MAX_SIZE
+            )
         self.max_mnnvl_all_gather_size = max_mnnvl_all_gather_size
         self.max_reduce_scatter_size = max_reduce_scatter_size
         self.max_mnnvl_reduce_scatter_size = max_mnnvl_reduce_scatter_size
@@ -355,7 +343,7 @@ class CustomAllreduce:
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        if self.disabled or self.world_size > 8:
+        if self.disabled:
             return False
         inp_size = inp.numel() * inp.element_size()
         # custom allreduce requires input byte size to be multiples of 16
@@ -363,15 +351,7 @@ class CustomAllreduce:
             return False
         if not is_weak_contiguous(inp):
             return False
-        # PCIe-only groups are conservative by default, but the IPC algorithm
-        # can be explicitly tested on topologies with verified P2P access.
-        if (
-            self.world_size == 2
-            or self.fully_connected
-            or envs.VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE
-        ):
-            return inp_size < self.max_size
-        return False
+        return inp_size < self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor = None, registered: bool = False

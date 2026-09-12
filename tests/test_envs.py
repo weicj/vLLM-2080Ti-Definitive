@@ -51,25 +51,10 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [(None, False), ("0", False), ("1", True), ("true", True), ("yes", True)],
-)
-def test_custom_allreduce_pcie_opt_in(
-    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+@pytest.mark.parametrize("world_size", range(2, 17))
+def test_custom_allreduce_accepts_all_supported_world_sizes(
+    world_size: int,
 ) -> None:
-    if value is None:
-        monkeypatch.delenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", value)
-    assert envs.VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE is expected
-
-
-@pytest.mark.parametrize("world_size", [4, 6, 8])
-def test_custom_allreduce_pcie_opt_in_allows_supported_world_sizes(
-    monkeypatch: pytest.MonkeyPatch, world_size: int
-) -> None:
-    monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", "1")
     custom_ar = object.__new__(CustomAllreduce)
     custom_ar.disabled = False
     custom_ar._ptr = 0
@@ -78,21 +63,6 @@ def test_custom_allreduce_pcie_opt_in_allows_supported_world_sizes(
     custom_ar.max_size = 1024
 
     assert custom_ar.should_custom_ar(torch.empty(128, dtype=torch.float16))
-
-
-@pytest.mark.parametrize("world_size", [4, 6, 8])
-def test_custom_allreduce_pcie_is_disabled_by_default(
-    monkeypatch: pytest.MonkeyPatch, world_size: int
-) -> None:
-    monkeypatch.delenv("VLLM_CUSTOM_ALLREDUCE_ALLOW_PCIE", raising=False)
-    custom_ar = object.__new__(CustomAllreduce)
-    custom_ar.disabled = False
-    custom_ar._ptr = 0
-    custom_ar.world_size = world_size
-    custom_ar.fully_connected = False
-    custom_ar.max_size = 1024
-
-    assert not custom_ar.should_custom_ar(torch.empty(128, dtype=torch.float16))
 
 
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
