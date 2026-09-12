@@ -79,7 +79,13 @@ def _padded_intermediate_size(
     quant_config: QuantizationConfig | None,
 ) -> int:
     """Return an intermediate size that has integral TP partitions."""
-    alignment = int(getattr(quant_config, "tp_partition_alignment", 1))
+    # Packed quantized weights need an integral packed/grouped input shard.
+    # Keep the unquantized path minimal while aligning quantized MLPs for
+    # NVFP4 (2-value packing, group size 16) and W4A16 (pack factor 8).
+    default_alignment = 32 if quant_config is not None else 1
+    alignment = int(
+        getattr(quant_config, "tp_partition_alignment", default_alignment)
+    )
     if alignment < 1:
         raise ValueError("TP partition alignment must be positive.")
     partition_alignment = tp_size * alignment if tp_size > 1 else 1

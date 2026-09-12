@@ -22,6 +22,15 @@ def test_tp_partition_alignment_preserves_exl3_hadamard_blocks():
     assert _padded_intermediate_size(17408, 3, BlockQuantConfig()) == 17664
 
 
+def test_quantized_tp_partition_uses_packed_weight_alignment_by_default():
+    """Quantized MLP shards stay divisible by NVFP4 packing/group sizes."""
+
+    class QuantConfig:
+        pass
+
+    assert _padded_intermediate_size(17408, 3, QuantConfig()) == 17472
+
+
 def test_qwen2_moe_mlp_pads_uneven_tp3_intermediate_dimension(
     monkeypatch,
 ):
