@@ -304,6 +304,8 @@ class CustomAllreduce {
         } else {                                        \
           KL(ngpus, cross_device_reduce_2stage);        \
         }                                               \
+      } else {                                          \
+        KL(ngpus, cross_device_reduce_2stage);          \
       }                                                 \
     }                                                   \
     break;                                              \
@@ -311,14 +313,23 @@ class CustomAllreduce {
 
     switch (world_size_) {
       REDUCE_CASE(2)
+      REDUCE_CASE(3)
       REDUCE_CASE(4)
+      REDUCE_CASE(5)
       REDUCE_CASE(6)
+      REDUCE_CASE(7)
       REDUCE_CASE(8)
+      REDUCE_CASE(9)
+      REDUCE_CASE(10)
+      REDUCE_CASE(11)
+      REDUCE_CASE(12)
+      REDUCE_CASE(13)
+      REDUCE_CASE(14)
+      REDUCE_CASE(15)
+      REDUCE_CASE(16)
       default:
         throw std::runtime_error(
-            "custom allreduce only supports num gpus in (2,4,6,8). Actual "
-            "num "
-            "gpus = " +
+            "custom allreduce only supports 2 to 16 GPUs. Actual num GPUs = " +
             std::to_string(world_size_));
     }
 #undef REDUCE_CASE

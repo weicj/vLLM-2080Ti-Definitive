@@ -13,7 +13,10 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    PaddedMergedColumnParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -102,14 +105,32 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 "VLLM_QWOPUS_MTP_BF16_DRAFT=1: loading Qwen3.5 MTP "
                 "fc/layer weights without the target quantization config."
             )
-        self.fc = ColumnParallelLinear(
+        # The MTP projection output can be uneven for TP sizes such as 3.
+        # Keep a divisible physical shard and remove the tail after gather.
+        fc_cls = ColumnParallelLinear
+        fc_kwargs = {}
+        if self.config.hidden_size % vllm_config.parallel_config.tensor_parallel_size:
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            padded_hidden_size = (
+                (self.config.hidden_size + tp_size - 1) // tp_size * tp_size
+            )
+            fc_cls = PaddedMergedColumnParallelLinear
+            fc_kwargs = {
+                "output_sizes": [self.config.hidden_size],
+                "padded_output_sizes": [padded_hidden_size],
+            }
+        self.fc = fc_cls(
             self.config.hidden_size * 2,
-            self.config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
             quant_config=fc_quant,
             prefix=f"{prefix}.fc",
+            **(
+                fc_kwargs
+                if fc_kwargs
+                else {"output_size": self.config.hidden_size}
+            ),
         )
 
         # GPTQ: quantized checkpoints may exclude MTP from quantization via
@@ -169,6 +190,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         hidden_states = self.pre_fc_norm_hidden(hidden_states)
         hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
         hidden_states = self.fc(hidden_states)
+        if hidden_states.shape[-1] != self.config.hidden_size:
+            hidden_states = hidden_states[..., : self.config.hidden_size]
         residual = None
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
