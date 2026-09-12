@@ -89,6 +89,23 @@ logger = init_logger(__name__)
 _flashqla_legacy_module: ModuleType | None = None
 
 
+def _flashqla_legacy_qkv_dtype(input_dtype: torch.dtype) -> torch.dtype:
+    """Select legacy-kernel Q/K/V storage without relaxing FP32 recurrence."""
+    mode = os.getenv("VLLM_FLASHQLA_LEGACY_GDN_QKV_DTYPE", "native").lower()
+    if mode == "fp32":
+        return torch.float32
+    if mode == "native":
+        return (
+            input_dtype
+            if input_dtype in (torch.float16, torch.float32)
+            else torch.float32
+        )
+    raise ValueError(
+        "VLLM_FLASHQLA_LEGACY_GDN_QKV_DTYPE must be 'fp32' or 'native', "
+        f"got {mode!r}"
+    )
+
+
 def _flashqla_legacy_forward():
     """Load the SM75 extension without importing FlashQLA's TileLang package."""
     global _flashqla_legacy_module
@@ -325,11 +342,12 @@ def flashqla_legacy_chunk_gated_delta_rule(
 
     output_dtype = v.dtype
     state_dtype = initial_state.dtype
+    qkv_dtype = _flashqla_legacy_qkv_dtype(v.dtype)
     scale = q.shape[-1] ** -0.5
     output, final_state = chunk_gated_delta_rule_fwd_legacy(
-        q.to(torch.float32).contiguous(),
-        k.to(torch.float32).contiguous(),
-        v.to(torch.float32).contiguous(),
+        q.to(qkv_dtype).contiguous(),
+        k.to(qkv_dtype).contiguous(),
+        v.to(qkv_dtype).contiguous(),
         g.to(torch.float32).contiguous(),
         beta.to(torch.float32).contiguous(),
         scale,
@@ -364,11 +382,12 @@ def flashqla_legacy_varlen_chunk_gated_delta_rule(
 
     output_dtype = v.dtype
     state_dtype = initial_state.dtype
+    qkv_dtype = _flashqla_legacy_qkv_dtype(v.dtype)
     scale = q.shape[-1] ** -0.5
     output, final_state = chunk_gated_delta_rule_fwd_legacy_varlen(
-        q.to(torch.float32).contiguous(),
-        k.to(torch.float32).contiguous(),
-        v.to(torch.float32).contiguous(),
+        q.to(qkv_dtype).contiguous(),
+        k.to(qkv_dtype).contiguous(),
+        v.to(qkv_dtype).contiguous(),
         g.to(torch.float32).contiguous(),
         beta.to(torch.float32).contiguous(),
         cu_seqlens.contiguous(),
