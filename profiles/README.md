@@ -106,5 +106,16 @@ it is not a throughput benchmark.
 Both are experimental engineering routes; TP2xPP2 is intentionally not
 shipped as a validated profile.
 
+### Qwen3.8 Flash-Next EXL3 TP2xPP2
+
+`qwen38flashnext/exl3/experimental/tp2pp2-ssd-nomtp-text.env` is the initial
+four-GPU T10 functional-validation route for the native ExLlamaV3 EXL3 pack.
+It reuses the Qwen4Exp Flash-Next PP implementation and enables SSD-backed PLE
+n-gram streaming through the launcher. Install the pinned
+`vllm-exl3-turing`/`exllamav3-turing` pair described in
+[`docs/usage/exl3_turing.md`](../docs/usage/exl3_turing.md) before starting it.
+No throughput number is recorded until a real TP2xPP2 CUDA-Graph run passes
+output and loader-path checks.
+
 Use `./launcher.sh --print-config` after selecting a profile to inspect the
 resolved route before starting the service.
