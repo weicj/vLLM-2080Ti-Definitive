@@ -101,8 +101,9 @@ TP2xPP4 是推荐的均衡路线；TP4xPP2 偏向 decode。已发布 profile 显
 ### Qwen3.8 Flash-Next EXL3 TP2xPP2
 
 `qwen38flashnext/exl3/experimental/tp2pp2-ssd-nomtp-text.env` 是四张 T10
-上的首个 EXL3 功能验证路线，复用 Qwen4Exp Flash-Next 的 PP 实现，并由
-launcher 自动打开 SSD PLE n-gram streaming。启动前请按
+上的首个 EXL3 功能验证路线。它使用 TP=2、PP=2 与 expert parallel，使每个本地
+expert 保留 640 宽 intermediate dimension，并复用 Qwen4Exp Flash-Next 的 PP
+实现，由 launcher 自动打开 SSD PLE n-gram streaming。启动前请按
 [`docs/usage/exl3_turing.md`](../docs/usage/exl3_turing.md) 安装固定版本的
 `vllm-exl3-turing` 与 `exllamav3-turing`。在 TP2xPP2 通过 CUDA Graph、输出
 一致性和 EXL3 loader 路径检查前，不记录吞吐数字。

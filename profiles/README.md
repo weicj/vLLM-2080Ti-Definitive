@@ -110,8 +110,9 @@ shipped as a validated profile.
 
 `qwen38flashnext/exl3/experimental/tp2pp2-ssd-nomtp-text.env` is the initial
 four-GPU T10 functional-validation route for the native ExLlamaV3 EXL3 pack.
-It reuses the Qwen4Exp Flash-Next PP implementation and enables SSD-backed PLE
-n-gram streaming through the launcher. Install the pinned
+It uses TP=2, PP=2, and expert parallelism so each local expert retains its
+640-wide intermediate dimension, and enables SSD-backed PLE n-gram streaming
+through the launcher. Install the pinned
 `vllm-exl3-turing`/`exllamav3-turing` pair described in
 [`docs/usage/exl3_turing.md`](../docs/usage/exl3_turing.md) before starting it.
 No throughput number is recorded until a real TP2xPP2 CUDA-Graph run passes
