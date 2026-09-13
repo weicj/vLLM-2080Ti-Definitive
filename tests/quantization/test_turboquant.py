@@ -344,6 +344,24 @@ class TestTurboQuantWorkspaceReservation:
             tq_slot_size=102,
         )
 
+    @pytest.mark.parametrize(
+        ("value", "configured", "expected"),
+        [("", 32, 32), ("8", 32, 8), ("64", 32, 64)],
+    )
+    def test_max_kv_splits_override(self, monkeypatch, value, configured, expected):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        monkeypatch.setenv("VLLM_TURBOQUANT_MAX_KV_SPLITS", value)
+        assert turboquant_attn._tq_max_kv_splits(configured) == expected
+
+    @pytest.mark.parametrize("value", ["zero", "0", "-1"])
+    def test_max_kv_splits_override_rejects_invalid_value(self, monkeypatch, value):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        monkeypatch.setenv("VLLM_TURBOQUANT_MAX_KV_SPLITS", value)
+        with pytest.raises(ValueError, match="MAX_KV_SPLITS"):
+            turboquant_attn._tq_max_kv_splits(32)
+
     def test_metadata_builder_reserves_decode_and_continuation_prefill_workspace(
         self, monkeypatch
     ):
@@ -417,6 +435,44 @@ class TestTurboQuantWorkspaceReservation:
         assert calls == [
             (
                 ((16, 8, 4, 129), torch.float32),
+                ((16, 8, 128), torch.float16),
+                ((16, 8), torch.float32),
+            )
+        ]
+
+    def test_metadata_builder_uses_overridden_kv_split_count(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setenv("VLLM_TURBOQUANT_MAX_KV_SPLITS", "8")
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(
+                enable_chunked_prefill=False, max_num_kv_splits=4
+            ),
+            device=torch.device("cuda"),
+        )
+
+        assert calls == [
+            (
+                ((16, 8, 8, 129), torch.float32),
                 ((16, 8, 128), torch.float16),
                 ((16, 8), torch.float32),
             )

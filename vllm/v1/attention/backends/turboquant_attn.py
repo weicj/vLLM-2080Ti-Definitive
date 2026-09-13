@@ -103,6 +103,22 @@ _TQ_CUDAGRAPH_SPEC_PREFIX_ROWS = (
 )
 
 
+def _tq_max_kv_splits(configured_splits: int) -> int:
+    """Resolve a graph-stable TQ split count from the optional override."""
+    value = os.getenv("VLLM_TURBOQUANT_MAX_KV_SPLITS", "").strip()
+    if not value:
+        return configured_splits
+    try:
+        splits = int(value)
+    except ValueError as err:
+        raise ValueError(
+            "VLLM_TURBOQUANT_MAX_KV_SPLITS must be a positive integer"
+        ) from err
+    if splits <= 0:
+        raise ValueError("VLLM_TURBOQUANT_MAX_KV_SPLITS must be a positive integer")
+    return splits
+
+
 def _normalize_tq_prefix_combine_mode(value: str) -> str:
     normalized = value.strip().lower()
     if normalized in ("1", "true", "yes", "on", "force", "always"):
@@ -447,6 +463,9 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         self._flashinfer_head_dim = kv_cache_spec.head_size
         self._flashinfer_dtype = model_config.dtype
         self._flashinfer_scale = self._flashinfer_head_dim**-0.5
+        self._max_num_kv_splits = _tq_max_kv_splits(
+            vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+        )
         self._reserve_workspace()
 
     def _plan_flashinfer_prefill_wrappers(
@@ -709,9 +728,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         num_heads = model_config.get_num_attention_heads(parallel_config)
         num_kv_heads = self.kv_cache_spec.num_kv_heads
         head_size = self.kv_cache_spec.head_size
-        max_num_splits = (
-            self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
-        )
+        max_num_splits = self._max_num_kv_splits
 
         current_workspace_manager().get_simultaneous(
             ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
@@ -870,12 +887,20 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 _FLASHINFER_VERSION or "unknown",
             )
 
-        # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
-        # and benchmarks show no regression vs dynamic in eager mode).
+        # The split count determines both the decode grid and CUDA-graph
+        # workspace shape, so it must match the metadata builder's value.
         vllm_config = get_current_vllm_config()
-        self.max_num_kv_splits = (
+        self.max_num_kv_splits = _tq_max_kv_splits(
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
+        if self.max_num_kv_splits != (
+            vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+        ):
+            logger.info_once(
+                "TurboQuant decode max KV splits overridden to %s by "
+                "VLLM_TURBOQUANT_MAX_KV_SPLITS.",
+                self.max_num_kv_splits,
+            )
 
     def _get_flashinfer_prefill_wrapper(self, device: torch.device):
         if not self._use_flashinfer_prefill:
