@@ -824,6 +824,10 @@ ROUTE_PROFILE_KEYS=(
   MODE
   MODEL_FAMILY
   MODEL_VARIANT
+  TP_SIZE
+  PP_SIZE
+  ENABLE_EXPERT_PARALLEL
+  VLLM_PP_LAYER_PARTITION
   QUANTIZATION
   KV_CACHE_DTYPE
   ENABLE_YARN
@@ -871,6 +875,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   GPU_DEVICES
   TP_SIZE
   PP_SIZE
+  ENABLE_EXPERT_PARALLEL
   CHAT_TEMPLATE_FILE
   CHAT_TEMPLATE_PRESET
   TEMPLATE_DIR
@@ -927,6 +932,7 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   ENFORCE_EAGER
   NO_ASYNC_SCHEDULING
   DISABLE_HYBRID_KV_CACHE_MANAGER
+  ENABLE_EXPERT_PARALLEL
   DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
@@ -1171,8 +1177,12 @@ reset_route_profile_fields() {
 
 profile_key_is_allowed() {
   case "$1" in
-MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
+CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
+DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
+ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
+ENABLE_PREFIX_CACHING|ENABLE_PROMPT_TOKENS_DETAILS|\
+VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_ENFORCE_STRICT_TOOL_CALLING)
       return 0
       ;;
     *)
@@ -1400,6 +1410,9 @@ save_manager_state() {
     printf 'ADDITIONAL_CONFIG_JSON=%q\n' "${ADDITIONAL_CONFIG_JSON:-}"
     printf 'SPECULATIVE_CONFIG=%q\n' "${SPECULATIVE_CONFIG:-}"
     printf 'COMPILATION_CONFIG_JSON=%q\n' "${COMPILATION_CONFIG_JSON:-}"
+    printf 'TP_SIZE=%q\n' "${TP_SIZE:-}"
+    printf 'PP_SIZE=%q\n' "${PP_SIZE:-1}"
+    printf 'ENABLE_EXPERT_PARALLEL=%q\n' "${ENABLE_EXPERT_PARALLEL:-0}"
     printf 'CHAT_TEMPLATE_FILE=%q\n' "${CHAT_TEMPLATE_FILE:-}"
     printf 'CHAT_TEMPLATE_PRESET=%q\n' "${CHAT_TEMPLATE_PRESET:-}"
     printf 'ATTENTION_BACKEND=%q\n' "${ATTENTION_BACKEND:-}"
@@ -2020,15 +2033,7 @@ profile_summary() {
     MAX_NUM_SEQS
     NO_ASYNC_SCHEDULING
     MTP_K
-    SPECULATIVE_METHOD
-    SPECULATIVE_MODEL
-  SPECULATIVE_TOKENS
-  SPECULATIVE_DRAFT_TP_SIZE
-  SPECULATIVE_MAX_MODEL_LEN
-  SPECULATIVE_ATTENTION_BACKEND
-  SPECULATIVE_KV_CACHE_DTYPE
-  SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH
-    SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION
+    ENABLE_EXPERT_PARALLEL
     VLLM_ALLOW_LONG_MAX_MODEL_LEN
     CUSTOM_ALL_REDUCE_MODE
     MM_LIMIT_JSON
@@ -2969,6 +2974,10 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" MODE "${MODE:-fast}"
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
+  write_profile_entry "$target_file.tmp" TP_SIZE "${TP_SIZE:-}"
+  write_profile_entry "$target_file.tmp" PP_SIZE "${PP_SIZE:-1}"
+  write_profile_entry "$target_file.tmp" ENABLE_EXPERT_PARALLEL "${ENABLE_EXPERT_PARALLEL:-0}"
+  write_profile_entry "$target_file.tmp" VLLM_PP_LAYER_PARTITION "${VLLM_PP_LAYER_PARTITION:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
@@ -3284,6 +3293,7 @@ edit_advanced_parameters() {
   ENFORCE_EAGER=$(prompt_toggle01 "Enforce eager" "${ENFORCE_EAGER:-0}") || return 0
   NO_ASYNC_SCHEDULING=$(prompt_toggle01 "No async scheduling" "${NO_ASYNC_SCHEDULING:-0}") || return 0
   DISABLE_HYBRID_KV_CACHE_MANAGER=$(prompt_toggle01 "Disable hybrid KV cache manager" "${DISABLE_HYBRID_KV_CACHE_MANAGER:-0}") || return 0
+  ENABLE_EXPERT_PARALLEL=$(prompt_toggle01 "Enable expert parallel" "${ENABLE_EXPERT_PARALLEL:-0}") || return 0
   DISABLE_PREFIX_CACHING=$(prompt_toggle01 "Disable prefix caching" "${DISABLE_PREFIX_CACHING:-0}") || return 0
   CUSTOM_ALL_REDUCE_MODE=$(prompt_optional "Custom all-reduce mode (auto/off)" "${CUSTOM_ALL_REDUCE_MODE:-auto}") || return 0
   unset DISABLE_CUSTOM_ALL_REDUCE
@@ -4709,12 +4719,8 @@ build_args() {
   [[ "${ENABLE_PROMPT_TOKENS_DETAILS:-1}" == "1" ]] && VLLM_ARGS+=(--enable-prompt-tokens-details)
   [[ "${LANGUAGE_MODEL_ONLY:-0}" == "1" ]] && VLLM_ARGS+=(--language-model-only)
   [[ "${SKIP_MM_PROFILING:-0}" == "1" ]] && VLLM_ARGS+=(--skip-mm-profiling)
-  if [[ -n "${CUSTOM_ALL_REDUCE_MODE:-}" ]]; then
-    custom_all_reduce_mode=$(normalize_custom_all_reduce_mode "$CUSTOM_ALL_REDUCE_MODE") || return 1
-    [[ "$custom_all_reduce_mode" == "off" ]] && VLLM_ARGS+=(--disable-custom-all-reduce)
-  elif [[ "${DISABLE_CUSTOM_ALL_REDUCE:-0}" == "1" ]]; then
-    VLLM_ARGS+=(--disable-custom-all-reduce)
-  fi
+  [[ "${ENABLE_EXPERT_PARALLEL:-0}" == "1" ]] && VLLM_ARGS+=(--enable-expert-parallel)
+  [[ "${DISABLE_CUSTOM_ALL_REDUCE:-0}" == "1" ]] && VLLM_ARGS+=(--disable-custom-all-reduce)
   [[ "${DISABLE_LOG_STATS:-0}" == "1" ]] && VLLM_ARGS+=(--disable-log-stats)
   [[ -n "${ATTENTION_BACKEND:-}" ]] && VLLM_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
   if [[ -n "${REASONING_PARSER:-}" ]] && ! reasoning_parser_is_disabled; then
@@ -5805,8 +5811,9 @@ Launch summary:
   vLLM --quantization:  ${QUANTIZATION:-auto}
   W/A type:             $(guess_precision_scheme "$MODEL_DIR" "${QUANTIZATION:-}")
   GPU devices:          ${GPU_DEVICES:-$(detect_default_gpu_devices)}
-  Parallel layout:      TP${TP_SIZE} x PP${PP_SIZE:-1}
-  TP rank groups:       $(format_tp_rank_groups "${GPU_DEVICES:-$(detect_default_gpu_devices)}" "$TP_SIZE")
+  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-auto}
+  TP / PP:              ${TP_SIZE:-} / ${PP_SIZE:-1}
+  Expert parallel:      $(if [[ "${ENABLE_EXPERT_PARALLEL:-0}" == "1" ]]; then printf 'enabled'; else printf 'disabled'; fi)
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)
