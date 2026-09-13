@@ -212,6 +212,54 @@ class TestTurboQuantConfig:
         assert len(layers) == 8
 
 
+def test_mtp_b4_spec_decode_uses_one_fused_tq_launch(monkeypatch):
+    """Keep standard MTP3 on the compressed-cache B=4 graph route."""
+    from vllm.v1.attention.backends import turboquant_attn
+
+    impl = object.__new__(turboquant_attn.TurboQuantAttentionImpl)
+    impl.scale = 0.125
+    impl.max_num_kv_splits = 32
+    impl.tq_config = SimpleNamespace(
+        key_mse_bits=0,
+        key_packed_size=128,
+        effective_value_quant_bits=4,
+        key_fp8=True,
+        norm_correction=False,
+    )
+    calls = []
+
+    def fake_decode_attention(**kwargs):
+        calls.append(kwargs)
+        return torch.full_like(kwargs["query"], 7)
+
+    monkeypatch.setattr(
+        turboquant_attn,
+        "triton_turboquant_decode_attention",
+        fake_decode_attention,
+    )
+    query = torch.zeros(4, 2, 8, dtype=torch.float16)
+    metadata = SimpleNamespace(
+        query_start_loc_cpu=torch.tensor([0, 4]),
+        query_start_loc=torch.tensor([0, 4]),
+        seq_lens=torch.tensor([4100], dtype=torch.int32),
+        max_seq_len=4100,
+        max_query_len=4,
+        block_table=torch.tensor([[3, 5]], dtype=torch.int32),
+    )
+
+    output = impl._spec_decode_attention(
+        query, object(), metadata, object(), object(), object()
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["query"].shape[0] == 4
+    assert call["seq_lens"].tolist() == [4097, 4098, 4099, 4100]
+    assert call["block_table"].tolist() == [[3, 5]] * 4
+    assert call["max_num_kv_splits"] == 32
+    assert torch.equal(output, torch.full_like(query, 7))
+
+
 class TestHybridAttentionIndices:
     """Regression tests for boundary protection on hybrid models.
 
