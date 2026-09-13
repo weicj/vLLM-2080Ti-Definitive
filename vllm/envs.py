@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     # changing acceptance lengths can alter recurrent-state update topology.
     VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH: bool = False
     VLLM_TURBOQUANT_DECODE_BLOCK_KV: int = 2
+    VLLM_TURBOQUANT_MAX_KV_SPLITS: int | None = None
     VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH: bool = False
     VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE: bool = False
     VLLM_TURBOQUANT_FLASHINFER_BACKEND: str = "fa2"
@@ -880,6 +881,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_TURBOQUANT_DECODE_BLOCK_KV": lambda: int(
         os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV", "2")
+    ),
+    "VLLM_TURBOQUANT_MAX_KV_SPLITS": lambda: (
+        int(value)
+        if (value := os.getenv("VLLM_TURBOQUANT_MAX_KV_SPLITS", "")) != ""
+        else None
     ),
     "VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH": lambda: bool(
         int(os.getenv("VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH", "0"))
