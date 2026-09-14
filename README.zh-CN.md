@@ -110,8 +110,8 @@ TP/PP 拓扑、选择启动模式与网络配置，并在启动时自动完成�
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env \
-MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
+PROFILE=2x2080Ti/qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
+MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
@@ -120,13 +120,11 @@ NON_INTERACTIVE=1 ./launcher.sh
 
 ## 🧭 Profile 与推荐路线
 
-目录结构和路线字段请参阅 [Profile 指南](profiles/README.zh-CN.md)；详细 Profile
-说明与参考性能见 [2x2080Ti](profiles/2x2080Ti/README.zh-CN.md)、
-[2xT10](profiles/2xT10/README.zh-CN.md) 和
-[4xT10](profiles/4xT10/README.zh-CN.md)。
-
-Profile 按扁平路径 `profiles/<硬件>/<模型>/<权重>/<路线>.env` 组织。启动模式由
-launcher 选择，默认 `MODE=fast`；也可以由 launcher 或 profile 显式设置。
+从 [Profile 导引](profiles/README.zh-CN.md) 开始选。Profile 按
+`profiles/<硬件>/<模型>/<权重>/<模式>/<路线>.env` 组织，例如
+`2x2080Ti/qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`、
+`2x2080Ti/qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` 和
+`4xT10/qwen27b/w8a16/normal/fp16kv-256K-mtp3-text-image.env`。
 
 可用模式：
 
@@ -135,8 +133,8 @@ launcher 选择，默认 `MODE=fast`；也可以由 launcher 或 profile 显式�
 - `aggressive`：性能最高，但质量风险也最高。
 - `safe`：用于排障和兼容性的保守回退模式。
 
-Profile 只选择路线参数。GPU、端口、target 与 draft 模型路径、chat template 和
-reasoning 默认值由 launcher 统一管理。
+Profile 选择路线参数，并可固定已验证的 tensor-parallel 度。GPU、端口、模型路径、
+chat template 和 reasoning 默认值由 launcher 统一管理。
 
 ## 🛠️ 目标硬件
 

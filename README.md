@@ -119,8 +119,8 @@ For automated deployment, pass the configuration non-interactively:
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env \
-MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
+PROFILE=2x2080Ti/qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
+MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
@@ -129,15 +129,11 @@ Use `./launcher.sh --print-config` to preview a route. See the
 
 ## 🧭 Profiles
 
-Read the [Profile Guide](profiles/README.md) for the layout and route fields.
-Detailed profiles and reference performance are listed for
-[2x2080Ti](profiles/2x2080Ti/README.md) and
-[2xT10](profiles/2xT10/README.md), and
-[4xT10](profiles/4xT10/README.md).
-
-Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
-The launcher selects the startup mode and defaults to `MODE=fast`; the mode can
-also be set explicitly by the launcher or profile.
+Start with [the Profile Guide](profiles/README.md). Profiles use the layout
+`profiles/<hardware>/<model>/<weight>/<mode>/<route>.env`; for example,
+`2x2080Ti/qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`,
+`2x2080Ti/qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env`, and
+`4xT10/qwen27b/w8a16/normal/fp16kv-256K-mtp3-text-image.env`.
 
 Available modes:
 
@@ -146,8 +142,9 @@ Available modes:
 - `aggressive`: highest-performance mode with increased quality risk.
 - `safe`: conservative fallback for troubleshooting and compatibility.
 
-The profile selects only route parameters. The launcher owns GPU selection,
-port, target and draft model paths, chat template, and reasoning defaults.
+The profile selects route parameters and may pin the validated tensor-parallel
+degree. The launcher owns GPU selection, port, model path, chat template, and
+reasoning defaults.
 
 ## 🛠️ Hardware Target
 

@@ -831,8 +831,11 @@ ROUTE_PROFILE_KEYS=(
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
-  SPECULATIVE_METHOD
-  SPECULATIVE_TOKENS
+  LONG_PREFILL_TOKEN_THRESHOLD
+  PREFILL_BATCH_BARRIER
+  DISABLE_PREFIX_CACHING
+  TP_SIZE
+  MTP_K
   MESSAGE_TYPE
 )
 
@@ -1171,8 +1174,12 @@ reset_route_profile_fields() {
 
 profile_key_is_allowed() {
   case "$1" in
-MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|PP_SIZE|\
+CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
+DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
+ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
+ENABLE_PREFIX_CACHING|ENABLE_PROMPT_TOKENS_DETAILS|\
+VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_ENFORCE_STRICT_TOOL_CALLING)
       return 0
       ;;
     *)
@@ -1486,9 +1493,12 @@ model_families_match() {
 
 profile_family_dir() {
   if [[ -n "${PROFILE:-}" && "$PROFILE" == */* ]]; then
-    local parent=${PROFILE%/*}
-    [[ "${parent##*/}" == "user" ]] && parent=${parent%/*}
-    printf '%s\n' "$parent"
+    local profile_without_hardware=${PROFILE#*/}
+    if [[ "$PROFILE" == */*/*/*/* ]]; then
+      printf '%s\n' "${profile_without_hardware%%/*}"
+    else
+      printf '%s\n' "${PROFILE%%/*}"
+    fi
     return 0
   fi
   case "${MODEL_FAMILY:-}" in
@@ -1603,7 +1613,7 @@ default_qwen_reasoning_parser_applies() {
       ;;
   esac
   case "$profile_l" in
-    */qwen27b/*|*/qwen35b/*)
+    qwen27b/*|*/qwen27b/*)
       return 0
       ;;
   esac
