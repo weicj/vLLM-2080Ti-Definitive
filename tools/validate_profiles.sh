@@ -40,7 +40,8 @@ VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH)
 
 allowed_key() {
   case "$1" in
-    SERVED_NAME|COMPATIBLE_MODES|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|TP_SIZE|\
+    SERVED_NAME|COMPATIBLE_MODES|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|\
+TP_SIZE|PP_SIZE|VLLM_PP_LAYER_PARTITION|\
 QUANTIZATION|KV_CACHE_DTYPE|MAX_MODEL_LEN|KV_CACHE_MEMORY_BYTES|GPU_UTIL|\
 MAX_BATCHED_TOKENS|LONG_PREFILL_TOKEN_THRESHOLD|\
 MAX_NUM_SEQS|PREFILL_BATCH_BARRIER|DISABLE_PREFIX_CACHING|MTP_K|\
@@ -106,6 +107,14 @@ profile_error() {
 while IFS= read -r -d '' file; do
   ((total += 1))
   rel=${file#"$PROFILE_DIR"/}
+  mode=$(read_profile_value "$file" MODE)
+  compatible_modes=$(read_profile_value "$file" COMPATIBLE_MODES)
+  kv=$(read_profile_value "$file" KV_CACHE_DTYPE)
+  mtp=$(read_profile_value "$file" MTP_K)
+  tp=$(read_profile_value "$file" TP_SIZE)
+  pp=$(read_profile_value "$file" PP_SIZE)
+  pp_partition=$(read_profile_value "$file" VLLM_PP_LAYER_PARTITION)
+  has_safe=0
 
   if [[ "/$rel/" == */fast/* || "/$rel/" == */normal/* ]]; then
     profile_error "$rel" "fast/normal must be selected by the launcher, not profile directories"
@@ -164,82 +173,33 @@ while IFS= read -r -d '' file; do
     profile_error "$rel" "MAX_BATCHED_TOKENS must be a positive integer when present"
   fi
 
-  gpu_util=$(read_profile_value "$file" GPU_UTIL)
-  if ! awk -v value="$gpu_util" 'BEGIN { exit !(value ~ /^0([.][0-9]+)?$/ && value > 0 && value < 1) }'; then
-    profile_error "$rel" "GPU_UTIL must be greater than 0 and lower than 1"
+  if [[ -n "$tp" && ! "$tp" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR $rel: TP_SIZE must be a positive integer" >&2
+    ((errors += 1))
   fi
-
-  message_type=$(read_profile_value "$file" MESSAGE_TYPE)
-  case "$message_type" in
-    text-only|text+image) ;;
-    *) profile_error "$rel" "MESSAGE_TYPE must be text-only or text+image" ;;
-  esac
-
-  speculative_method=$(read_profile_value "$file" SPECULATIVE_METHOD)
-  speculative_tokens=$(read_profile_value "$file" SPECULATIVE_TOKENS)
-  profile_name=${rel##*/}
-  if [[ "$profile_name" =~ mtp([0-9]+)- ]]; then
-    mtp_label=${BASH_REMATCH[1]}
-    if [[ "$speculative_tokens" != "$mtp_label" ]]; then
-      profile_error "$rel" "filename MTP token count does not match SPECULATIVE_TOKENS=$speculative_tokens"
+  if [[ -n "$pp" && ! "$pp" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR $rel: PP_SIZE must be a positive integer" >&2
+    ((errors += 1))
+  fi
+  if [[ -n "$pp_partition" ]]; then
+    if [[ "$pp_partition" == ,* || "$pp_partition" == *, || "$pp_partition" == *,,* ]]; then
+      echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must not contain empty entries" >&2
+      ((errors += 1))
+    elif [[ "${pp:-1}" =~ ^[1-9][0-9]*$ ]]; then
+      IFS=',' read -r -a partition_parts <<< "$pp_partition"
+      if (( ${#partition_parts[@]} != ${pp:-1} )); then
+        echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must contain PP_SIZE=${pp:-1} entries" >&2
+        ((errors += 1))
+      else
+        for partition in "${partition_parts[@]}"; do
+          if [[ ! "$partition" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR $rel: every VLLM_PP_LAYER_PARTITION entry must be a positive integer, got '$partition'" >&2
+            ((errors += 1))
+          fi
+        done
+      fi
     fi
   fi
-  if [[ "$profile_name" == nomtp-* && "$speculative_method" != none ]]; then
-    profile_error "$rel" "nomtp filename requires SPECULATIVE_METHOD=none"
-  fi
-  if [[ "$profile_name" == dflash* && "$speculative_method" != dflash ]]; then
-    profile_error "$rel" "dflash filename requires SPECULATIVE_METHOD=dflash"
-  fi
-  if [[ "$profile_name" =~ -([1-9][0-9]*)x[0-9]+[kK]- ]]; then
-    expected_seqs=${BASH_REMATCH[1]}
-    [[ "$expected_seqs" == "$(read_profile_value "$file" MAX_NUM_SEQS)" ]] || \
-      profile_error "$rel" "filename concurrency does not match MAX_NUM_SEQS"
-  fi
-  if [[ "$profile_name" =~ -[1-9][0-9]*x([1-9][0-9]*)[kK]- ]]; then
-    actual_context=$(read_profile_value "$file" MAX_MODEL_LEN)
-    # Context labels are decimal thousands; uppercase K is canonical.
-    expected_context=$((10#${BASH_REMATCH[1]}))
-    actual_context_k=$((actual_context / 1000))
-    context_ok=$(( actual_context_k == expected_context ))
-    (( context_ok )) || \
-      profile_error "$rel" "filename context does not match MAX_MODEL_LEN"
-  fi
-  case "$profile_name" in
-    *fp16kv-*) [[ "$kv" == float16 ]] || profile_error "$rel" "fp16kv filename requires KV_CACHE_DTYPE=float16" ;;
-    *fp8kv-*) [[ "$kv" == fp8 ]] || profile_error "$rel" "fp8kv filename requires KV_CACHE_DTYPE=fp8" ;;
-    *tq4nc-*) [[ "$kv" == turboquant_4bit_nc ]] || profile_error "$rel" "tq4nc filename requires KV_CACHE_DTYPE=turboquant_4bit_nc" ;;
-    *tqk8v4-*) [[ "$kv" == turboquant_k8v4 ]] || profile_error "$rel" "tqk8v4 filename requires KV_CACHE_DTYPE=turboquant_k8v4" ;;
-  esac
-  case "$profile_name" in
-    *text-only.env) [[ "$message_type" == text-only ]] || profile_error "$rel" "text-only filename requires MESSAGE_TYPE=text-only" ;;
-    *text-image.env) [[ "$message_type" == text+image ]] || profile_error "$rel" "text-image filename requires MESSAGE_TYPE=text+image" ;;
-  esac
-  case "$speculative_method" in
-    none)
-      [[ "$speculative_tokens" == 0 ]] || \
-        profile_error "$rel" "SPECULATIVE_METHOD=none requires SPECULATIVE_TOKENS=0"
-      ;;
-    mtp|dflash)
-      [[ "$speculative_tokens" =~ ^[1-9][0-9]*$ ]] || \
-        profile_error "$rel" "$speculative_method requires positive SPECULATIVE_TOKENS"
-      ;;
-    *)
-      profile_error "$rel" "SPECULATIVE_METHOD must be none, mtp, or dflash"
-      ;;
-  esac
-
-  yarn=$(read_profile_value "$file" ENABLE_YARN)
-  if [[ -n "$yarn" && "$yarn" != 0 && "$yarn" != 1 ]]; then
-    profile_error "$rel" "ENABLE_YARN must be 0 or 1 when present"
-  fi
-  case "${rel##*/}" in
-    yarn-*)
-      [[ "$yarn" == 1 ]] || profile_error "$rel" "YaRN profile filename requires ENABLE_YARN=1"
-      ;;
-    *)
-      [[ -z "$yarn" || "$yarn" == 0 ]] || profile_error "$rel" "ENABLE_YARN=1 requires a yarn-* filename"
-      ;;
-  esac
 done < <(find "$PROFILE_DIR" -type f -name '*.env' -print0 | sort -z)
 
 if [[ "$PROFILE_DIR" == "$ROOT/profiles" ]]; then

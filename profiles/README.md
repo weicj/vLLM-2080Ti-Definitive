@@ -3,9 +3,10 @@
 Language: English | [简体中文](README.zh-CN.md)
 
 Profiles are `.env` presets for route parameters. Hardware-specific profiles
-may also select `TP_SIZE`; checkpoint, GPUs, port, chat template, and reasoning
-defaults remain launcher settings. Select the model path separately with
-`MODEL_DIR`.
+may also pin validated `TP_SIZE`, `PP_SIZE`, and
+`VLLM_PP_LAYER_PARTITION` topology; checkpoint, GPUs, port, chat template, and
+reasoning defaults remain launcher settings. Select the model path separately
+with `MODEL_DIR`.
 
 The shipped layout is `hardware / model / weight / mode`:
 
