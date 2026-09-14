@@ -287,6 +287,10 @@ ROUTE_PROFILE_KEYS=(
   MODEL_FAMILY
   PROFILE_GROUP
   MODEL_VARIANT
+  TP_SIZE
+  PP_SIZE
+  ENABLE_EXPERT_PARALLEL
+  VLLM_PP_LAYER_PARTITION
   QUANTIZATION
   KV_CACHE_DTYPE
   MAX_MODEL_LEN
@@ -331,6 +335,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   GPU_DEVICES
   TP_SIZE
   PP_SIZE
+  ENABLE_EXPERT_PARALLEL
   CHAT_TEMPLATE_FILE
   CHAT_TEMPLATE_PRESET
   TEMPLATE_DIR
@@ -370,6 +375,7 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   ENFORCE_EAGER
   NO_ASYNC_SCHEDULING
   DISABLE_HYBRID_KV_CACHE_MANAGER
+  ENABLE_EXPERT_PARALLEL
   DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
@@ -589,7 +595,7 @@ reset_route_profile_fields() {
 
 profile_key_is_global() {
   case "$1" in
-MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|TP_SIZE|PP_SIZE|\
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
@@ -723,6 +729,7 @@ save_manager_state() {
     printf 'COMPILATION_CONFIG_JSON=%q\n' "${COMPILATION_CONFIG_JSON:-}"
     printf 'TP_SIZE=%q\n' "${TP_SIZE:-}"
     printf 'PP_SIZE=%q\n' "${PP_SIZE:-1}"
+    printf 'ENABLE_EXPERT_PARALLEL=%q\n' "${ENABLE_EXPERT_PARALLEL:-0}"
     printf 'CHAT_TEMPLATE_FILE=%q\n' "${CHAT_TEMPLATE_FILE:-}"
     printf 'CHAT_TEMPLATE_PRESET=%q\n' "${CHAT_TEMPLATE_PRESET:-}"
     printf 'ATTENTION_BACKEND=%q\n' "${ATTENTION_BACKEND:-}"
@@ -1248,6 +1255,7 @@ profile_summary() {
     MAX_BATCHED_TOKENS
     MAX_NUM_SEQS
     MTP_K
+    ENABLE_EXPERT_PARALLEL
     VLLM_ALLOW_LONG_MAX_MODEL_LEN
     MM_LIMIT_JSON
     HF_OVERRIDES_JSON
@@ -2056,6 +2064,10 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
   write_profile_entry "$target_file.tmp" PROFILE_GROUP "${PROFILE_GROUP:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
+  write_profile_entry "$target_file.tmp" TP_SIZE "${TP_SIZE:-}"
+  write_profile_entry "$target_file.tmp" PP_SIZE "${PP_SIZE:-1}"
+  write_profile_entry "$target_file.tmp" ENABLE_EXPERT_PARALLEL "${ENABLE_EXPERT_PARALLEL:-0}"
+  write_profile_entry "$target_file.tmp" VLLM_PP_LAYER_PARTITION "${VLLM_PP_LAYER_PARTITION:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
@@ -2380,6 +2392,7 @@ edit_advanced_parameters() {
   unset 'CONFIG_OVERRIDE_UNSET[ENFORCE_EAGER]'
   NO_ASYNC_SCHEDULING=$(prompt_toggle01 "No async scheduling" "${NO_ASYNC_SCHEDULING:-0}") || return 0
   DISABLE_HYBRID_KV_CACHE_MANAGER=$(prompt_toggle01 "Disable hybrid KV cache manager" "${DISABLE_HYBRID_KV_CACHE_MANAGER:-0}") || return 0
+  ENABLE_EXPERT_PARALLEL=$(prompt_toggle01 "Enable expert parallel" "${ENABLE_EXPERT_PARALLEL:-0}") || return 0
   DISABLE_PREFIX_CACHING=$(prompt_toggle01 "Disable prefix caching" "${DISABLE_PREFIX_CACHING:-0}") || return 0
   DISABLE_CUSTOM_ALL_REDUCE=$(prompt_toggle01 "Disable custom all-reduce" "${DISABLE_CUSTOM_ALL_REDUCE:-0}") || return 0
   DISABLE_LOG_STATS=$(prompt_toggle01 "Disable log stats" "${DISABLE_LOG_STATS:-0}") || return 0
@@ -3343,6 +3356,15 @@ set_sm75_runtime_env() {
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-"$FLASHQLA_ROOT/.torch_extensions_vllm_flashqla_legacy"}
   fi
   export FLASHINFER_ENABLE_AOT=${FLASHINFER_ENABLE_AOT:-1}
+  if [[ "${QUANTIZATION:-}" == "exl3" ]]; then
+    # Qwen Flash-Next EXL3 keeps its PLE n-gram table on SSD.  The vLLM
+    # loader and ExLlamaV3 runtime must agree before workers are spawned.
+    export VLLM_EXL3_NGRAM_STREAM=${VLLM_EXL3_NGRAM_STREAM:-1}
+    export EXL3_NGRAM_STREAM=${EXL3_NGRAM_STREAM:-1}
+  fi
+  if [[ -n "${VLLM_PP_LAYER_PARTITION:-}" ]]; then
+    export VLLM_PP_LAYER_PARTITION
+  fi
   if [[ "${KV_CACHE_DTYPE:-}" == "int8_per_token_head" ]]; then
     export VLLM_INT8KV_FA_PREFILL=${VLLM_INT8KV_FA_PREFILL:-1}
     if [[ "$MODE" == "safe" ]]; then
@@ -3456,6 +3478,7 @@ build_args() {
   [[ "${ENABLE_PROMPT_TOKENS_DETAILS:-1}" == "1" ]] && VLLM_ARGS+=(--enable-prompt-tokens-details)
   [[ "${LANGUAGE_MODEL_ONLY:-0}" == "1" ]] && VLLM_ARGS+=(--language-model-only)
   [[ "${SKIP_MM_PROFILING:-0}" == "1" ]] && VLLM_ARGS+=(--skip-mm-profiling)
+  [[ "${ENABLE_EXPERT_PARALLEL:-0}" == "1" ]] && VLLM_ARGS+=(--enable-expert-parallel)
   [[ "${DISABLE_CUSTOM_ALL_REDUCE:-0}" == "1" ]] && VLLM_ARGS+=(--disable-custom-all-reduce)
   [[ "${DISABLE_LOG_STATS:-0}" == "1" ]] && VLLM_ARGS+=(--disable-log-stats)
   [[ -n "${ATTENTION_BACKEND:-}" ]] && VLLM_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
@@ -4266,6 +4289,7 @@ Launch summary:
   GPU devices:          ${GPU_DEVICES:-$(detect_default_gpu_devices)}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-auto}
   TP / PP:              ${TP_SIZE:-} / ${PP_SIZE:-1}
+  Expert parallel:      $(if [[ "${ENABLE_EXPERT_PARALLEL:-0}" == "1" ]]; then printf 'enabled'; else printf 'disabled'; fi)
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)

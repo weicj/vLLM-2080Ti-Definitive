@@ -75,5 +75,16 @@ was disabled.
 | `qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 273,586 | 7378 / 128.7 |
 | `qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env` | normal | 136K | FP16 | 0 | text+image | 146,485 | 5965.8 / 127.6 |
 
+### Qwen3.8 Flash-Next EXL3 TP2xPP2
+
+`qwen38flashnext/exl3/experimental/tp2pp2-ssd-nomtp-text.env` is the initial
+four-GPU T10 functional-validation route for the native ExLlamaV3 EXL3 pack.
+It uses TP=2, PP=2, and expert parallelism so each local expert retains its
+640-wide intermediate dimension, and enables SSD-backed PLE n-gram streaming
+through the launcher. Install the pinned
+`vllm-exl3-turing`/`exllamav3-turing` pair described in
+[`docs/usage/exl3_turing.md`](../docs/usage/exl3_turing.md) before starting it.
+No throughput number is recorded until a real TP2xPP2 CUDA-Graph run passes
+output and loader-path checks.
 Use `./launcher.sh --print-config` after selecting a profile to inspect the
 resolved route before starting the service.
