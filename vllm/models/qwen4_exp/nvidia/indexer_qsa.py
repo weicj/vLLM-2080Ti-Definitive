@@ -13,6 +13,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -70,7 +71,8 @@ def _supports_fused_pre_indexer(
     rotary_dim = int(rotary_emb.rotary_dim)
     mrope_section = getattr(rotary_emb, "mrope_section", None)
     return (
-        bool(getattr(rotary_emb, "is_neox_style", False))
+        not current_platform.is_device_capability(75)
+        and bool(getattr(rotary_emb, "is_neox_style", False))
         and (
             not mrope_section
             or (
@@ -108,8 +110,9 @@ class QSAIndexer(nn.Module):
         super().__init__()
         if vllm_config.cache_config is None:
             raise ValueError("QSA requires a paged KV cache")
-        if vllm_config.model_config.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+        model_dtype = vllm_config.model_config.dtype
+        if model_dtype not in (torch.float16, torch.bfloat16):
+            raise NotImplementedError("Qwen4Exp QSA requires FP16 or BF16")
 
         self.layer_id = int(layer_id)
         self.index_n_heads = int(config.indexer_n_heads)
@@ -147,24 +150,25 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
-        # Plain e4m3 without scales: Q and the compressed K are RMSNormed
-        # before quantization, and the logits kernels dot fp8 x fp8 directly.
+        # Keep FP16 side caches in FP16 on Turing; the generic indexer default
+        # is BF16, which is not a native SM75 storage type.
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
             "bf16"
         )
         if self.indexer_kv_dtype == "fp8":
             indexer_dtype = torch.float8_e4m3fn
         elif self.indexer_kv_dtype == "bf16":
-            indexer_dtype = torch.bfloat16
+            indexer_dtype = model_dtype
         else:
             raise NotImplementedError(
                 f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
                 "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
             )
         self.indexer_dtype = indexer_dtype
+        qsa_cache_dtype = model_dtype
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=qsa_cache_dtype,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
             prefix=f"{cache_prefix}raw_key_cache",
             cache_config=cache_config,

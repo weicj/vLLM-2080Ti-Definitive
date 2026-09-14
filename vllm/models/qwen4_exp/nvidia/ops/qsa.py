@@ -10,6 +10,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
@@ -412,7 +413,11 @@ def _compress_qsa_groups_kernel(
 
 
 def _select_config(
-    num_rows: int, num_kv_heads: int, use_prefill_config: bool, num_columns: int
+    num_rows: int,
+    num_kv_heads: int,
+    use_prefill_config: bool,
+    num_columns: int,
+    is_pre_ampere: bool = False,
 ) -> tuple[int, int, int, int]:
     """Select (block_n, num_warps, num_tiles, num_splits) for the kernel.
 
@@ -440,6 +445,11 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = 64, 4, 2
     else:
         BLOCK_N, target_splits, num_warps = 64, 1, 2
+    if is_pre_ampere and BLOCK_N == 64:
+        # SM75 has a 64 KiB shared-memory limit. The 64-column, 256-wide
+        # profile used on newer GPUs can exceed it, so narrow the tile and
+        # expose four warps before deriving the split count.
+        BLOCK_N, num_warps = 16, 4
     num_tiles = triton.cdiv(num_columns, BLOCK_N)
     # Never more splits than tiles, never empty.
     num_splits = min(target_splits, num_tiles)
@@ -480,7 +490,8 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == k_cache.dtype == v_cache.dtype == torch.bfloat16
+    assert q.dtype == k_cache.dtype == v_cache.dtype
+    assert q.dtype in (torch.float16, torch.bfloat16)
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
@@ -501,9 +512,17 @@ def qsa_sparse_paged_attention(
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
+    device_id = q.device.index if q.device.index is not None else 0
+    is_pre_ampere = not current_platform.has_device_capability(
+        80, device_id=device_id
+    )
     selection_width = logical_indices.shape[1] - 1  # trailing column is the count
     block_n, partial_warps, num_tiles, num_splits = _select_config(
-        q.shape[0], k_cache.shape[2], use_prefill_config, selection_width
+        q.shape[0],
+        k_cache.shape[2],
+        use_prefill_config,
+        selection_width,
+        is_pre_ampere,
     )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
@@ -523,6 +542,7 @@ def qsa_sparse_paged_attention(
         )
 
     partial_grid = (q.shape[0], k_cache.shape[2], num_splits)
+    num_stages = 1 if is_pre_ampere else 2
     _qsa_sparse_paged_gqa_splitk_kernel[partial_grid](
         q,
         k_cache,
@@ -559,7 +579,7 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=partial_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     if num_splits == 1:
         return out
@@ -595,10 +615,20 @@ def warmup_qsa_sparse_paged_attention(
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
+    device_id = kv_cache.device.index if kv_cache.device.index is not None else 0
+    is_pre_ampere = not current_platform.has_device_capability(
+        80, device_id=device_id
+    )
 
     # Every config the dispatch can pick for this group size.
     profiles = {
-        _select_config(num_rows, num_kv_heads, use_prefill_config, selection_width)
+        _select_config(
+            num_rows,
+            num_kv_heads,
+            use_prefill_config,
+            selection_width,
+            is_pre_ampere,
+        )
         for num_rows in range(1, 8193)
         for use_prefill_config in (False, True)
     }
@@ -609,7 +639,7 @@ def warmup_qsa_sparse_paged_attention(
     num_rows = 16
     num_requests = 16
     q_ptr = TritonWarmupTensor(
-        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+        key_cache.dtype, shape=(num_rows, num_query_heads, head_dim)
     )
     k_cache_ptr = TritonWarmupTensor(
         key_cache.dtype,
@@ -630,7 +660,7 @@ def warmup_qsa_sparse_paged_attention(
     )
     token_to_req_ptr = TritonWarmupTensor(torch.int32)
     output_ptr = TritonWarmupTensor(
-        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+        key_cache.dtype, shape=(num_rows, num_query_heads, head_dim)
     )
     head_stride = head_dim
     row_stride = num_query_heads * head_dim
@@ -685,7 +715,7 @@ def warmup_qsa_sparse_paged_attention(
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             num_warps=warps,
-            num_stages=2,
+            num_stages=1 if is_pre_ampere else 2,
             grid=(num_rows, num_kv_heads, num_splits),
         )
         if num_splits > 1:
