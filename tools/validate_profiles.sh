@@ -40,7 +40,8 @@ VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH)
 
 profile_key_is_allowed() {
   case "$1" in
-    SERVED_NAME|COMPATIBLE_MODES|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|TP_SIZE|\
+    SERVED_NAME|COMPATIBLE_MODES|MODEL_FAMILY|PROFILE_GROUP|MODEL_VARIANT|\
+TP_SIZE|PP_SIZE|VLLM_PP_LAYER_PARTITION|\
 QUANTIZATION|KV_CACHE_DTYPE|MAX_MODEL_LEN|KV_CACHE_MEMORY_BYTES|GPU_UTIL|\
 MAX_BATCHED_TOKENS|LONG_PREFILL_TOKEN_THRESHOLD|\
 MAX_NUM_SEQS|PREFILL_BATCH_BARRIER|DISABLE_PREFIX_CACHING|MTP_K|\
@@ -72,6 +73,9 @@ while IFS= read -r -d '' file; do
   compatible_modes=$(read_profile_value "$file" COMPATIBLE_MODES)
   kv=$(read_profile_value "$file" KV_CACHE_DTYPE)
   mtp=$(read_profile_value "$file" MTP_K)
+  tp=$(read_profile_value "$file" TP_SIZE)
+  pp=$(read_profile_value "$file" PP_SIZE)
+  pp_partition=$(read_profile_value "$file" VLLM_PP_LAYER_PARTITION)
   has_safe=0
 
   if [[ -n "$mode" ]]; then
@@ -120,6 +124,34 @@ while IFS= read -r -d '' file; do
         fi
         ;;
     esac
+  fi
+
+  if [[ -n "$tp" && ! "$tp" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR $rel: TP_SIZE must be a positive integer" >&2
+    ((errors += 1))
+  fi
+  if [[ -n "$pp" && ! "$pp" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR $rel: PP_SIZE must be a positive integer" >&2
+    ((errors += 1))
+  fi
+  if [[ -n "$pp_partition" ]]; then
+    if [[ "$pp_partition" == ,* || "$pp_partition" == *, || "$pp_partition" == *,,* ]]; then
+      echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must not contain empty entries" >&2
+      ((errors += 1))
+    elif [[ "${pp:-1}" =~ ^[1-9][0-9]*$ ]]; then
+      IFS=',' read -r -a partition_parts <<< "$pp_partition"
+      if (( ${#partition_parts[@]} != ${pp:-1} )); then
+        echo "ERROR $rel: VLLM_PP_LAYER_PARTITION must contain PP_SIZE=${pp:-1} entries" >&2
+        ((errors += 1))
+      else
+        for partition in "${partition_parts[@]}"; do
+          if [[ ! "$partition" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR $rel: every VLLM_PP_LAYER_PARTITION entry must be a positive integer, got '$partition'" >&2
+            ((errors += 1))
+          fi
+        done
+      fi
+    fi
   fi
 done < <(find "$PROFILE_DIR" -type f -name '*.env' -print0 | sort -z)
 

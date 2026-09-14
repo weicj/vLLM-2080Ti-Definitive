@@ -298,6 +298,8 @@ ROUTE_PROFILE_KEYS=(
   PREFILL_BATCH_BARRIER
   DISABLE_PREFIX_CACHING
   TP_SIZE
+  PP_SIZE
+  VLLM_PP_LAYER_PARTITION
   MTP_K
   MESSAGE_TYPE
   MM_LIMIT_JSON
@@ -590,7 +592,7 @@ reset_route_profile_fields() {
 
 profile_key_is_global() {
   case "$1" in
-MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|PP_SIZE|\
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
@@ -724,6 +726,7 @@ save_manager_state() {
     printf 'COMPILATION_CONFIG_JSON=%q\n' "${COMPILATION_CONFIG_JSON:-}"
     printf 'TP_SIZE=%q\n' "${TP_SIZE:-}"
     printf 'PP_SIZE=%q\n' "${PP_SIZE:-1}"
+    printf 'VLLM_PP_LAYER_PARTITION=%q\n' "${VLLM_PP_LAYER_PARTITION:-}"
     printf 'CHAT_TEMPLATE_FILE=%q\n' "${CHAT_TEMPLATE_FILE:-}"
     printf 'CHAT_TEMPLATE_PRESET=%q\n' "${CHAT_TEMPLATE_PRESET:-}"
     printf 'ATTENTION_BACKEND=%q\n' "${ATTENTION_BACKEND:-}"
@@ -1246,6 +1249,9 @@ profile_summary() {
     MODEL_FAMILY
     PROFILE_GROUP
     MODEL_VARIANT
+    TP_SIZE
+    PP_SIZE
+    VLLM_PP_LAYER_PARTITION
     QUANTIZATION
     KV_CACHE_DTYPE
     MAX_MODEL_LEN
@@ -1774,7 +1780,7 @@ show_profiles() {
   banner
   echo "Profile presets:"
   echo
-  local profile profile_file family variant mode kv context kv_memory mtp seqs
+  local profile profile_file family variant mode kv context kv_memory mtp seqs tp pp
   if [[ ! -d "$PROFILE_DIR" ]]; then
     echo "No profile directory found: $PROFILE_DIR"
     echo
@@ -1793,8 +1799,10 @@ show_profiles() {
     kv_memory=$(read_profile_value "$profile_file" KV_CACHE_MEMORY_BYTES)
     mtp=$(read_profile_value "$profile_file" MTP_K)
     seqs=$(read_profile_value "$profile_file" MAX_NUM_SEQS)
-    printf '  %-62s compatible=%-12s family=%-7s weight=%-6s kv=%-24s ctx=%-8s kvmem=%-10s mtp=%-3s seqs=%s\n' \
-      "$profile" "${mode:-safe,normal,fast}" "${family:-auto}" "${variant:-auto}" "${kv:-fp16}" "${context:-auto}" "${kv_memory:-auto}" "${mtp:-0}" "${seqs:-1}"
+    tp=$(read_profile_value "$profile_file" TP_SIZE)
+    pp=$(read_profile_value "$profile_file" PP_SIZE)
+    printf '  %-62s compatible=%-12s topology=TP%s/PP%s family=%-7s weight=%-6s kv=%-24s ctx=%-8s kvmem=%-10s mtp=%-3s seqs=%s\n' \
+      "$profile" "${mode:-safe,normal,fast}" "${tp:-auto}" "${pp:-1}" "${family:-auto}" "${variant:-auto}" "${kv:-fp16}" "${context:-auto}" "${kv_memory:-auto}" "${mtp:-0}" "${seqs:-1}"
   done < <(list_profiles)
   echo
   pause_enter
@@ -2062,6 +2070,9 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
   write_profile_entry "$target_file.tmp" PROFILE_GROUP "${PROFILE_GROUP:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
+  write_profile_entry "$target_file.tmp" TP_SIZE "${TP_SIZE:-}"
+  write_profile_entry "$target_file.tmp" PP_SIZE "${PP_SIZE:-1}"
+  write_profile_entry "$target_file.tmp" VLLM_PP_LAYER_PARTITION "${VLLM_PP_LAYER_PARTITION:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
@@ -4272,6 +4283,7 @@ Launch summary:
   GPU devices:          ${GPU_DEVICES:-$(detect_default_gpu_devices)}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-auto}
   TP / PP:              ${TP_SIZE:-} / ${PP_SIZE:-1}
+  PP layer partition:   ${VLLM_PP_LAYER_PARTITION:-auto}
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)

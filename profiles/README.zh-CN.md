@@ -2,9 +2,9 @@
 
 语言：[English](README.md) | 简体中文
 
-Profile 是只保存路线参数的 `.env` 预设。硬件专用 profile 还可设置 `TP_SIZE`；
-checkpoint、GPU、端口、chat template 和 reasoning 默认值仍由 launcher 管理，模型路径
-通过 `MODEL_DIR` 单独指定。
+Profile 是只保存路线参数的 `.env` 预设。硬件专用 profile 还可固定已验证的
+`TP_SIZE`、`PP_SIZE` 和 `VLLM_PP_LAYER_PARTITION` 拓扑；checkpoint、GPU、端口、
+chat template 和 reasoning 默认值仍由 launcher 管理，模型路径通过 `MODEL_DIR` 单独指定。
 
 当前目录按 `硬件 / 模型 / 权重 / 启动模式` 组织：
 
