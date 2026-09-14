@@ -83,7 +83,7 @@ git switch --track origin/vllm-2080ti-definitive-0.2.x
 
 ```bash
 MODEL_DIR=/path/to/checkpoint \
-PROFILE=qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
+PROFILE=2x2080Ti/qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env \
 MODE=fast GPU_DEVICES=4,5 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
@@ -95,10 +95,10 @@ profiles.
 ## Profiles
 
 Start with [the Profile Guide](profiles/README.md). Profiles use the layout
-`profiles/<model>/<weight>/<mode>/<route>.env`; for example,
-`qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`,
-`qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env`, and
-`qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env`.
+`profiles/<hardware>/<model>/<weight>/<mode>/<route>.env`; for example,
+`2x2080Ti/qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env`,
+`2x2080Ti/qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env`, and
+`4xT10/qwen27b/w8a16/normal/fp16kv-256K-mtp3-text-image.env`.
 
 Available modes:
 
@@ -107,8 +107,9 @@ Available modes:
 - `aggressive`: highest-performance mode with increased quality risk.
 - `safe`: conservative fallback for troubleshooting and compatibility.
 
-The profile selects only route parameters. The launcher owns GPU selection,
-port, model path, chat template, and reasoning defaults.
+The profile selects route parameters and may pin the validated tensor-parallel
+degree. The launcher owns GPU selection, port, model path, chat template, and
+reasoning defaults.
 
 ## MTP And KV Precision
 

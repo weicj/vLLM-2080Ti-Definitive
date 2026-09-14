@@ -297,6 +297,7 @@ ROUTE_PROFILE_KEYS=(
   LONG_PREFILL_TOKEN_THRESHOLD
   PREFILL_BATCH_BARRIER
   DISABLE_PREFIX_CACHING
+  TP_SIZE
   MTP_K
   MESSAGE_TYPE
   MM_LIMIT_JSON
@@ -589,7 +590,7 @@ reset_route_profile_fields() {
 
 profile_key_is_global() {
   case "$1" in
-MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|TP_SIZE|PP_SIZE|\
+MODEL_DIR|PROFILE_DIR|PROFILE|MODE|PORT|SERVICE_SCOPE|GPU_DEVICES|PP_SIZE|\
 CHAT_TEMPLATE_FILE|CHAT_TEMPLATE_PRESET|TEMPLATE_DIR|REASONING_PARSER|\
 DEFAULT_CHAT_TEMPLATE_KWARGS|REASONING_MODE|REASONING_BUDGET|\
 ENABLE_AUTO_TOOL_CHOICE|TOOL_CALL_PARSER|TOOL_PARSER_PLUGIN|\
@@ -822,7 +823,12 @@ mode_is_compatible() {
 
 profile_family_dir() {
   if [[ -n "${PROFILE:-}" && "$PROFILE" == */* ]]; then
-    printf '%s\n' "${PROFILE%%/*}"
+    local profile_without_hardware=${PROFILE#*/}
+    if [[ "$PROFILE" == */*/*/*/* ]]; then
+      printf '%s\n' "${profile_without_hardware%%/*}"
+    else
+      printf '%s\n' "${PROFILE%%/*}"
+    fi
     return 0
   fi
   case "${MODEL_FAMILY:-}" in
@@ -980,7 +986,7 @@ default_qwen_reasoning_parser_applies() {
       ;;
   esac
   case "$profile_l" in
-    qwen27b/*)
+    qwen27b/*|*/qwen27b/*)
       return 0
       ;;
   esac
