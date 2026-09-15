@@ -928,6 +928,17 @@ class Platform:
             if indexer_align:
                 attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
 
+        block_cap = int(os.environ.get("VLLM_QWEN4_KV_BLOCK_CAP", "0") or 0)
+        if block_cap > 0 and attn_block_size > block_cap:
+            capped = max(
+                kernel_block_alignment_size,
+                block_cap - block_cap % kernel_block_alignment_size,
+            )
+            if indexer_align:
+                capped = max(indexer_align, capped - capped % indexer_align)
+            attn_block_size = capped
+            logger.info("Capping attention block size to %d tokens", capped)
+
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
             logger.info(
