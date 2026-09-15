@@ -834,6 +834,27 @@ ROUTE_PROFILE_KEYS=(
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
   MESSAGE_TYPE
+  MM_LIMIT_JSON
+  LANGUAGE_MODEL_ONLY
+  SKIP_MM_PROFILING
+  HF_OVERRIDES_JSON
+  ADDITIONAL_CONFIG_JSON
+  SPECULATIVE_CONFIG
+  COMPILATION_CONFIG_JSON
+  ATTENTION_BACKEND
+  DISABLE_HYBRID_KV_CACHE_MANAGER
+  CUSTOM_ALL_REDUCE_MODE
+  DISABLE_CUSTOM_ALL_REDUCE
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN
+  VLLM_FORCE_NVFP4_W4A16
+  VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
+  VLLM_PP_LAYER_PARTITION
+  VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
+  VLLM_INT8KV_FA_CASCADE_DEQUANT
+  VLLM_INT8KV_FA_CASCADE_TILE_TOKENS
+  VLLM_INT8KV_FA_CONTINUATION_DEQUANT
+  VLLM_INT8KV_FA_PREFILL
 )
 
 PROFILE_RESET_KEYS=(
@@ -871,6 +892,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   GPU_DEVICES
   TP_SIZE
   PP_SIZE
+  VLLM_PP_LAYER_PARTITION
   CHAT_TEMPLATE_FILE
   CHAT_TEMPLATE_PRESET
   TEMPLATE_DIR
@@ -893,6 +915,9 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   CUSTOM_ALL_REDUCE_MODE
   DISABLE_LOG_STATS
   VLLM_SM75_SPEC_SYNC_MODE
+  VLLM_FORCE_NVFP4_W4A16
+  VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
   RUNTIME_ROOT
   LOG_DIR
   STATE_FILE
@@ -930,6 +955,9 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS
   VLLM_ALLOW_LONG_MAX_MODEL_LEN
+  VLLM_FORCE_NVFP4_W4A16
+  VLLM_PLE_CPU_OFFLOAD
+  VLLM_STATIC_PP_SINGLE_TOKEN
   VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE
   VLLM_INT8KV_FA_CASCADE_DEQUANT
   VLLM_INT8KV_FA_CONTINUATION_DEQUANT
@@ -1369,6 +1397,10 @@ save_manager_state() {
     printf 'GPU_DEVICES=%q\n' "${GPU_DEVICES:-}"
     printf 'TP_SIZE=%q\n' "${TP_SIZE:-}"
     printf 'PP_SIZE=%q\n' "${PP_SIZE:-}"
+    printf 'VLLM_PP_LAYER_PARTITION=%q\n' "${VLLM_PP_LAYER_PARTITION:-}"
+    printf 'VLLM_FORCE_NVFP4_W4A16=%q\n' "${VLLM_FORCE_NVFP4_W4A16:-}"
+    printf 'VLLM_PLE_CPU_OFFLOAD=%q\n' "${VLLM_PLE_CPU_OFFLOAD:-}"
+    printf 'VLLM_STATIC_PP_SINGLE_TOKEN=%q\n' "${VLLM_STATIC_PP_SINGLE_TOKEN:-}"
     printf 'QUANTIZATION=%q\n' "${QUANTIZATION:-}"
     printf 'KV_CACHE_DTYPE=%q\n' "${KV_CACHE_DTYPE:-}"
     printf 'MAMBA_CACHE_MODE=%q\n' "${MAMBA_CACHE_MODE:-}"
@@ -2969,6 +3001,12 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" MODE "${MODE:-fast}"
   write_profile_entry "$target_file.tmp" MODEL_FAMILY "${MODEL_FAMILY:-}"
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
+  write_profile_entry "$target_file.tmp" TP_SIZE "${TP_SIZE:-}"
+  write_profile_entry "$target_file.tmp" PP_SIZE "${PP_SIZE:-}"
+  write_profile_entry "$target_file.tmp" VLLM_PP_LAYER_PARTITION "${VLLM_PP_LAYER_PARTITION:-}"
+  write_profile_entry "$target_file.tmp" VLLM_FORCE_NVFP4_W4A16 "${VLLM_FORCE_NVFP4_W4A16:-}"
+  write_profile_entry "$target_file.tmp" VLLM_PLE_CPU_OFFLOAD "${VLLM_PLE_CPU_OFFLOAD:-}"
+  write_profile_entry "$target_file.tmp" VLLM_STATIC_PP_SINGLE_TOKEN "${VLLM_STATIC_PP_SINGLE_TOKEN:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
@@ -4609,6 +4647,9 @@ set_sm75_runtime_env() {
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-"$FLASHQLA_ROOT/.torch_extensions_vllm_flashqla_legacy"}
   fi
   export FLASHINFER_ENABLE_AOT=${FLASHINFER_ENABLE_AOT:-1}
+  if [[ -n "${VLLM_PP_LAYER_PARTITION:-}" ]]; then
+    export VLLM_PP_LAYER_PARTITION
+  fi
   # FlashInfer's Ninja files contain absolute venv and CUDA include paths.
   # Isolate them per worktree so experiments cannot poison this runtime.
   export FLASHINFER_WORKSPACE_BASE=${FLASHINFER_WORKSPACE_BASE:-"$MANAGER_ROOT"}
@@ -5359,6 +5400,19 @@ maybe_run_startup_performance_test() {
   run_startup_performance_test "$url_host" || true
 }
 
+enforce_flashnext_parallelism_constraints() {
+  local pp=${PP_SIZE:-1}
+  local offload=${VLLM_PLE_CPU_OFFLOAD:-0}
+  offload=${offload,,}
+  if [[ "$pp" =~ ^[0-9]+$ ]] && (( pp >= 2 )) \
+    && [[ "$offload" == 1 || "$offload" == true || "$offload" == yes || "$offload" == on ]]; then
+    if [[ "${NO_ASYNC_SCHEDULING:-0}" != 1 ]]; then
+      NO_ASYNC_SCHEDULING=1
+      PP_PLE_ASYNC_AUTO_DISABLED=1
+    fi
+  fi
+}
+
 launch_server() {
   mkdir -p "$LOG_DIR"
   local safe_name log_file pid_file host_arg url_host args_text
@@ -5368,6 +5422,7 @@ launch_server() {
   fi
   GPU_DEVICES=${GPU_DEVICES:-$(detect_default_gpu_devices)}
   TP_SIZE=${TP_SIZE:-$(gpu_device_count "$GPU_DEVICES")}
+  enforce_flashnext_parallelism_constraints
   if [[ -z "${SERVED_NAME:-}" || "$SERVED_NAME" == "." || "$SERVED_NAME" == "/" ]]; then
     echo "ERROR: Served model name is empty. Set SERVED_NAME or choose a valid checkpoint directory." >&2
     return 1
@@ -5440,6 +5495,9 @@ launch_server() {
   echo "  Log: $log_file"
   echo "  Mode: $MODE"
   echo "  MTP graph policy: VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
+  if [[ "${PP_PLE_ASYNC_AUTO_DISABLED:-0}" == 1 ]]; then
+    echo "  Async scheduling: disabled automatically for PP + PLE compatibility"
+  fi
   echo "  TileLang disabled: ${VLLM_DISABLE_TILELANG:-0}"
   echo "  DFlash draft fetch: $(current_dflash_download_route_label)"
   echo "  TQ diagnostics: $(current_tq_diagnostics_label)"
