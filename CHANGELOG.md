@@ -3,6 +3,48 @@
 This changelog tracks the fork release version for vLLM 2080 Ti Definitive
 Edition. It is separate from the upstream vLLM package version.
 
+## Unreleased
+
+- Keeps `fast`/`aggressive` launcher modes on PIECEWISE whenever native MTP /
+  speculative decoding is enabled. Full decode CUDA-graph replay for hybrid
+  Mamba/GDN layers is only exposed through the documented unsafe peak-throughput
+  route, because the graph-captured recurrent-state update topology is reused
+  across changing speculative acceptance patterns and deterministically scrambles
+  the model context (e.g. `123 + 456` answered as `1 + 2 = 3`). Explicit
+  `VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=1` still opts into the old route.
+- Shares the target FlashInfer workspace buffer with the draft attention builders.
+  The draft layer previously allocated a second lazily-sized
+  `VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE` (~394 MiB) workspace after the KV cache
+  had claimed the remaining GPU memory, which could OOM the first request at high
+  `--gpu-memory-utilization`.
+- Bounds-checks the GDN recurrent state slots and the `mamba_cache_mode=align`
+  state migration. Both paths handed unvalidated indices to raw pointer
+  accesses that CUDA does not bounds-check, so a stale slot became an
+  unmapped-page write (`Xid 31 ... FAULT_PDE ACCESS_TYPE_VIRT_WRITE`) that killed
+  Worker_TP0, then EngineCore, and surfaced to clients as `EngineDeadError`.
+  Out-of-range slots are now skipped (the store is dropped and the decode
+  returns a defined zero output; an invalid migration is logged with its block
+  indices and skipped) instead of taking the engine down. Set
+  `VLLM_GDN_STATE_INDEX_CHECK=1` to additionally report the offending slot
+  indices from the host.
+- Aligns the Qwen GDN gating inputs (`a`/`b`) with speculative tokens, backporting
+  upstream #51812. Batches that mixed speculative tokens with other tokens fed
+  the spec tokens the decay/beta of unrelated tokens and drifted the recurrent
+  state.
+- Adds the validated `qwen27b/normal/fp8/fp16kv-112K-mtp3-text-only-ok.env`
+  profile, which was being served but was not tracked, and tracks the
+  `systemd/` user service that runs it (including its stop hook and GPU
+  precheck). Keeps per-iteration stats enabled in `normal` mode so the per-step
+  Engine/SpecDecoding lines stay available in `run-logs/` for post-mortems.
+- Makes the launcher's startup smoke test authenticate itself. When
+  `VLLM_API_KEY` is set for the API server, the smoke requests to `/v1/models`
+  and `/v1/chat/completions` now carry `Authorization: Bearer $VLLM_API_KEY`.
+  Previously a server launched with `VLLM_API_KEY` answered the smoke request
+  with `401 Unauthorized`, so the launcher reported `SMOKE FAILED` and killed the
+  healthy server; enabling API key authentication therefore required bypassing
+  the launcher. Without the variable in the environment the smoke test is
+  unchanged.
+
 ## v0.1.17 - 2026-08-24
 
 - Merges [PR #125](https://github.com/weicj/vLLM-2080Ti-Definitive/pull/125), deduplicating named-tool streaming fallback output and preserving `finish_reason=length` for truncated tool calls.

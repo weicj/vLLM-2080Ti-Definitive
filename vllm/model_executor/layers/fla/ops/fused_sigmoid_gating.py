@@ -9,8 +9,12 @@
 
 import torch
 
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+logger = init_logger(__name__)
 
 
 @triton.heuristics(
@@ -53,6 +57,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
     null_block_id: tl.constexpr,
+    num_state_slots,  # runtime: rows of the state cache, used for bounds checks
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
@@ -113,6 +118,22 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
                 tl.int64
             )
             if state_idx < 0 or state_idx == null_block_id:
+                # Padded / nil slot: leave the output untouched (the padding
+                # contract relies on this) and store no state.
+                return
+            if state_idx >= num_state_slots:
+                # Corrupt slot. Do not touch the state cache here: `num_state_slots`
+                # is the row count of the state cache and the load/store below
+                # are raw pointer accesses that CUDA does not bounds-check, so
+                # this would be an unmapped-page access (Xid 31) that kills the
+                # engine. Emit a defined zero output instead so no NaN can leak
+                # into the sampler, and report via VLLM_GDN_STATE_INDEX_CHECK.
+                p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
+                tl.store(
+                    p_o,
+                    tl.zeros([BV], dtype=p_o.dtype.element_ty),
+                    mask=mask_v,
+                )
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:
@@ -160,7 +181,16 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             final_state_idx = tl.load(
                 ssm_state_indices + i_n * stride_indices_seq + i_t
             ).to(tl.int64)
-            if final_state_idx >= 0 and final_state_idx != null_block_id:
+            # NULL_BLOCK_ID and negative values mean "no state slot".
+            # `num_state_slots` is the row count of the state cache: the store
+            # below is a raw pointer write that the CUDA runtime does not
+            # bounds-check, so a stale or otherwise out-of-range slot would
+            # become an unmapped-page write (Xid 31) and kill the engine.
+            if (
+                final_state_idx >= 0
+                and final_state_idx != null_block_id
+                and final_state_idx < num_state_slots
+            ):
                 p_ht = ht + final_state_idx * stride_final_state_token
                 p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
@@ -176,6 +206,32 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_v += HV * V
         p_b += HV
         p_a += HV
+
+
+def _check_state_slots(ssm_state_indices: torch.Tensor, num_state_slots: int) -> None:
+    """Host-side sanity check for GDN state slot indices.
+
+    Costs one device synchronisation, so it is gated behind
+    ``VLLM_GDN_STATE_INDEX_CHECK``. When an index is out of range the kernel
+    silently skips the offending state store (see the ``num_state_slots``
+    guard in the kernel), so this only exists to report *why* the slots were
+    wrong rather than leaving the cause invisible.
+    """
+    lo = int(ssm_state_indices.min())
+    hi = int(ssm_state_indices.max())
+    if lo >= 0 and hi < num_state_slots:
+        return
+    logger.warning_once(
+        "GDN state slot index out of range: min=%d max=%d num_state_slots=%d "
+        "indices=%s. The kernel will skip the out-of-range state stores; "
+        "this usually means the align-mode state bookkeeping and the "
+        "scheduler/spec-decode metadata disagree. Please report with the "
+        "surrounding log lines.",
+        lo,
+        hi,
+        num_state_slots,
+        ssm_state_indices.tolist(),
+    )
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -231,6 +287,10 @@ def fused_sigmoid_gating_delta_rule_update(
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
+    num_state_slots = final_state.shape[0]
+
+    if envs.VLLM_GDN_STATE_INDEX_CHECK and ssm_state_indices is not None:
+        _check_state_slots(ssm_state_indices, num_state_slots)
 
     if ssm_state_indices is None:
         stride_indices_seq, stride_indices_tok = 1, 1
@@ -271,6 +331,7 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
         null_block_id=null_block_id,
+        num_state_slots=num_state_slots,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,

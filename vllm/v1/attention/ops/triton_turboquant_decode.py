@@ -33,7 +33,9 @@ if _FP8_FORMAT_OVERRIDE not in ("", "auto", "e4b15", "e4nv", "e5"):
 
 
 def _read_decode_block_kv() -> int:
-    value = os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV", "2").strip()
+    # os.getenv(name, default) returns "" when the variable is exported empty,
+    # so fall back on the default explicitly instead of parsing an empty string.
+    value = (os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV") or "2").strip()
     try:
         block_kv = int(value)
     except ValueError as err:

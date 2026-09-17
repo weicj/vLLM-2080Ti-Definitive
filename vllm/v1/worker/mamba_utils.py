@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
 )
@@ -18,6 +19,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -94,6 +97,45 @@ class MambaCopyBuffers:
         )
 
 
+def _state_address_span(state: torch.Tensor) -> int:
+    """Number of elements spanned by ``state``'s addresses.
+
+    This is deliberately *not* ``state.numel()``: with ``mamba_cache_mode=
+    align`` the state cache is page-padded, so consecutive blocks sit further
+    apart than one block's element count. A Qwen3.8-27B conv state, for
+    example, is ``shape=(185, 6, 5120)`` with ``stride=(819200, 5120, 1)``:
+    30,720 elements per block but a 819,200 element block stride, so
+    ``numel()`` (5,683,200) is smaller than the offset of the last block
+    (150,732,800). Bounding against ``numel()`` would silently reject valid
+    align-mode migrations.
+    """
+    if state.numel() == 0:
+        return 0
+    return 1 + sum(
+        (size - 1) * stride
+        for size, stride in zip(state.shape, state.stride())
+    )
+
+
+def _state_range_fits(
+    state: torch.Tensor,
+    start_addr: int,
+    num_elements: int,
+) -> bool:
+    """Whether ``[start_addr, start_addr + num_elements)`` lies in ``state``.
+
+    ``batch_memcpy`` below is a raw pointer copy that CUDA does not bounds
+    check, so a stale or miscomputed source/destination turns into an
+    unmapped-page write (Xid 31) and takes the whole engine down. The address
+    arithmetic here is exact view arithmetic on ``state``, so it cannot
+    false-positive.
+    """
+    if num_elements < 0:
+        return False
+    offset = (start_addr - state.data_ptr()) // state.element_size()
+    return 0 <= offset and offset + num_elements <= _state_address_span(state)
+
+
 def collect_mamba_copy_meta(
     copy_bufs: MambaCopyBuffers,
     kv_cache_config: KVCacheConfig,
@@ -115,18 +157,97 @@ def collect_mamba_copy_meta(
 
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
+        if not 0 <= dest_block_idx < len(block_ids):
+            logger.error(
+                "Skipping Mamba state migration with an out-of-range "
+                "destination slot: dest_block_idx=%d src_block_idx=%d "
+                "num_accepted_tokens=%d num_block_ids=%d.",
+                dest_block_idx,
+                src_block_idx,
+                accept_token_bias + 1,
+                len(block_ids),
+            )
+            continue
         dest_block_id = block_ids[dest_block_idx]
         layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
-            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+            for state_ordinal, (state, state_copy_func) in enumerate(
+                zip(kv_caches, mamba_state_copy_funcs)
+            ):
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
+                reason: str | None = None
+                src_off = dst_off = -1
+                dst_addr: int | None = None
+                if not copy_spec.valid:
+                    reason = "unresolved-slot"
+                elif not 0 <= dest_block_id < state.shape[0]:
+                    reason = "dest-block-id"
+                else:
+                    dst_addr = state[dest_block_id].data_ptr()
+                    base = state.data_ptr()
+                    element_size = state.element_size()
+                    src_off = (copy_spec.start_addr - base) // element_size
+                    dst_off = (dst_addr - base) // element_size
+                    if copy_spec.num_elements < 0:
+                        reason = "negative-size"
+                    elif not _state_range_fits(
+                        state, copy_spec.start_addr, copy_spec.num_elements
+                    ):
+                        reason = (
+                            "src-offset"
+                            if not 0 <= src_off < state.numel()
+                            else "src-overflow"
+                        )
+                    elif not _state_range_fits(
+                        state, dst_addr, copy_spec.num_elements
+                    ):
+                        reason = (
+                            "dst-offset"
+                            if not 0 <= dst_off < state.numel()
+                            else "dst-overflow"
+                        )
+                if reason is not None:
+                    # Skipping one state migration corrupts the recurrent
+                    # state for this request, but it keeps the engine alive
+                    # and reports enough context to find the bookkeeping bug.
+                    logger.error(
+                        "Skipping out-of-range Mamba state migration "
+                        "(reason=%s state_ordinal=%d layer=%s): "
+                        "src_block_idx=%d dest_block_idx=%d "
+                        "src_block_id=%d dest_block_id=%d "
+                        "num_accepted_tokens=%d num_block_ids=%d "
+                        "num_elements=%d src_off=%d dst_off=%d "
+                        "state_numel=%d state_shape=%s state_stride=%s "
+                        "state_dtype=%s. This would otherwise be an illegal "
+                        "GPU memory access. Please report with the "
+                        "surrounding log.",
+                        reason,
+                        state_ordinal,
+                        layer_name,
+                        src_block_idx,
+                        dest_block_idx,
+                        block_ids[src_block_idx]
+                        if 0 <= src_block_idx < len(block_ids)
+                        else -1,
+                        dest_block_id,
+                        accept_token_bias + 1,
+                        len(block_ids),
+                        copy_spec.num_elements,
+                        src_off,
+                        dst_off,
+                        state.numel(),
+                        tuple(state.shape),
+                        tuple(state.stride()),
+                        state.dtype,
+                    )
+                    continue
 
                 src_ptrs_np[offset] = copy_spec.start_addr
-                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                dst_ptrs_np[offset] = dst_addr
                 sizes_np[offset] = copy_spec.num_elements * state.element_size()
                 offset += 1
 

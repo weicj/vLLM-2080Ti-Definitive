@@ -1310,12 +1310,21 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
                 mixed_qkv_non_spec = None
+                # The gating inputs must be permuted exactly like mixed_qkv,
+                # otherwise the spec branch below feeds q/k/v of the spec
+                # tokens the decay/beta of unrelated tokens (see #51812).
+                a_spec = a
+                b_spec = b
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
+                a_spec = a.index_select(0, spec_token_indx)
+                b_spec = b.index_select(0, spec_token_indx)
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
+            a_spec = None
+            b_spec = None
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
@@ -1434,11 +1443,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            assert a_spec is not None and b_spec is not None
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_spec,
+                    b=b_spec,
                     dt_bias=self.dt_bias,
                     q=query_spec,
                     k=key_spec,

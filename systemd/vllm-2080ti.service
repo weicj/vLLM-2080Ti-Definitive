@@ -1,0 +1,60 @@
+[Unit]
+Description=vLLM-2080Ti-Definitive (qwen27b normal fp8 fp16kv-112K mtp3 text-only)
+Documentation=file:///home/john/vLLM-2080Ti-Definitive/README.md
+# Give the NVIDIA driver / network a moment after boot
+After=network-online.target
+Wants=network-online.target
+# Don't fight a manual interactive launcher instance on the same port
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=forking
+# The launcher daemonizes the API server (nohup + setsid) and exits after the
+# health check + smoke test. PIDFile lets systemd track the real server and
+# kill/restart it properly.
+PIDFile=/home/john/vLLM-2080Ti-Definitive/run-logs/vllm-Qwen3.8-27B-Uncensored-FP8.pid
+WorkingDirectory=/home/john/vLLM-2080Ti-Definitive
+
+# ---- Default profile / runtime configuration -------------------------------
+# Change PROFILE here (and the PIDFile above if SERVED_NAME changes), then:
+#   systemctl --user daemon-reload && systemctl --user restart vllm-2080ti
+Environment=PROFILE=qwen27b/normal/fp8/fp16kv-112K-mtp3-text-only-ok.env
+Environment=MODEL_DIR=/home/john/data/models/Qwen3.8-27B-Uncensored-FP8
+Environment=SERVED_NAME=Qwen3.8-27B-Uncensored-FP8
+Environment=PORT=8080
+Environment=GPU_DEVICES=0,1
+Environment=TP_SIZE=2
+Environment=EXPECTED_GPU_COUNT=2
+Environment=MODE=normal
+Environment=SERVICE_SCOPE=local
+# Matches the previous interactive run: enables --enable-auto-tool-choice,
+# --tool-call-parser qwen3_xml and strict tool calling
+Environment=ENABLE_AUTO_TOOL_CHOICE=1
+
+# ---- Basic environment -----------------------------------------------------
+Environment=HOME=/home/john
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ExecStartPre=/home/john/vLLM-2080Ti-Definitive/systemd/vllm-2080ti-precheck.sh
+ExecStart=/home/john/vLLM-2080Ti-Definitive/launcher.sh --non-interactive
+ExecStop=/home/john/vLLM-2080Ti-Definitive/systemd/vllm-2080ti-stop.sh
+
+# Cold start compiles/captures CUDA graphs and can take a long time
+TimeoutStartSec=30min
+TimeoutStopSec=180
+# Restart automatically if the server process dies
+Restart=on-failure
+RestartSec=30
+
+# vLLM / torch / CUDA benefit from a high open-file limit
+LimitNOFILE=65536
+
+# Launcher output (launch summary, health/smoke result) goes to the journal.
+# The server's own log stays in run-logs/vllm-<name>-<timestamp>.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vllm-2080ti
+
+[Install]
+WantedBy=default.target

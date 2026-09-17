@@ -91,6 +91,33 @@ Force an explicit empty value:
   --set REASONING_PARSER=
 ```
 
+## API Key Authentication
+
+vLLM's OpenAI-compatible server can require a bearer token for `/v1/*` requests.
+The launcher passes the key through the environment, so it is not written into
+the launch command recorded in `run-logs/` and does not appear in the server
+process arguments:
+
+```bash
+./launcher.sh --non-interactive \
+  --model-dir /models/Qwen3-30B-A3B-Instruct-2507-AWQ \
+  --profile qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env \
+  --set VLLM_API_KEY=<key>
+```
+
+When `VLLM_API_KEY` is present, the startup smoke test sends
+`Authorization: Bearer $VLLM_API_KEY`, so a launch with authentication enabled
+still has to pass the smoke request. With no key in the environment, the smoke
+test and the server behave exactly as before.
+
+`VLLM_API_KEY` is a global/advanced runtime env, not a route-profile field, so
+do not put it in `profiles/*.env`. Authentication covers `/v1/*` only:
+`/health`, `/metrics`, `/version`, `/load`, `/tokenize`, and `/detokenize` stay
+open, and `/health` staying open is what the readiness probe relies on. Never
+set `VLLM_SERVER_DEV_MODE=1` on an exposed service, because that mounts
+unauthenticated control endpoints such as `/sleep`, `/wake_up`,
+`/reset_prefix_cache`, and `/collective_rpc`.
+
 ## Derived Defaults
 
 Some launcher fields are still normalized after profile loading:

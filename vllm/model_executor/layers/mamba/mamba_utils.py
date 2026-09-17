@@ -276,10 +276,13 @@ class MambaCopySpec:
     Attributes:
         start_addr (int): Starting address for the memory copy operation.
         num_elements (int): Number of elements to copy from the starting address.
+        valid (bool): False when the requested state slot could not be resolved
+            (stale block bookkeeping). Callers must not issue the copy then.
     """
 
     start_addr: int
     num_elements: int
+    valid: bool = True
 
 
 MambaStateCopyFunc: TypeAlias = Callable[
@@ -296,6 +299,16 @@ Parameters:
 """
 
 
+def _block_idx_is_valid(
+    state: torch.Tensor, block_ids: list[int], block_idx: int
+) -> bool:
+    """Whether ``block_ids[block_idx]`` names a row of ``state``."""
+    if block_idx < 0 or block_idx >= len(block_ids):
+        return False
+    block_id = block_ids[block_idx]
+    return 0 <= block_id < state.shape[0]
+
+
 def get_conv_copy_spec(
     state: torch.Tensor,
     block_ids: list[int],
@@ -307,6 +320,8 @@ def get_conv_copy_spec(
     Works for both SD layout ``(num_blocks, state_len, dim)`` and
     DS layout ``(num_blocks, dim, state_len)``.
     """
+    if not _block_idx_is_valid(state, block_ids, cur_block_idx):
+        return MambaCopySpec(start_addr=0, num_elements=0, valid=False)
     src_block_id = block_ids[cur_block_idx]
     offset = num_accepted_tokens - 1
     if is_conv_state_dim_first():
@@ -335,7 +350,14 @@ def get_temporal_copy_spec(
     num_accepted_tokens: int,
 ) -> MambaCopySpec:
     """Return a MambaCopySpec for copying a temporal state slice."""
-    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    # The state to migrate is the one after the last accepted speculative
+    # token, hence the +num_accepted_tokens-1. Indexing past the request's
+    # block list means the align-mode state bookkeeping is stale (e.g. after a
+    # preemption/resume); resolve no spec instead of raising inside the worker.
+    src_idx = cur_block_idx + num_accepted_tokens - 1
+    if not _block_idx_is_valid(state, block_ids, src_idx):
+        return MambaCopySpec(start_addr=0, num_elements=0, valid=False)
+    src_block_id = block_ids[src_idx]
     src_state = state[src_block_id]
     return MambaCopySpec(
         start_addr=src_state.data_ptr(), num_elements=src_state.numel()

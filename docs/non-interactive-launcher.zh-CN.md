@@ -89,6 +89,28 @@ MODE=fast \
   --set REASONING_PARSER=
 ```
 
+## API 密钥认证
+
+vLLM 的 OpenAI 兼容服务可以对 `/v1/*` 请求要求 bearer token。Launcher 通过环境变量
+传递密钥，因此它不会写入 `run-logs/` 里记录的启动命令，也不会出现在服务进程参数中：
+
+```bash
+./launcher.sh --non-interactive \
+  --model-dir /models/Qwen3-30B-A3B-Instruct-2507-AWQ \
+  --profile qwen27b/normal/int4/fp16kv-256K-mtp3-text-only.env \
+  --set VLLM_API_KEY=<密钥>
+```
+
+环境里存在 `VLLM_API_KEY` 时，启动 smoke test 会带上
+`Authorization: Bearer $VLLM_API_KEY`，因此启用认证的启动仍能通过 smoke 校验；
+环境里没有该变量时，smoke test 与服务行为完全不变。
+
+`VLLM_API_KEY` 属于全局/高级运行时 env，不是路由 profile 字段，所以不要写进
+`profiles/*.env`。认证只覆盖 `/v1/*`：`/health`、`/metrics`、`/version`、`/load`、
+`/tokenize`、`/detokenize` 仍然开放，其中 `/health` 开放正是就绪探测所依赖的。
+对外暴露的服务绝不要设置 `VLLM_SERVER_DEV_MODE=1`，它会挂载 `/sleep`、
+`/wake_up`、`/reset_prefix_cache`、`/collective_rpc` 等免认证控制端点。
+
 ## 派生默认值
 
 profile 加载后，launcher 仍会对部分字段做规范化：

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_SM75_SPEC_SYNC_MODE: Literal["auto", "safe", "nosync"] = "auto"
+    VLLM_GDN_STATE_INDEX_CHECK: bool = False
     VLLM_INT8KV_FA_PREFILL: bool = False
     VLLM_INT8KV_FLASHINFER_PREFILL_BACKEND: str = "fa2"
     VLLM_INT8KV_FA_RAGGED_PREFILL: bool = True
@@ -775,6 +776,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         )()
         or "auto"
     ).lower(),
+    # Debug aid for the hybrid GDN/Mamba speculative-decode path. Costs a
+    # host-side device synchronisation, so it is off by default. Enable it when
+    # chasing an Xid 31 / illegal-memory-access crash: the GDN state slot
+    # indices are then validated on the host and reported with the offending
+    # values instead of faulting on the GPU.
+    "VLLM_GDN_STATE_INDEX_CHECK": lambda: bool(
+        int(os.getenv("VLLM_GDN_STATE_INDEX_CHECK", "0"))
+    ),
     # Fork-specific SM75/Qwen attention and speculative decode controls.
     "VLLM_INT8KV_FA_PREFILL": lambda: bool(
         int(os.getenv("VLLM_INT8KV_FA_PREFILL", "0"))
@@ -842,10 +851,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     .strip()
     .lower(),
     "VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS": lambda: int(
-        os.getenv("VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS", "20480")
+        os.getenv("VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS") or "20480"
     ),
     "VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS": lambda: int(
-        os.getenv("VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS", "0")
+        os.getenv("VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS") or "0"
     ),
     # When serving a turboquant_* KV cache, reserve VRAM for the runtime
     # continuation-prefill dequant workspace *before* the KV cache budget is
@@ -854,22 +863,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set to 0 to restore the legacy behaviour (KV cache sized ignoring the
     # workspace, which can crash with an illegal memory access at deep prefill).
     "VLLM_TQ_RESERVE_PREFILL_WORKSPACE": lambda: bool(
-        int(os.getenv("VLLM_TQ_RESERVE_PREFILL_WORKSPACE", "1"))
+        int(os.getenv("VLLM_TQ_RESERVE_PREFILL_WORKSPACE") or "1")
     ),
     "VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK": lambda: int(
-        os.getenv("VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK", "0")
+        os.getenv("VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK") or "0"
     ),
     "VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS": lambda: int(
-        os.getenv("VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS", "0")
+        os.getenv("VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS") or "0"
     ),
     "VLLM_TURBOQUANT_FORCE_DECODE_SDPA": lambda: bool(
-        int(os.getenv("VLLM_TURBOQUANT_FORCE_DECODE_SDPA", "0"))
+        int(os.getenv("VLLM_TURBOQUANT_FORCE_DECODE_SDPA") or "0")
     ),
     "VLLM_TURBOQUANT_FORCE_CONTINUATION_SDPA": lambda: bool(
-        int(os.getenv("VLLM_TURBOQUANT_FORCE_CONTINUATION_SDPA", "0"))
+        int(os.getenv("VLLM_TURBOQUANT_FORCE_CONTINUATION_SDPA") or "0")
     ),
     "VLLM_TURBOQUANT_FORCE_DECODE_SDPA_MAX_QK_CELLS": lambda: int(
-        os.getenv("VLLM_TURBOQUANT_FORCE_DECODE_SDPA_MAX_QK_CELLS", "131072")
+        os.getenv("VLLM_TURBOQUANT_FORCE_DECODE_SDPA_MAX_QK_CELLS") or "131072"
     ),
     "VLLM_TURBOQUANT_MAX_KV_SPLITS": lambda: (
         int(value)
@@ -877,16 +886,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
         else None
     ),
     "VLLM_TURBOQUANT_DECODE_BLOCK_KV": lambda: int(
-        os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV", "2")
+        os.getenv("VLLM_TURBOQUANT_DECODE_BLOCK_KV") or "2"
     ),
     "VLLM_TURBOQUANT_K8V4_FP8_FORMAT": lambda: os.getenv(
         "VLLM_TURBOQUANT_K8V4_FP8_FORMAT", "auto"
     ),
     "VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE": lambda: bool(
-        int(os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE", "0"))
+        int(os.getenv("VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE") or "0")
     ),
     "VLLM_TURBOQUANT_SKIP_PREFILL_STORE": lambda: bool(
-        int(os.getenv("VLLM_TURBOQUANT_SKIP_PREFILL_STORE", "0"))
+        int(os.getenv("VLLM_TURBOQUANT_SKIP_PREFILL_STORE") or "0")
     ),
     # Allow hybrid Mamba/GDN speculative decode to keep full decode CUDA
     # graphs. This is unsafe for production because accepted speculative

@@ -432,6 +432,16 @@ class GPUModelRunner(
         self.sm75_spec_syncs_enabled = sync_mode == "safe" or (
             sync_mode == "auto" and cache_dtype.startswith("turboquant_")
         )
+        # Log the value the worker actually resolved, not the one the launcher
+        # exported: the sync only exists to prevent the async-spec decode race
+        # that trips later attention kernels with an illegal memory access, so
+        # whether it is armed matters when debugging such a crash.
+        logger.info_once(
+            "SM75 spec sync policy: mode=%s enabled=%s (kv_cache_dtype=%s)",
+            sync_mode,
+            self.sm75_spec_syncs_enabled,
+            cache_dtype,
+        )
 
         self.is_pooling_model = model_config.runner_type == "pooling"
         self.enable_prompt_embeds = model_config.enable_prompt_embeds
@@ -6553,6 +6563,34 @@ class GPUModelRunner(
                 EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+            self._share_flashinfer_workspace_with_drafter()
+
+    def _share_flashinfer_workspace_with_drafter(self) -> None:
+        """Reuse the target FlashInfer workspace for the draft attention layers.
+
+        The draft layer allocates its own ~VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+        (394 MiB by default) workspace lazily on the first drafting call. That
+        happens after the KV cache has already claimed the remaining GPU
+        memory, so on tight SM75 configs (high gpu-memory-utilization) the
+        second workspace can OOM or land in a fragmented allocator block. The
+        target workspace is allocated during the profiling forward pass, so
+        sharing it removes the extra allocation.
+        """
+        shared_workspace = None
+        for kv_cache_groups in self.attn_groups:
+            for attn_group in kv_cache_groups:
+                builder = attn_group.get_metadata_builder(0)
+                if hasattr(builder, "_get_workspace_buffer"):
+                    shared_workspace = builder._get_workspace_buffer()
+                    break
+            if shared_workspace is not None:
+                break
+        if shared_workspace is None:
+            return
+        for attn_group in getattr(self.drafter, "draft_attn_groups", None) or []:
+            builder = attn_group.get_metadata_builder(0)
+            if hasattr(builder, "set_workspace_buffer"):
+                builder.set_workspace_buffer(shared_workspace)
 
     def _check_and_update_cudagraph_mode(
         self,
