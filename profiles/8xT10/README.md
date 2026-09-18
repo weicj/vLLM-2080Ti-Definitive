@@ -12,8 +12,8 @@ host memory with UVA, while `gpu` keeps the table resident in device memory.
 
 | Profile | TP/PP | Context | PLE | 4K/128 | 32K/512 |
 |---|---:|---:|---|---|---|
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 90K | disk | pending audit | pending audit |
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 100K | disk | pending audit | pending audit |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 40K | disk | pending audit | pending audit |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 40K | disk | pending audit | pending audit |
 
 Run the service first, then execute the auditable runner from the repository
 root. It performs one warm-up and three measured samples for each shape and

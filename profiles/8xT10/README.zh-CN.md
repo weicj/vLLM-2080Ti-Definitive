@@ -11,8 +11,8 @@ mmap/page-cache lookup）。`cpu` 使用 pinned host memory + UVA，`gpu` 则将
 
 | Profile | TP/PP | 上下文 | PLE | 4K/128 | 32K/512 |
 |---|---:|---:|---|---|---|
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 90K | disk | 待审计 | 待审计 |
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 100K | disk | 待审计 | 待审计 |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 40K | disk | 待审计 | 待审计 |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 40K | disk | 待审计 | 待审计 |
 
 先启动服务，再从仓库根目录运行审计 runner。它会对每种 shape 执行一次预热和三次
 正式采样，并将 commit、profile、环境、GPU、请求契约和逐样本数据写入 JSON manifest：
