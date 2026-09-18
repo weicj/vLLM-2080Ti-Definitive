@@ -6,14 +6,14 @@ Language: English | [简体中文](README.zh-CN.md)
 
 These routes target eight Tesla T10 GPUs (`0,2,3,4,6,7,8,9`) and use the
 SM75-safe Marlin W4A16 path for ModelOpt NVFP4 weights. They deliberately use
-FP16 KV, `MTP_K=0`, `flashqla_legacy`, NCCL collectives, synchronous scheduling, and explicit
+FP8 KV (currently blocked by the Turing KV allocator), `MTP_K=0`, `flashqla_legacy`, NCCL collectives, synchronous scheduling, and explicit
 `PLE_PLACEMENT=disk` (safetensors mmap/page-cache lookup). `cpu` selects pinned
 host memory with UVA, while `gpu` keeps the table resident in device memory.
 
 | Profile | TP/PP | Context | PLE | 4K/128 | 32K/512 |
 |---|---:|---:|---|---|---|
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 40K | disk | pending audit | pending audit |
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 40K | disk | pending audit | pending audit |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 32K | disk | blocked | blocked |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 32K | disk | blocked | blocked |
 
 Run the service first, then execute the auditable runner from the repository
 root. It performs one warm-up and three measured samples for each shape and

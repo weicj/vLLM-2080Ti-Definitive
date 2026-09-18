@@ -5,14 +5,14 @@
 ## Qwen3.8 Flash-Next NVFP4（实验性 PP）
 
 以下路线面向八张 Tesla T10（`0,2,3,4,6,7,8,9`），使用 ModelOpt NVFP4
-权重的 SM75 安全 Marlin W4A16 路径。路线固定 FP16 KV、`MTP_K=0`、
+权重的 SM75 安全 Marlin W4A16 路径。路线固定 FP8 KV（当前被 Turing KV allocator 阻塞）、`MTP_K=0`、
 `flashqla_legacy`、NCCL collective、同步调度，并显式设置 `PLE_PLACEMENT=disk`（safetensors
 mmap/page-cache lookup）。`cpu` 使用 pinned host memory + UVA，`gpu` 则将表常驻显存。
 
 | Profile | TP/PP | 上下文 | PLE | 4K/128 | 32K/512 |
 |---|---:|---:|---|---|---|
-| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 40K | disk | 待审计 | 待审计 |
-| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 40K | disk | 待审计 | 待审计 |
+| `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 32K | disk | 阻塞 | 阻塞 |
+| `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 32K | disk | 阻塞 | 阻塞 |
 
 先启动服务，再从仓库根目录运行审计 runner。它会对每种 shape 执行一次预热和三次
 正式采样，并将 commit、profile、环境、GPU、请求契约和逐样本数据写入 JSON manifest：
