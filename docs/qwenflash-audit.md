@@ -61,3 +61,14 @@ They show successful TP4xPP2 startup at 90K and 100K maximum context. These numb
 contract and are not promotion evidence for the current branch. No matching,
 auditable 32K/512 result or 35 tok/s TP4xPP2 result was found in the checked-in
 records; those remain explicit follow-up targets.
+
+## 2026-09-15 evidence boundary
+
+The `.31` record from 2026-09-15 is a different experiment: runtime
+`v0.29.1rc0+33.gb23433088b`, tensor parallel size 2, `max_model_len=196608`,
+FP8 KV, and 565,438 GPU KV tokens. It contains successful HTTP requests, but no
+request-side timing manifest. It therefore cannot establish the remembered
+TP4xPP2 `2000+` prefill / `30+` decode result. An older 2026-08-30 TP4xPP2
+startup used `v0.27.1`, `max_model_len=8192`, and logged a Triton/FLA fallback
+because the SM75 FlashQLA extension was unavailable; it is likewise not the
+target result. These records are retained to prevent cross-runtime attribution.
