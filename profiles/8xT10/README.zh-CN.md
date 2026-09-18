@@ -8,6 +8,8 @@
 权重的 SM75 安全 Marlin W4A16 路径。路线固定 FP8 KV（当前被 Turing KV allocator 阻塞）、`MTP_K=0`、
 `flashqla_legacy`、NCCL collective、同步调度，并显式设置 `PLE_PLACEMENT=disk`（safetensors
 mmap/page-cache lookup）。`cpu` 使用 pinned host memory + UVA，`gpu` 则将表常驻显存。
+文件名中的 `fp16kv` 是为兼容既有 launcher 保留的旧名称；当前提交的 profile
+实际设置为 `KV_CACHE_DTYPE=fp8`。
 
 | Profile | TP/PP | 上下文 | PLE | 4K/128 | 32K/512 |
 |---|---:|---:|---|---|---|

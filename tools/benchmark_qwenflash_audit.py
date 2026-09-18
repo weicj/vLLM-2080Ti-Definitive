@@ -210,12 +210,17 @@ def main() -> int:
         ("MTP_K", "0"),
         ("SPECULATIVE_METHOD", "none"),
         ("PLE_PLACEMENT", "disk"),
-        ("KV_CACHE_DTYPE", "float16"),
     ):
         if values.get(key) != expected:
             raise SystemExit(
                 f"profile must set {key}={expected}, got {values.get(key)!r}"
             )
+    kv_dtype = values.get("KV_CACHE_DTYPE", "").lower()
+    if kv_dtype not in {"float16", "fp8"}:
+        raise SystemExit(
+            "profile must set KV_CACHE_DTYPE=float16 or fp8, "
+            f"got {values.get('KV_CACHE_DTYPE')!r}"
+        )
     if values.get("SERVED_NAME") != args.served_name:
         profile_served_name = values.get("SERVED_NAME")
         raise SystemExit(
@@ -235,6 +240,7 @@ def main() -> int:
         "git": git_metadata(),
         "gpu": gpu_metadata(),
         "benchmark_python": os.path.abspath(args.python),
+        "kv_cache_dtype": kv_dtype,
         "environment": {
             key: os.environ.get(key)
             for key in (

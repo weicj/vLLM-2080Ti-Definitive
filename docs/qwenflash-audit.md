@@ -20,10 +20,13 @@ the audit script.
 
 The JSON manifest records the UTC interval, relative profile and all route
 keys, model path, server URL, git commit/branch/dirty state, GPU inventory,
-benchmark contract, and every raw `profile_request.py` record. The profile is
-required to declare FP16 KV, `MTP_K=0`, `SPECULATIVE_METHOD=none`, and
-`PLE_PLACEMENT=disk`; this prevents accidentally mixing MTP, EXL3, or an
-unrecorded PLE placement into the comparison.
+benchmark contract, the effective KV cache dtype, and every raw
+`profile_request.py` record. Profiles may use `float16` or `fp8` KV, but the
+dtype is part of the result identity and must not be compared across runs
+without calling out the difference. The profile is also required to declare
+`MTP_K=0`, `SPECULATIVE_METHOD=none`, and `PLE_PLACEMENT=disk`; this prevents
+accidentally mixing MTP, EXL3, or an unrecorded PLE placement into the
+comparison.
 
 The runner does not start or stop vLLM. Start each profile with the intended
 GPU selection and port, run the helper, then stop the service using the normal

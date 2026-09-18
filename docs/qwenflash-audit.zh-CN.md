@@ -16,10 +16,11 @@ prompt/completion token 数、HTTP 200、stream 完成以及正数的 prefill/de
 `--python /path/to/runtime/.venv/bin/python`；默认使用启动审计脚本的解释器。
 
 JSON manifest 记录 UTC 时间段、相对 profile 和所有路线 key、模型路径、服务 URL、
-git commit/branch/dirty 状态、GPU 清单、benchmark 契约以及每个
-`profile_request.py` 原始记录。profile 必须声明 FP16 KV、`MTP_K=0`、
-`SPECULATIVE_METHOD=none` 和 `PLE_PLACEMENT=disk`，避免把 MTP、EXL3 或未记录的
-PLE placement 混入对比。
+git commit/branch/dirty 状态、GPU 清单、benchmark 契约、实际 KV cache dtype，以及
+每个 `profile_request.py` 原始记录。profile 可以使用 `float16` 或 `fp8` KV，但
+dtype 是结果身份的一部分，不能在不注明差异的情况下直接比较。profile 仍必须声明
+`MTP_K=0`、`SPECULATIVE_METHOD=none` 和 `PLE_PLACEMENT=disk`，避免把 MTP、EXL3
+或未记录的 PLE placement 混入对比。
 
 runner 不会启动或停止 vLLM。请按目标 GPU 和端口用正常 launcher 生命周期启动每个
 profile，运行 helper，再停止服务。manifest 建议写到源码树外（例如

@@ -9,6 +9,8 @@ SM75-safe Marlin W4A16 path for ModelOpt NVFP4 weights. They deliberately use
 FP8 KV (currently blocked by the Turing KV allocator), `MTP_K=0`, `flashqla_legacy`, NCCL collectives, synchronous scheduling, and explicit
 `PLE_PLACEMENT=disk` (safetensors mmap/page-cache lookup). `cpu` selects pinned
 host memory with UVA, while `gpu` keeps the table resident in device memory.
+The `fp16kv` filename is retained as a compatibility name; the checked-in
+profiles currently set `KV_CACHE_DTYPE=fp8`.
 
 | Profile | TP/PP | Context | PLE | 4K/128 | 32K/512 |
 |---|---:|---:|---|---|---|
