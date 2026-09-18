@@ -163,9 +163,13 @@ class DiskMappedPLEEmbedding(nn.Module):
 
     def lookup(self, indices: torch.Tensor) -> torch.Tensor:
         input_shape = tuple(indices.shape)
-        flat = indices.reshape(-1).to(device="cpu", dtype=torch.long)
+        flat_source = indices.reshape(-1)
+        flat = torch.empty(flat_source.numel(), dtype=torch.long, pin_memory=True)
+        flat.copy_(flat_source, non_blocking=True)
         output = torch.empty(
-            (flat.numel(), self.embedding_dim), dtype=self.weight_dtype
+            (flat.numel(), self.embedding_dim),
+            dtype=self.weight_dtype,
+            pin_memory=True,
         )
         if flat.numel():
             shard_ids = torch.div(flat, self._shard_size, rounding_mode="floor")
@@ -174,7 +178,7 @@ class DiskMappedPLEEmbedding(nn.Module):
                 local = flat[mask] - int(shard_index) * self._shard_size
                 output[mask] = self._shards[int(shard_index)].index_select(0, local)
         return output.reshape(*input_shape, self.embedding_dim).to(
-            device=indices.device
+            device=indices.device, non_blocking=True
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
