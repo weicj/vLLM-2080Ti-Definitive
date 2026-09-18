@@ -141,10 +141,9 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
 
 
 @pytest.mark.parametrize("ple_layer_ids", [[1], []])
-def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> None:
-    """PLE needs raw input_ids, which non-first pipeline ranks never see. The
-    rest of the architecture is PP-capable, so the refusal must be conditional
-    -- and must land before the engine spends time loading weights."""
+def test_qwen4_exp_allows_pipeline_parallel_with_stage_local_ple(
+    ple_layer_ids,
+) -> None:
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),
@@ -158,18 +157,13 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
     with patch.object(
         Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
     ):
-        if ple_layer_ids:
-            with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):
-                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(
-                    vllm_config
-                )
-        else:
-            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 
 def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
+    model_state.has_local_ple = True
     model_state.ngram_context_len = 3
     model_state.ngram_eos_token_id = 99
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
@@ -224,9 +218,22 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     assert model_inputs["ngram_context"].data_ptr() == ngram_context.data_ptr()
 
 
+def test_qwen4_exp_model_state_skips_ple_inputs_on_other_pipeline_stages() -> None:
+    model_state = object.__new__(Qwen4ExpModelState)
+    model_state.has_local_ple = False
+
+    with patch.object(
+        MambaHybridModelState, "prepare_inputs", return_value={"base": True}
+    ):
+        result = model_state.prepare_inputs(SimpleNamespace(), SimpleNamespace())
+
+    assert result == {"base": True}
+
+
 def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
+    model_state.has_local_ple = True
     model_state.ngram_eos_token_id = 99
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
     model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)

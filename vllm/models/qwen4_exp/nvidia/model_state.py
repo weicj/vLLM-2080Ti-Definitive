@@ -28,17 +28,14 @@ class Qwen4ExpModelState(MambaHybridModelState):
         config = self.model_config.hf_text_config
         self.uses_ngram_embedding = bool(config.ple_layer_ids)
         if not self.uses_ngram_embedding:
+            self.has_local_ple = False
             self.ngram_context_len = 0
             self.ngram_eos_token_id = 0
             return
 
-        if vllm_config.parallel_config.pipeline_parallel_size > 1:
-            raise RuntimeError(
-                "N-gram PLE embedding currently requires "
-                "pipeline_parallel_size=1 because non-first pipeline ranks do "
-                "not receive the raw input_ids required by PLE. Please run "
-                "with PP=1."
-            )
+        self.has_local_ple = any(
+            getattr(module, "ple", None) is not None for module in model.modules()
+        )
 
         self.ngram_context_len = int(config.ngram_size) - 1
         if self.ngram_context_len <= 0:
@@ -98,7 +95,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
         req_states: RequestState,
     ) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
-        if not self.uses_ngram_embedding:
+        if not self.has_local_ple:
             return model_inputs
 
         num_reqs_padded = input_batch.num_reqs_after_padding
@@ -118,7 +115,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
         num_tokens: int,
     ) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
-        if not self.uses_ngram_embedding:
+        if not self.has_local_ple:
             return model_inputs
 
         query_start_loc = self.ple_query_start_loc
