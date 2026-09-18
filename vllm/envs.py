@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_PLE_CPU_OFFLOAD: bool = True
+    VLLM_PLE_PLACEMENT: Literal["auto", "disk", "cpu", "gpu"] = "auto"
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -370,6 +371,29 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def _get_ple_placement() -> str:
+    """Resolve PLE storage aliases while preserving the legacy boolean flag."""
+    value = os.getenv("VLLM_PLE_PLACEMENT", "auto").strip().lower()
+    aliases = {
+        "auto": "auto",
+        "disk": "disk",
+        "ssd": "disk",
+        "mmap": "disk",
+        "cpu": "cpu",
+        "ram": "cpu",
+        "memory": "cpu",
+        "gpu": "gpu",
+        "vram": "gpu",
+    }
+    try:
+        return aliases[value]
+    except KeyError as exc:
+        choices = "auto, disk (ssd/mmap), cpu (ram/memory), gpu (vram)"
+        raise ValueError(
+            f"VLLM_PLE_PLACEMENT must be one of {choices}; got {value!r}"
+        ) from exc
 
 
 def maybe_convert_scale_out_endpoints(value: str | None) -> bool | None:
@@ -2131,6 +2155,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Store n-gram embedding tables in pinned CPU memory for UVA lookup.
     "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "1"))),
+    "VLLM_PLE_PLACEMENT": lambda: _get_ple_placement(),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))

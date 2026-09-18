@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp n-gram embeddings with device and pinned-host storage."""
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import ClassVar
+from pathlib import Path
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
@@ -47,6 +50,152 @@ from ..common.ple import PLEVocabParallelEmbedding
 from .ops.ple import ple_ngram_ids
 
 logger = init_logger(__name__)
+
+
+class DiskMappedPLEEmbedding(nn.Module):
+    """FP8 PLE shards retained as safetensors mappings on local storage.
+
+    ``safe_open().get_tensor`` exposes the file-backed CPU tensor. Requests
+    gather only their rows and copy that small result to the active GPU; this
+    is SSD mmap/page-cache fallback, not direct request-time NVMe I/O.
+    """
+
+    is_disk_mapped = True
+    supports_prefetch = False
+
+    def __init__(
+        self,
+        checkpoint_path: str,
+        key_prefix: str,
+        num_embeddings: int,
+        embedding_dim: int,
+        split_ngram_parts: int,
+        params_dtype: torch.dtype,
+    ) -> None:
+        super().__init__()
+        root = Path(checkpoint_path)
+        if not root.is_dir():
+            raise FileNotFoundError(
+                "VLLM_PLE_PLACEMENT=disk requires a local model directory; "
+                f"got {checkpoint_path!r}. Download the checkpoint locally or "
+                "use VLLM_PLE_PLACEMENT=cpu/gpu."
+            )
+        index_path = root / "model.safetensors.index.json"
+        if not index_path.is_file():
+            raise FileNotFoundError(
+                f"VLLM_PLE_PLACEMENT=disk requires a safetensors index: {index_path}"
+            )
+        from safetensors import safe_open
+
+        index = json.loads(index_path.read_text())
+        weight_map = index.get("weight_map", {})
+        if not isinstance(weight_map, dict):
+            raise ValueError(f"invalid safetensors weight_map in {index_path}")
+        self.org_vocab_size = int(num_embeddings)
+        self.embedding_dim = int(embedding_dim)
+        self.weight_dtype = torch.float8_e4m3fn
+        self.weight_scale = nn.Parameter(
+            torch.ones(1, dtype=params_dtype), requires_grad=False
+        )
+        self._shard_size = (
+            self.org_vocab_size + split_ngram_parts - 1
+        ) // split_ngram_parts
+        self._shards: dict[int, torch.Tensor] = {}
+        self._handles: dict[str, Any] = {}
+        key_prefixes = [key_prefix]
+        if "language_model.model." in key_prefix:
+            key_prefixes.append(
+                key_prefix.replace("language_model.model.", "model.language_model.", 1)
+            )
+        markers = tuple(f"{prefix}.shard_" for prefix in key_prefixes)
+        scale_names = [f"{prefix}.weight_scale" for prefix in key_prefixes]
+        matches: dict[int, list[str]] = {}
+        for name in weight_map:
+            if name in scale_names:
+                file_path = str(root / weight_map[name])
+                handle = self._handles.get(file_path)
+                if handle is None:
+                    handle = safe_open(file_path, framework="pt", device="cpu")
+                    self._handles[file_path] = handle
+                scale = handle.get_tensor(name)
+                if scale.numel() != 1:
+                    raise ValueError(
+                        "disk PLE expects one global weight scale, got "
+                        f"{tuple(scale.shape)}"
+                    )
+                self.weight_scale.data.copy_(
+                    scale.reshape_as(self.weight_scale).to(params_dtype)
+                )
+                continue
+            for marker in markers:
+                pos = name.rfind(marker)
+                if pos >= 0 and name.endswith(".weight"):
+                    text = name[pos + len(marker) : -len(".weight")]
+                    if text.isdigit():
+                        matches.setdefault(int(text), []).append(name)
+                    break
+        for shard_index in range(split_ngram_parts):
+            names = matches.get(shard_index, [])
+            if len(names) != 1:
+                raise RuntimeError(
+                    "unable to resolve exactly one PLE shard in checkpoint: "
+                    f"prefix={key_prefix!r}, shard={shard_index}, matches={names!r}"
+                )
+            tensor_name = names[0]
+            file_path = str(root / weight_map[tensor_name])
+            handle = self._handles.get(file_path)
+            if handle is None:
+                handle = safe_open(file_path, framework="pt", device="cpu")
+                self._handles[file_path] = handle
+            tensor = handle.get_tensor(tensor_name)
+            expected_rows = min(
+                self._shard_size,
+                self.org_vocab_size - shard_index * self._shard_size,
+            )
+            if tuple(tensor.shape) != (expected_rows, self.embedding_dim):
+                raise ValueError(
+                    f"PLE shard {tensor_name} has shape {tuple(tensor.shape)}, "
+                    f"expected {(expected_rows, self.embedding_dim)}"
+                )
+            if tensor.dtype != self.weight_dtype:
+                raise ValueError(f"disk PLE expects FP8 shards, got {tensor.dtype}")
+            self._shards[shard_index] = tensor
+
+    def lookup(self, indices: torch.Tensor) -> torch.Tensor:
+        input_shape = tuple(indices.shape)
+        flat = indices.reshape(-1).to(device="cpu", dtype=torch.long)
+        output = torch.empty(
+            (flat.numel(), self.embedding_dim), dtype=self.weight_dtype
+        )
+        if flat.numel():
+            shard_ids = torch.div(flat, self._shard_size, rounding_mode="floor")
+            for shard_index in torch.unique(shard_ids, sorted=True).tolist():
+                mask = shard_ids == shard_index
+                local = flat[mask] - int(shard_index) * self._shard_size
+                output[mask] = self._shards[int(shard_index)].index_select(0, local)
+        return output.reshape(*input_shape, self.embedding_dim).to(
+            device=indices.device
+        )
+
+    def forward(self, indices: torch.Tensor) -> torch.Tensor:
+        return self.lookup(indices)
+
+    def dequantize(
+        self, embeddings: torch.Tensor, output_dtype: torch.dtype
+    ) -> torch.Tensor:
+        scale = self.weight_scale.to(
+            device=embeddings.device,
+            dtype=output_dtype,
+        )
+        return embeddings.to(output_dtype) * scale
+
+    def close(self) -> None:
+        self._shards.clear()
+        self._handles.clear()
+
+    def __del__(self) -> None:
+        if hasattr(self, "_shards"):
+            self.close()
 
 
 class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
@@ -699,32 +848,54 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        engram_config = get_current_vllm_config().engram_config
-        embedding_cls = (
-            Qwen4ExpPLEPinnedHostEmbedding
-            if engram_config is not None and engram_config.cpu_offload
-            else Qwen4ExpPLEDeviceEmbedding
-        )
-        self.ngram_embedding = embedding_cls(
-            padded_vocab_size,
-            self.head_dim,
-            params_dtype=params_dtype,
-            padding_size=divisor,
-            prefix=embedding_prefix,
-            embedding_method=embedding_quant_method,
-            num_ngram_heads=self.ngram_heads,
-            max_total_tokens=max_total_tokens,
-            data_parallel_rank=data_parallel_rank,
-        )
-        weight = self.ngram_embedding.weight
+        placement = envs.VLLM_PLE_PLACEMENT
+        if placement == "auto":
+            engram_config = get_current_vllm_config().engram_config
+            placement = (
+                "cpu"
+                if engram_config is not None and engram_config.cpu_offload
+                else "gpu"
+            )
+        if placement == "disk":
+            model_path = get_current_vllm_config().model_config.model
+            self.ngram_embedding = DiskMappedPLEEmbedding(
+                model_path,
+                embedding_prefix,
+                padded_vocab_size,
+                self.head_dim,
+                self.split_ngram_parts,
+                params_dtype,
+            )
+        else:
+            embedding_cls = (
+                Qwen4ExpPLEPinnedHostEmbedding
+                if placement == "cpu"
+                else Qwen4ExpPLEDeviceEmbedding
+            )
+            self.ngram_embedding = embedding_cls(
+                padded_vocab_size,
+                self.head_dim,
+                params_dtype=params_dtype,
+                padding_size=divisor,
+                prefix=embedding_prefix,
+                embedding_method=embedding_quant_method,
+                num_ngram_heads=self.ngram_heads,
+                max_total_tokens=max_total_tokens,
+                data_parallel_rank=data_parallel_rank,
+            )
+        weight = getattr(self.ngram_embedding, "weight", None)
         logger.info(
             "Initialized PLE embedding %s: quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
             type(embedding_quant_method).__name__,
-            weight.dtype,
-            weight.device,
-            weight.is_pinned(),
+            getattr(
+                weight,
+                "dtype",
+                getattr(self.ngram_embedding, "weight_dtype", params_dtype),
+            ),
+            getattr(weight, "device", "disk"),
+            getattr(weight, "is_pinned", lambda: False)(),
         )
 
     @staticmethod
@@ -905,6 +1076,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"split_ngram_parts={self.split_ngram_parts}"
                     )
                 embedding = self.ngram_embedding
+                if getattr(embedding, "is_disk_mapped", False):
+                    loaded.add("ngram_embedding.weight")
+                    continue
                 shard_size = (
                     embedding.org_vocab_size + self.split_ngram_parts - 1
                 ) // self.split_ngram_parts

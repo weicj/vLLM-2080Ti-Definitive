@@ -31,6 +31,30 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("auto", "auto"),
+        ("ssd", "disk"),
+        ("mmap", "disk"),
+        ("ram", "cpu"),
+        ("memory", "cpu"),
+        ("vram", "gpu"),
+    ],
+)
+def test_ple_placement_aliases(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: str
+):
+    monkeypatch.setenv("VLLM_PLE_PLACEMENT", value)
+    assert expected == envs.VLLM_PLE_PLACEMENT
+
+
+def test_ple_placement_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_PLE_PLACEMENT", "nvme-direct")
+    with pytest.raises(ValueError, match="VLLM_PLE_PLACEMENT"):
+        _ = envs.VLLM_PLE_PLACEMENT
+
+
 def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch: pytest.MonkeyPatch,
 ):
