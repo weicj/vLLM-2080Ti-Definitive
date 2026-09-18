@@ -6,7 +6,7 @@ Language: English | [简体中文](README.zh-CN.md)
 
 These routes target eight Tesla T10 GPUs (`0,2,3,4,6,7,8,9`) and use the
 SM75-safe Marlin W4A16 path for ModelOpt NVFP4 weights. They deliberately use
-FP16 KV, `MTP_K=0`, `flashqla_legacy`, synchronous scheduling, and explicit
+FP16 KV, `MTP_K=0`, `flashqla_legacy`, NCCL collectives, synchronous scheduling, and explicit
 `PLE_PLACEMENT=disk` (safetensors mmap/page-cache lookup). `cpu` selects pinned
 host memory with UVA, while `gpu` keeps the table resident in device memory.
 

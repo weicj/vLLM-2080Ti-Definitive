@@ -6,7 +6,7 @@
 
 以下路线面向八张 Tesla T10（`0,2,3,4,6,7,8,9`），使用 ModelOpt NVFP4
 权重的 SM75 安全 Marlin W4A16 路径。路线固定 FP16 KV、`MTP_K=0`、
-`flashqla_legacy`、同步调度，并显式设置 `PLE_PLACEMENT=disk`（safetensors
+`flashqla_legacy`、NCCL collective、同步调度，并显式设置 `PLE_PLACEMENT=disk`（safetensors
 mmap/page-cache lookup）。`cpu` 使用 pinned host memory + UVA，`gpu` 则将表常驻显存。
 
 | Profile | TP/PP | 上下文 | PLE | 4K/128 | 32K/512 |
