@@ -15,6 +15,14 @@ host memory with UVA, while `gpu` keeps the table resident in device memory.
 | `qwen38flashnext/w4a16/experimental/tp4pp2-fp16kv-nomtp-text.env` | 4x2 | 32K | disk | blocked | blocked |
 | `qwen38flashnext/w4a16/experimental/tp2pp4-fp16kv-nomtp-text.env` | 2x4 | 32K | disk | blocked | blocked |
 
+Historical `.31` baseline (not current promotion evidence): the earlier
+QwenFlash PP validation recorded TP4xPP2 at `1,615.30 / 21.99 tok/s` for 4K/128
+with 121,139 GPU KV tokens, and TP2xPP4 at `1,979.79 / 10.74 tok/s` with
+131,872 GPU KV tokens. A higher-capacity TP4xPP2 run recorded `1,697.99 /
+28.18 tok/s` and 100,031 GPU KV tokens. Those records used the pre-audit
+runtime/profile and do not establish the current branch's FP8-KV status or a
+32K/512 result.
+
 Run the service first, then execute the auditable runner from the repository
 root. It performs one warm-up and three measured samples for each shape and
 writes commit, profile, environment, GPU, request-contract, and per-sample
