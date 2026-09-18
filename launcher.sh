@@ -796,8 +796,10 @@ ROUTE_PROFILE_KEYS=(
   MODEL_FAMILY
   PROFILE_GROUP
   MODEL_VARIANT
+  PLE_PLACEMENT
   TP_SIZE
   PP_SIZE
+  VLLM_PP_LAYER_PARTITION
   QUANTIZATION
   KV_CACHE_DTYPE
   MAX_MODEL_LEN
@@ -835,6 +837,7 @@ ROUTE_PROFILE_KEYS=(
   VLLM_INT8KV_FA_CASCADE_TILE_TOKENS
   VLLM_INT8KV_FA_CONTINUATION_DEQUANT
   VLLM_INT8KV_FA_PREFILL
+  VLLM_FORCE_NVFP4_W4A16
 )
 
 NON_INTERACTIVE_CONFIG_KEYS=(
@@ -1228,10 +1231,12 @@ save_manager_state() {
     printf 'MODEL_FAMILY=%q\n' "${MODEL_FAMILY:-}"
     printf 'PROFILE_GROUP=%q\n' "${PROFILE_GROUP:-}"
     printf 'MODEL_VARIANT=%q\n' "${MODEL_VARIANT:-}"
+    printf 'PLE_PLACEMENT=%q\n' "${PLE_PLACEMENT:-}"
     printf 'SERVED_NAME=%q\n' "${SERVED_NAME:-}"
     printf 'GPU_DEVICES=%q\n' "${GPU_DEVICES:-}"
     printf 'TP_SIZE=%q\n' "${TP_SIZE:-}"
     printf 'PP_SIZE=%q\n' "${PP_SIZE:-}"
+    printf 'VLLM_PP_LAYER_PARTITION=%q\n' "${VLLM_PP_LAYER_PARTITION:-}"
     printf 'QUANTIZATION=%q\n' "${QUANTIZATION:-}"
     printf 'KV_CACHE_DTYPE=%q\n' "${KV_CACHE_DTYPE:-}"
     printf 'MAMBA_CACHE_MODE=%q\n' "${MAMBA_CACHE_MODE:-}"
@@ -1498,6 +1503,54 @@ current_reasoning_label() {
     label+=" / default budget=$REASONING_BUDGET"
   fi
   printf '%s\n' "$label"
+}
+
+normalize_ple_placement_value() {
+  case "${1,,}" in
+    ""|auto)
+      printf 'auto\n'
+      ;;
+    disk|ssd|mmap)
+      printf 'disk\n'
+      ;;
+    cpu|ram|memory)
+      printf 'cpu\n'
+      ;;
+    gpu|vram)
+      printf 'gpu\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_ple_placement_defaults() {
+  local placement
+
+  if [[ "${MODEL_FAMILY:-}" != qwen4* ]]; then
+    unset PLE_PLACEMENT VLLM_PLE_PLACEMENT
+    return 0
+  fi
+  placement=${PLE_PLACEMENT:-${VLLM_PLE_PLACEMENT:-auto}}
+  PLE_PLACEMENT=$(normalize_ple_placement_value "$placement") || {
+    echo "ERROR: PLE_PLACEMENT must be auto, disk, cpu, or gpu." >&2
+    return 1
+  }
+}
+
+current_ple_placement_label() {
+  if [[ "${MODEL_FAMILY:-}" != qwen4* ]]; then
+    printf 'not applicable\n'
+    return 0
+  fi
+  case "${PLE_PLACEMENT:-auto}" in
+    auto) printf 'auto (legacy CPU-offload policy)\n' ;;
+    disk) printf 'disk (safetensors mmap/page cache)\n' ;;
+    cpu) printf 'CPU pinned memory (UVA)\n' ;;
+    gpu) printf 'GPU resident\n' ;;
+    *) printf '%s\n' "${PLE_PLACEMENT:-auto}" ;;
+  esac
 }
 
 reasoning_parser_is_disabled() {
@@ -4551,6 +4604,15 @@ set_sm75_runtime_env() {
   # FlashInfer's Ninja files contain absolute venv and CUDA include paths.
   # Isolate them per worktree so experiments cannot poison this runtime.
   export FLASHINFER_WORKSPACE_BASE=${FLASHINFER_WORKSPACE_BASE:-"$MANAGER_ROOT"}
+  if [[ "${MODEL_FAMILY:-}" == qwen4* ]]; then
+    export VLLM_PLE_PLACEMENT="${PLE_PLACEMENT:-auto}"
+    case "$VLLM_PLE_PLACEMENT" in
+      disk|cpu) export VLLM_PLE_CPU_OFFLOAD=1 ;;
+      gpu) export VLLM_PLE_CPU_OFFLOAD=0 ;;
+    esac
+  else
+    unset VLLM_PLE_PLACEMENT VLLM_PLE_CPU_OFFLOAD
+  fi
   if [[ "${KV_CACHE_DTYPE:-}" == "int8_per_token_head" ]]; then
     export VLLM_INT8KV_FA_PREFILL=${VLLM_INT8KV_FA_PREFILL:-1}
     if [[ "$MODE" == "safe" ]]; then
@@ -5687,6 +5749,7 @@ prepare_runtime_defaults() {
   MODE=${MODE:-normal}
   normalize_mode
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
+  normalize_ple_placement_defaults || return 1
   normalize_message_type_defaults
   apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
@@ -5737,6 +5800,7 @@ Launch summary:
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)
   Custom all-reduce:    $(current_custom_all_reduce_label)
+  PLE placement:        $(current_ple_placement_label)
   Mamba cache mode:     ${MAMBA_CACHE_MODE:-auto}
   Context tokens:       $MAX_MODEL_LEN
   GPU util:             $GPU_UTIL

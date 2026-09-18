@@ -12,6 +12,7 @@ Profile 首先按硬件分组，再按模型、权重格式和启动模式分层
 profiles/
   2x2080Ti/   # [硬件说明](2x2080Ti/README.zh-CN.md)
   4xT10/      # [硬件说明](4xT10/README.zh-CN.md)
+  8xT10/      # [硬件说明](8xT10/README.zh-CN.md)
 ```
 
 Profile 文件名统一使用 `<解码类型>-<KV精度>-<并发数><上下文>-<消息类型>.env`。
@@ -24,3 +25,7 @@ Profile 文件名统一使用 `<解码类型>-<KV精度>-<并发数><上下文>-
 `detailed`，可在 Launcher 中切换。
 
 选择 profile 后，可执行 `./launcher.sh --print-config` 检查最终生效的路线参数。
+
+八张 T10 的 Qwen3.8 Flash-Next PP profile 说明见
+[`8xT10/README.zh-CN.md`](8xT10/README.zh-CN.md)。在审计 runner 完成预热和三次正式
+采样并写出 manifest 前，吞吐数据会保留为待测；历史数字不会未经复测直接晋升到路线清单。

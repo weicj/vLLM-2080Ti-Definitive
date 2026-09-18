@@ -14,6 +14,7 @@ startup mode:
 profiles/
   2x2080Ti/   # [hardware-specific guide](2x2080Ti/README.md)
   4xT10/      # [hardware-specific guide](4xT10/README.md)
+  8xT10/      # [hardware-specific guide](8xT10/README.md)
 ```
 
 Profile filenames use `<decoder>-<kv>-<concurrency><context>-<message>.env`.
@@ -27,3 +28,8 @@ Per-request speculative metrics are a Launcher setting:
 
 Use `./launcher.sh --print-config` after selecting a profile to inspect the
 resolved route before starting the service.
+
+The eight-T10 Qwen3.8 Flash-Next PP profiles are documented in
+[`8xT10/README.md`](8xT10/README.md). Their measured throughput is intentionally
+left pending until the auditable warm-up plus three-sample runner writes a
+manifest; historical numbers are not silently promoted into this catalog.
