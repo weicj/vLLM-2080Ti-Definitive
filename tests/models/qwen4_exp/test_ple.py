@@ -31,6 +31,8 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    _disable_ple_embedding_tp,
+    _resolve_ple_embedding_method,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -83,6 +85,36 @@ def _set_test_embedding_weight_loader(embedding) -> None:
         tp_start=embedding.shard_indices.org_vocab_start_index,
         tp_end=embedding.shard_indices.org_vocab_end_index,
     )
+
+
+def test_ple_embedding_uses_opt_in_quantizer_method() -> None:
+    fallback = Qwen4ExpPLEUnquantizedEmbeddingMethod()
+    selected = Qwen4ExpPLEFp8EmbeddingMethod()
+
+    class StreamedEmbeddingQuantizer:
+        supports_ple_embedding = True
+
+        def get_quant_method(self, layer: nn.Module, prefix: str):
+            assert isinstance(layer, nn.Module)
+            assert prefix == "layers.1.ngram_embedding"
+            return selected
+
+        def disable_embedding_tensor_parallel(self, prefix: str) -> bool:
+            return prefix.endswith("ngram_embedding")
+
+    quantizer = StreamedEmbeddingQuantizer()
+    assert (
+        _resolve_ple_embedding_method(
+            quantizer,
+            nn.Module(),
+            "layers.1.ngram_embedding",
+            fallback,
+        )
+        is selected
+    )
+    assert _disable_ple_embedding_tp(quantizer, "layers.1.ngram_embedding")
+    assert not _disable_ple_embedding_tp(quantizer, "layers.1.key_proj")
+    assert not _disable_ple_embedding_tp(None, "layers.1.ngram_embedding")
 
 
 def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
