@@ -3,6 +3,7 @@
 """Triton kernels for Qwen4Exp QSA index selection."""
 
 import torch
+from vllm.platforms import current_platform
 
 import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -397,12 +398,12 @@ def _prefill_logits(
     logits = torch.empty(
         (num_queries, logits_width), dtype=torch.float32, device=q.device
     )
-    # tuned on GB300
-    if k_cache.dtype == torch.float8_e4m3fn:
+    if not current_platform.has_device_capability(80):
+        TILE_R, BLOCK_N, STAGES, num_warps = 16, 32, 2, 8
+    elif k_cache.dtype == torch.float8_e4m3fn:
         TILE_R, STAGES, num_warps = 32, 2, 8
     else:
-        TILE_R, STAGES, num_warps = 64, 2, 4
-    BLOCK_N = 64
+        TILE_R, BLOCK_N, STAGES, num_warps = 64, 64, 2, 4
     K_TILES = 16
     grid = (
         page_table.shape[0],
