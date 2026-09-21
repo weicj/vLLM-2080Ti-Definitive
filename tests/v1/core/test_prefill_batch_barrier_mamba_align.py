@@ -52,7 +52,9 @@ PROMPT_LENS = (4096, 8192, 32768)
 
 
 def _build_scheduler(
-    max_num_batched_tokens: int = 2048, max_num_seqs: int = 2
+    max_num_batched_tokens: int = 2048,
+    max_num_seqs: int = 2,
+    long_prefill_token_threshold: int = 0,
 ) -> Scheduler:
     model_config = ModelConfig(
         model=MODEL,
@@ -67,7 +69,7 @@ def _build_scheduler(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=MAX_MODEL_LEN,
         enable_chunked_prefill=True,
-        long_prefill_token_threshold=0,
+        long_prefill_token_threshold=long_prefill_token_threshold,
         watermark=0.0,
         is_encoder_decoder=False,
     )
@@ -214,43 +216,58 @@ def test_prefill_batch_barrier_mamba_align_survives_equal_frontier():
     assert [request.num_computed_tokens for request in requests] == [3200, 3200]
 
     output = scheduler.schedule()
-    assert output.num_scheduled_tokens, "peers at an equal frontier scheduled nothing"
-    assert max(output.num_scheduled_tokens.values()) >= MAMBA_BLOCK
+    assert output.num_scheduled_tokens == {"r0": 1024, "r1": 1024}
 
 
-def test_prefill_batch_barrier_mamba_align_tail_skew_is_bounded():
-    """A cohort whose final chunks exceed one step crosses one block apart.
-
-    Two peers with equal 1500-token tails cannot both cross the prompt boundary
-    inside a 2048-token step, and the align split cannot hand either peer a
-    smaller mid-prompt chunk either. The scheduler keeps making progress and the
-    skew stays at one step; this configuration is warned about at startup.
-    """
+def test_prefill_batch_barrier_mamba_align_finishes_equal_tails_together():
+    """A peer must not finish prefill by consuming its cohort's budget share."""
     scheduler = _build_scheduler()
     requests = [_request("r0", 4700), _request("r1", 4700)]
     scheduler.add_request(requests[0])
-    for _ in range(2):  # r0 reaches 3200 -> 1500 tokens left
+    for _ in range(2):
         output = scheduler.schedule()
         scheduler.update_from_output(output, _model_output(scheduler, output))
-    assert requests[0].num_computed_tokens == 3200
-
     scheduler.add_request(requests[1])
-    finished_at: dict[str, int] = {}
-    empty_streak = longest_empty = 0
-    for step in range(200):
+    for _ in range(2):
         output = scheduler.schedule()
-        if output.num_scheduled_tokens:
-            empty_streak = 0
-            scheduler.update_from_output(output, _model_output(scheduler, output))
-        elif scheduler.running:
-            empty_streak += 1
-            longest_empty = max(longest_empty, empty_streak)
-        for request in requests:
-            if request.request_id not in finished_at and not request.is_prefill_chunk:
-                finished_at[request.request_id] = step
-        if len(finished_at) == len(requests):
-            break
+        scheduler.update_from_output(output, _model_output(scheduler, output))
+    assert [request.num_computed_tokens for request in requests] == [3200, 3200]
 
-    assert longest_empty < 2, "tail cohort livelocked"
-    assert len(finished_at) == len(requests), f"unfinished peers: {finished_at}"
-    assert abs(finished_at["r0"] - finished_at["r1"]) <= 1, f"skew > 1 step: {finished_at}"
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"r0": 1024, "r1": 1024}
+    scheduler.update_from_output(output, _model_output(scheduler, output))
+    assert all(request.is_prefill_chunk for request in requests)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"r0": 476, "r1": 476}
+    scheduler.update_from_output(output, _model_output(scheduler, output))
+    assert all(not request.is_prefill_chunk for request in requests)
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "long_prefill_token_threshold", "max_num_seqs"),
+    [
+        (1024, 0, 2),
+        (2048, 512, 2),
+        (2048, 0, 3),
+    ],
+)
+def test_prefill_batch_barrier_mamba_align_budget_edges_make_progress(
+    max_num_batched_tokens: int,
+    long_prefill_token_threshold: int,
+    max_num_seqs: int,
+):
+    scheduler = _build_scheduler(
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+    )
+    requests = [_request(f"r{i}", 8192) for i in range(max_num_seqs)]
+    for request in requests:
+        scheduler.add_request(request)
+
+    steps, longest_empty = _drive(scheduler, requests, max_steps=800)
+    assert longest_empty < 2
+    assert all(request.is_finished() for request in requests), (
+        f"requests unfinished after {steps} steps"
+    )
