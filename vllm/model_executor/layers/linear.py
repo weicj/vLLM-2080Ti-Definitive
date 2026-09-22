@@ -1053,12 +1053,18 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
         for param in self.parameters(recurse=False):
             param.data.zero_()
 
-    @staticmethod
     def _maybe_adjust_output_span_for_packing(
+        self,
         param: Parameter,
         shard_size: int,
         shard_offset: int,
     ) -> tuple[int, int]:
+        if isinstance(param, BlockQuantScaleParameter):
+            shard_size, shard_offset = adjust_block_scale_shard(
+                getattr(self, "weight_block_size", None),
+                shard_size,
+                shard_offset,
+            )
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
         if (
@@ -1126,9 +1132,9 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
             if loaded_shard_id is not None
             else list(range(len(self.logical_output_sizes)))
         )
+        # A tuple shard id denotes a checkpoint tensor containing only the
+        # selected shards, so its source cursor is relative to that tensor.
         source_offset = 0
-        if loaded_shard_id is not None:
-            source_offset = sum(self.logical_output_sizes[: loaded_shard_id[0]])
 
         for shard_id in shard_ids:
             logical_size = self.logical_output_sizes[shard_id]
@@ -1308,9 +1314,8 @@ class ExplicitPaddedMergedColumnParallelLinear(PaddedMergedColumnParallelLinear)
             if loaded_shard_id is not None
             else list(range(len(self.logical_output_sizes)))
         )
+        # Tuple checkpoint tensors are concatenated from the selected shards.
         source_offset = 0
-        if loaded_shard_id is not None:
-            source_offset = sum(self.logical_output_sizes[: loaded_shard_id[0]])
 
         for shard_id in shard_ids:
             logical_size = self.logical_output_sizes[shard_id]
@@ -1792,12 +1797,18 @@ class QKVParallelLinearOverlappingGQA(QKVParallelLinear):
             disable_tp=disable_tp,
         )
 
-    @staticmethod
     def _maybe_adjust_output_span_for_packing(
+        self,
         param: Parameter,
         shard_size: int,
         shard_offset: int,
     ) -> tuple[int, int]:
+        if isinstance(param, BlockQuantScaleParameter):
+            shard_size, shard_offset = adjust_block_scale_shard(
+                getattr(self, "weight_block_size", None),
+                shard_size,
+                shard_offset,
+            )
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
         if (

@@ -410,6 +410,28 @@ class Qwen3_5ForCausalLMBase(
             if vllm_config.speculative_config
             else 0
         )
+        if (
+            hf_config.linear_num_key_heads % tp_size != 0
+            or hf_config.linear_num_value_heads % tp_size != 0
+        ):
+            partition = make_gdn_head_partition(
+                num_k_heads=hf_config.linear_num_key_heads,
+                num_v_heads=hf_config.linear_num_value_heads,
+                head_k_dim=hf_config.linear_key_head_dim,
+                head_v_dim=hf_config.linear_value_head_dim,
+                tp_size=tp_size,
+                tp_rank=0,
+            )
+            conv_state_shape = MambaStateShapeCalculator._orient_conv_shape(
+                partition.padded_conv_dim,
+                hf_config.linear_conv_kernel_dim - 1 + num_spec,
+            )
+            temporal_state_shape = (
+                partition.max_v_count,
+                hf_config.linear_value_head_dim,
+                hf_config.linear_key_head_dim,
+            )
+            return conv_state_shape, temporal_state_shape
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,

@@ -1356,6 +1356,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
+            and not self.gdn_explicit_partition
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
