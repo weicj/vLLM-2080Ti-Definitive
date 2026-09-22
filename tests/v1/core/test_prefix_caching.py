@@ -205,11 +205,10 @@ def test_independent_dflash_pools_reuse_target_without_draft_lookup():
     assert manager.allocate_slots(first, len(prompt), 0, computed) is not None
     manager.free(first)
 
+    # Draft KV is rebuilt per admission and must never be published as a
+    # reusable prefix-cache entry. Target KV remains reusable on its own.
     draft_pool = manager.coordinator.block_pools[1]
-    for block_hash in first.block_hashes:
-        draft_pool.cached_block_hash_to_block._cache.pop(
-            make_block_hash_with_group_id(block_hash, 1), None
-        )
+    assert not draft_pool.cached_block_hash_to_block._cache
 
     second = make_request("second", prompt + [999], block_size, sha256)
     _, hit_tokens, _ = manager.get_computed_blocks(second)

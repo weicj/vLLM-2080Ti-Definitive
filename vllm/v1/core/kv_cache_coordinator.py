@@ -717,6 +717,26 @@ class IsolatedKVCacheCoordinator(KVCacheCoordinator):
         del running_request_id
         return [0] * len(self.single_type_managers)
 
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Publish prefix-cache entries only for the reusable target KV.
+
+        DFlash draft context is rebuilt from the target's current admission and
+        is not a stable prefix-cache artifact.  In particular, cache-restored
+        target tokens have no corresponding draft context KV.  Avoid publishing
+        draft block hashes so a later request cannot observe those slots as a
+        valid draft cache hit, while still caching every target group normally.
+        """
+        boundaries = self.get_replay_boundaries(request)
+        for group_id in self.target_group_ids:
+            manager = self.single_type_managers[group_id]
+            if manager.enable_caching:
+                manager.cache_blocks(
+                    request,
+                    num_computed_tokens,
+                    retention_interval=self.retention_interval,
+                    replay_boundaries=boundaries,
+                )
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
