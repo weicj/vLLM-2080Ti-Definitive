@@ -44,6 +44,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    PaddedMergedColumnParallelLinear,
+    PaddedRowParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -56,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -68,6 +71,41 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _padded_intermediate_size(
+    intermediate_size: int,
+    tp_size: int,
+    quant_config: QuantizationConfig | None,
+) -> int:
+    """Return an intermediate size that has integral TP partitions."""
+    alignment = int(getattr(quant_config, "tp_partition_alignment", 1))
+    # Block-scaled FP8 stores one scale row per block-N columns.  Every
+    # rank-local padded shard must therefore also be aligned to block-N;
+    # otherwise the latest FP8 validator rejects the row-parallel down-proj.
+    weight_block_size = getattr(quant_config, "weight_block_size", None)
+    if weight_block_size is not None and len(weight_block_size) >= 1:
+        alignment = max(alignment, int(weight_block_size[0]))
+    if weight_block_size is not None and len(weight_block_size) >= 2:
+        alignment = max(alignment, int(weight_block_size[1]))
+    # Compressed-tensors NVFP4 checkpoints carry the packing block size in
+    # their per-target schemes rather than on QuantizationConfig.  Keep every
+    # TP shard aligned to the 128-wide packed row boundary.
+    if getattr(quant_config, "quant_format", None) == "mixed-precision":
+        schemes = getattr(quant_config, "target_scheme_map", {}).values()
+        if any(
+            getattr(scheme, "format", None) == "nvfp4-pack-quantized"
+            or (
+                isinstance(scheme, dict)
+                and scheme.get("format") == "nvfp4-pack-quantized"
+            )
+            for scheme in schemes
+        ):
+            alignment = max(alignment, 128)
+    if alignment < 1:
+        raise ValueError("TP partition alignment must be positive.")
+    partition_alignment = tp_size * alignment if tp_size > 1 else 1
+    return cdiv(intermediate_size, partition_alignment) * partition_alignment
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -85,23 +123,52 @@ class Qwen2MoeMLP(nn.Module):
     ) -> None:
         super().__init__()
         disable_tp = disable_tp or is_sequence_parallel
-        self.gate_up_proj = MergedColumnParallelLinear(
+        tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
+        padded_intermediate_size = _padded_intermediate_size(
+            intermediate_size, tp_size, quant_config
+        )
+        use_padded_tp = padded_intermediate_size != intermediate_size
+        gate_up_proj_cls = (
+            PaddedMergedColumnParallelLinear
+            if use_padded_tp
+            else MergedColumnParallelLinear
+        )
+        gate_up_proj_kwargs = {}
+        if use_padded_tp:
+            gate_up_proj_kwargs["padded_output_sizes"] = [
+                padded_intermediate_size
+            ] * 2
+
+        self.gate_up_proj = gate_up_proj_cls(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
             disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
+            **gate_up_proj_kwargs,
         )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-            disable_tp=disable_tp,
-            prefix=f"{prefix}.down_proj",
-        )
+        if use_padded_tp:
+            self.down_proj = PaddedRowParallelLinear(
+                intermediate_size,
+                padded_intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                disable_tp=disable_tp,
+                prefix=f"{prefix}.down_proj",
+            )
+        else:
+            self.down_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                disable_tp=disable_tp,
+                prefix=f"{prefix}.down_proj",
+            )
         if hidden_act != "silu":
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."

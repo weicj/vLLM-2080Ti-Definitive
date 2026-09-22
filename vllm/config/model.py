@@ -1472,7 +1472,6 @@ class ModelConfig:
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) for GQA/MQA."
                 )
-
         # torch_shm uses a single IPC queue to rank 0; DP>1 is
         # incompatible because API servers can't know which
         # CoreEngine the scheduler will assign work to. TP>1 is
@@ -1547,6 +1546,21 @@ class ModelConfig:
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
+        if (
+            arch_config.text_model_type in {"qwen3_5_text", "qwen3_next"}
+            and total_num_kv_heads % parallel_config.tensor_parallel_size != 0
+            and parallel_config.tensor_parallel_size % total_num_kv_heads != 0
+        ):
+            from vllm.model_executor.layers.attention.head_partition import (
+                make_attention_head_partition,
+            )
+
+            return make_attention_head_partition(
+                total_num_heads=arch_config.total_num_attention_heads,
+                total_num_kv_heads=total_num_kv_heads,
+                tp_size=parallel_config.tensor_parallel_size,
+                tp_rank=0,
+            ).num_kv_heads
         return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
 
     def get_num_attention_heads(

@@ -18,9 +18,13 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.head_partition import (
+    make_attention_head_partition,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
+    QKVParallelLinearOverlappingGQA,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -183,17 +187,42 @@ class DFlashQwen3Attention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
+        tp_rank = get_tensor_model_parallel_rank()
+        use_overlapping_gqa = (
+            self.total_num_kv_heads % tp_size != 0
+            and tp_size % self.total_num_kv_heads != 0
+        )
+        self.attn_head_partition = None
+        if use_overlapping_gqa:
+            self.attn_head_partition = make_attention_head_partition(
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+            )
+            self.num_kv_heads = self.attn_head_partition.num_kv_heads
+        elif self.total_num_kv_heads >= tp_size:
             assert self.total_num_kv_heads % tp_size == 0
+            self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         else:
             assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = QKVParallelLinear(
+        qkv_proj_cls = (
+            QKVParallelLinearOverlappingGQA
+            if use_overlapping_gqa
+            else QKVParallelLinear
+        )
+        qkv_kwargs = (
+            {"kv_head_indices": self.attn_head_partition.kv_head_indices}
+            if self.attn_head_partition is not None
+            else {}
+        )
+        self.qkv_proj = qkv_proj_cls(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
@@ -201,6 +230,7 @@ class DFlashQwen3Attention(nn.Module):
             bias=attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            **qkv_kwargs,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
