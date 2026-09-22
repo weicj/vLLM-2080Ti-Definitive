@@ -3495,6 +3495,13 @@ build_args() {
   [[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE_FILE")
 
   local decode_query_len=$((MTP_K + 1))
+  if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    local configured_speculative_tokens
+    configured_speculative_tokens=$(speculative_config_tokens "$SPECULATIVE_CONFIG") || return 1
+    if [[ "$configured_speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+      decode_query_len=$((configured_speculative_tokens + 1))
+    fi
+  fi
   local decode_max_tokens=$((MAX_NUM_SEQS * decode_query_len))
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
     local resolved_speculative_config
@@ -3583,6 +3590,20 @@ if config.get("method") == "dflash":
         config["kv_cache_dtype"] = kv_cache_dtype
 
 print(json.dumps(config, separators=(",", ":")))
+PY
+}
+
+speculative_config_tokens() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    config = json.loads(sys.argv[1])
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid SPECULATIVE_CONFIG JSON: {exc}")
+value = config.get("num_speculative_tokens", 0) if isinstance(config, dict) else 0
+print(value)
 PY
 }
 
