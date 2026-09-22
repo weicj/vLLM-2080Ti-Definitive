@@ -80,6 +80,14 @@ def _padded_intermediate_size(
 ) -> int:
     """Return an intermediate size that has integral TP partitions."""
     alignment = int(getattr(quant_config, "tp_partition_alignment", 1))
+    # Block-scaled FP8 stores one scale row per block-N columns.  Every
+    # rank-local padded shard must therefore also be aligned to block-N;
+    # otherwise the latest FP8 validator rejects the row-parallel down-proj.
+    weight_block_size = getattr(quant_config, "weight_block_size", None)
+    if weight_block_size is not None and len(weight_block_size) >= 1:
+        alignment = max(alignment, int(weight_block_size[0]))
+    if weight_block_size is not None and len(weight_block_size) >= 2:
+        alignment = max(alignment, int(weight_block_size[1]))
     if alignment < 1:
         raise ValueError("TP partition alignment must be positive.")
     partition_alignment = tp_size * alignment if tp_size > 1 else 1
