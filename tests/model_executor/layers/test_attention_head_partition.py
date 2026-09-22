@@ -49,6 +49,7 @@ def test_kv_replication_when_tp_exceeds_kv_heads():
     ]
     assert all(p.num_heads == 3 for p in parts)
     assert all(p.num_kv_heads == 1 for p in parts)
+    assert all(not p.has_overlapping_kv_partition for p in parts)
 
 
 def test_overlapping_gqa_partition_for_qwopus_tp3():

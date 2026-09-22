@@ -19,7 +19,10 @@ def test_tp_partition_alignment_preserves_exl3_hadamard_blocks():
     class BlockQuantConfig:
         tp_partition_alignment = 128
 
-    assert _padded_intermediate_size(17408, 3, BlockQuantConfig()) == 17664
+    padded = _padded_intermediate_size(17408, 3, BlockQuantConfig())
+    assert padded == 17664
+    assert padded // 3 == 5888
+    assert (padded // 3) % BlockQuantConfig.tp_partition_alignment == 0
 
 
 def test_qwen2_moe_mlp_pads_uneven_tp3_intermediate_dimension(

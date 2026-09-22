@@ -651,12 +651,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 hf_config.linear_value_head_dim,
                 hf_config.linear_key_head_dim,
             )
-            return (
-                conv_state_shape,
-                temporal_state_shape,
-                conv_state_shape,
-                temporal_state_shape,
-            )
+            return conv_state_shape, temporal_state_shape
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,

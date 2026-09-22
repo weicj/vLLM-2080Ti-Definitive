@@ -1446,7 +1446,8 @@ class ModelConfig:
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
             supports_sequence_sharded_gqa_dcp = (
-                self.model_arch_config.model_type in {"qwen3_5_text", "qwen3_next"}
+                self.model_arch_config.text_model_type
+                in {"qwen3_5_text", "qwen3_next"}
             )
             if (
                 not supports_sequence_sharded_gqa_dcp
@@ -1570,7 +1571,7 @@ class ModelConfig:
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
         if (
-            self.model_arch_config.model_type in {"qwen3_5_text", "qwen3_next"}
+            arch_config.text_model_type in {"qwen3_5_text", "qwen3_next"}
             and total_num_kv_heads % parallel_config.tensor_parallel_size != 0
             and parallel_config.tensor_parallel_size % total_num_kv_heads != 0
         ):
@@ -1579,7 +1580,7 @@ class ModelConfig:
             )
 
             return make_attention_head_partition(
-                total_num_heads=self.model_arch_config.total_num_attention_heads,
+                total_num_heads=arch_config.total_num_attention_heads,
                 total_num_kv_heads=total_num_kv_heads,
                 tp_size=parallel_config.tensor_parallel_size,
                 tp_rank=0,

@@ -125,8 +125,12 @@ class AttentionHeadPartition:
 
     @property
     def has_overlapping_kv_partition(self) -> bool:
-        ideal = self.total_num_kv_heads / self.tp_size
-        return self.num_kv_heads != ideal
+        # KV replication (TP is a multiple of KV heads) is a regular layout.
+        # Overlap only occurs when a local Q shard crosses a global GQA group.
+        return (
+            self.total_num_kv_heads % self.tp_size != 0
+            and self.tp_size % self.total_num_kv_heads != 0
+        )
 
 
 def make_attention_head_partition(

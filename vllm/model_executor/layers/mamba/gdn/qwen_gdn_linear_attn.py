@@ -1458,6 +1458,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        core_attn_out = self._pad_local_value_flat(core_attn_out)
         out, _ = self.out_proj(core_attn_out)
         return out
 
@@ -1482,6 +1483,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
             mixed_qkv, z = self._split_non_interleaved_qkvz(mixed_qkvz)
+            mixed_qkv = self._strip_padded_mixed_qkv(mixed_qkv)
             b, a = self.split_ba(ba)
 
         num_tokens = hidden_states.size(0)
