@@ -43,6 +43,9 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.head_partition import (
     make_gdn_head_partition,
 )
+from vllm.model_executor.layers.mamba.gdn.head_partition import (
+    make_gdn_head_partition,
+)
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
@@ -532,16 +535,25 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             if self.use_deepstack
             else 0
         )
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
+        self.language_model_only = getattr(
+            vllm_config.model_config.multimodal_config,
+            "language_model_only",
+            False,
+        )
+        if self.language_model_only:
+            self.visual_dim = 0
+            self.multiscale_dim = 0
+            self.visual = None
+        else:
+            self.visual_dim = config.vision_config.out_hidden_size
+            self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+            with self._mark_tower_model(vllm_config, {"image", "video"}):
+                self.visual = Qwen3_VisionTransformer(
+                    config.vision_config,
+                    norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "visual"),
+                )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
@@ -773,16 +785,25 @@ class Qwen3_5MoeForConditionalGeneration(
             if self.use_deepstack
             else 0
         )
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
+        self.language_model_only = getattr(
+            vllm_config.model_config.multimodal_config,
+            "language_model_only",
+            False,
+        )
+        if self.language_model_only:
+            self.visual_dim = 0
+            self.multiscale_dim = 0
+            self.visual = None
+        else:
+            self.visual_dim = config.vision_config.out_hidden_size
+            self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+            with self._mark_tower_model(vllm_config, {"image", "video"}):
+                self.visual = Qwen3_VisionTransformer(
+                    config.vision_config,
+                    norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "visual"),
+                )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(
