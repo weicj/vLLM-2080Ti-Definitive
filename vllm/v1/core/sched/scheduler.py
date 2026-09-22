@@ -355,28 +355,6 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
-        if (
-            self.prefill_batch_barrier
-            and self.need_mamba_block_aligned_split
-            and self.max_num_scheduled_tokens
-            < self.max_num_running_reqs * self.cache_config.block_size
-        ):
-            # The barrier only keeps peers together while their final chunks fit
-            # in one step. Below one block quantum per peer that is not always
-            # possible, so the cohort may cross the prompt boundary one block
-            # apart; say so instead of failing silently.
-            logger.warning_once(
-                "prefill_batch_barrier cannot keep peer first tokens together "
-                "with mamba cache mode 'align': max_num_scheduled_tokens=%d is "
-                "below one block quantum per peer (%d x %d). Peers whose final "
-                "chunks together exceed one step budget enter decode up to one "
-                "block apart. Raise max_num_batched_tokens to at least %d or "
-                "drop --prefill-batch-barrier.",
-                self.max_num_scheduled_tokens,
-                self.max_num_running_reqs,
-                self.cache_config.block_size,
-                self.max_num_running_reqs * self.cache_config.block_size,
-            )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -453,6 +431,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
+        max_prefill_tokens: int | None = None,
     ) -> int:
         """Clip a prefill chunk so it ends where Mamba state must be cached.
 
@@ -507,7 +486,12 @@ class Scheduler(SchedulerInterface):
         # to the boundary. A block too wide for one chunk advances sub-block
         # and re-aligns at the next boundary.
         if end < prefill_end:
-            max_prefill_tokens = self.max_num_scheduled_tokens
+            if max_prefill_tokens is None:
+                max_prefill_tokens = self.max_num_scheduled_tokens
+            else:
+                max_prefill_tokens = min(
+                    max_prefill_tokens, self.max_num_scheduled_tokens
+                )
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
@@ -683,21 +667,12 @@ class Scheduler(SchedulerInterface):
                 frontier_width = sum(
                     r == prefill_frontier for r in remaining_prompts
                 )
-                # Cohort steps must stay fundable by the align split: a step
-                # below one block quantum is clipped back to the chunk start,
-                # which leaves every peer with num_new_tokens == 0 and repeats
-                # the same frontier indefinitely.
-                min_frontier_step = (
-                    self.cache_config.block_size
-                    if self.need_mamba_block_aligned_split
-                    else 1
-                )
-                prefill_frontier_step = max(
-                    min(
-                        prefill_frontier - next_frontier,
-                        token_budget // frontier_width,
-                    ),
-                    min_frontier_step,
+                # Preserve each peer's aggregate frontier budget. The Mamba
+                # splitter receives that budget below and can advance a
+                # private sub-block when a full block does not fit.
+                prefill_frontier_step = min(
+                    prefill_frontier - next_frontier,
+                    max(token_budget // frontier_width, 1),
                 )
                 threshold = self.scheduler_config.long_prefill_token_threshold
                 if threshold > 0:
@@ -804,7 +779,9 @@ class Scheduler(SchedulerInterface):
             # Apply Mamba alignment before encoder caps.
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
-                    request, num_new_tokens
+                    request,
+                    num_new_tokens,
+                    max_prefill_tokens=prefill_frontier_step,
                 )
 
             # Schedule encoder inputs.
@@ -1232,6 +1209,7 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens,
                             num_new_local_computed_tokens,
                             num_external_computed_tokens,
+                            max_prefill_tokens=prefill_frontier_step,
                         )
                         if num_new_tokens == 0:
                             break
