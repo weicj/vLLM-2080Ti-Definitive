@@ -1970,8 +1970,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         if self.mamba_cache_mode == "align":
-            for block in self._prefix_cache_pins.pop(request_id, []):
-                block.ref_cnt -= 1
+            self.block_pool.free_blocks(self._prefix_cache_pins.pop(request_id, []))
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
