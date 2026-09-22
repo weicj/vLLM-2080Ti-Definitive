@@ -457,6 +457,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                     self.block_tables.kernel_block_sizes[gid],
                     self.block_tables.cp_size,
                 )
+            # The cache-restored count describes this admission only. Keep it
+            # for the current draft preparation, then clear it before the next
+            # scheduler step so the already-shifted block table is not shifted
+            # a second time during decode.
+            self.num_cached_tokens.index_fill_(
+                0, input_batch.idx_mapping.to(dtype=torch.long), 0
+            )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
         # because the context shape varies per step. During dummy runs the block tables
