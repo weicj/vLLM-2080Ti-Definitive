@@ -211,8 +211,10 @@ def test_independent_dflash_pools_reuse_target_without_draft_lookup():
     assert not draft_pool.cached_block_hash_to_block._cache
 
     second = make_request("second", prompt + [999], block_size, sha256)
-    _, hit_tokens, _ = manager.get_computed_blocks(second)
+    computed, hit_tokens, _ = manager.get_computed_blocks(second)
     assert hit_tokens > 0
+    assert manager.allocate_slots(second, second.num_tokens, 0, computed) is not None
+    assert manager.estimate_cached_tokens(second) == hit_tokens
 
 
 HISPARSE_BLOCK_SIZE = 16

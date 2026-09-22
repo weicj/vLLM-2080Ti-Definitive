@@ -20,6 +20,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -69,6 +71,23 @@ class KVCacheCoordinator(ABC):
     """
 
     enable_partial_hash_hits = False
+
+    def get_prefix_cache_group_ids(self) -> tuple[int, ...]:
+        """Return groups whose local cache contributes to hit reporting.
+
+        Most coordinators cache every prefix-cacheable attention group.  A
+        speculative coordinator may intentionally leave a group (for example
+        DFlash's draft KV) uncached while reusing the target groups.
+        """
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if group.kv_cache_spec.prefix_cacheable
+            and not isinstance(
+                group.kv_cache_spec,
+                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
+            )
+        )
 
     def __init__(
         self,
@@ -716,6 +735,17 @@ class IsolatedKVCacheCoordinator(KVCacheCoordinator):
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         del running_request_id
         return [0] * len(self.single_type_managers)
+
+    def get_prefix_cache_group_ids(self) -> tuple[int, ...]:
+        # Draft KV is deliberately rebuilt for each admission and therefore
+        # must not reduce the target cache hit reported to the API client.
+        return tuple(
+            group_id
+            for group_id in self.target_group_ids
+            if self.kv_cache_config.kv_cache_groups[
+                group_id
+            ].kv_cache_spec.prefix_cacheable
+        )
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Publish prefix-cache entries only for the reusable target KV.

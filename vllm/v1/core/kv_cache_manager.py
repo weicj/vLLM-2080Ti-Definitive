@@ -774,18 +774,10 @@ class KVCacheManager:
     def estimate_cached_tokens(self, request: Request) -> int:
         """Estimate the number of tokens cached by the request."""
         cached_tokens: int | None = None
-        for group, blocks in zip(
-            self.kv_cache_config.kv_cache_groups,
-            self.get_blocks(request.request_id).blocks,
-        ):
-            if not group.kv_cache_spec.prefix_cacheable:
-                continue
-            if isinstance(
-                group.kv_cache_spec,
-                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
-            ):
-                # Cross-attention and encoder-only groups are not prefix cached.
-                continue
+        cached_group_ids = self.coordinator.get_prefix_cache_group_ids()
+        request_blocks = self.get_blocks(request.request_id).blocks
+        for group_id in cached_group_ids:
+            blocks = request_blocks[group_id]
 
             group_cached_tokens = 0
             for block in blocks:
