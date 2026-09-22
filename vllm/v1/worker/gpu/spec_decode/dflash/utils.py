@@ -25,6 +25,13 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     # a non-causal layer onto a causal-only backend would fail.
     draft_vllm_config = replace(
         vllm_config,
+        parallel_config=replace(
+            vllm_config.parallel_config,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=(
+                speculative_config.draft_parallel_config.tensor_parallel_size
+            ),
+        ),
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
