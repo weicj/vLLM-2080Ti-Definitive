@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -105,12 +105,13 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 "VLLM_QWOPUS_MTP_BF16_DRAFT=1: loading Qwen3.5 MTP "
                 "fc/layer weights without the target quantization config."
             )
-        self.fc = ColumnParallelLinear(
+        # The MTP projection is consumed as a full hidden vector.  Its output
+        # width (5120 for Qwen3.8) is not divisible by TP3, so replicate this
+        # small projection instead of creating an invalid uneven shard.
+        self.fc = ReplicatedLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
-            gather_output=True,
             bias=False,
-            return_bias=False,
             quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
