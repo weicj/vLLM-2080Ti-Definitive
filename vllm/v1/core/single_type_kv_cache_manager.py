@@ -1482,6 +1482,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Prefix-cache snapshots are pinned while their producing request
+            # is still live so align-mode state allocation cannot evict them.
+            self._prefix_cache_pins: dict[str, list[KVCacheBlock]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1967,6 +1970,8 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         if self.mamba_cache_mode == "align":
+            for block in self._prefix_cache_pins.pop(request_id, []):
+                block.ref_cnt -= 1
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
@@ -2012,6 +2017,12 @@ class MambaManager(SingleTypeKVCacheManager):
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
+            pins = self._prefix_cache_pins.setdefault(request.request_id, [])
+            for block in self.req_to_blocks[request.request_id]:
+                if block.is_null or block.block_hash is None or block in pins:
+                    continue
+                block.ref_cnt += 1
+                pins.append(block)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
