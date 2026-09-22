@@ -48,6 +48,7 @@ the [historical validation record](../docs/2080ti-0.2.1-pre-validation.md) for d
 | `qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 310,827 | 1525.37 / 83.51 |
 | `qwen27b/w8a16/normal/fp8kv-220K-mtp3-text-image.env` | normal | 220K | FP8 | 3 | text+image | 231,169 | 1555.1 / 70.1 |
 | `qwen27b/w8a16/normal/fp8kv-256K-mtp3-text-only.env` | normal | 256K | FP8 | 3 | text-only | 320,232 | 1573.95 / 67.58 |
+| `qwen27b/w8a16/normal/fp8kv-128K-mtp4-tp3-text-only.env` | normal | 128K | FP8 | 4 | text-only | - | pending TP3 measurement |
 
 ### [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
 
@@ -57,6 +58,7 @@ the [historical validation record](../docs/2080ti-0.2.1-pre-validation.md) for d
 | `qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
 | `qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
 | `qwen27b/w4a16/fast/tq4nc-262K-mtp3-text-only.env` | fast | 262K | TQ4NC | 3 | text-only | 732,381 | 1402.9 / 103.5 |
+| `qwen27b/w4a16/normal/fp8kv-128K-dflash2-tp3-text-only.env` | normal | 128K | FP8 | DFlash2/7 | text-only | - | pending TP3 measurement |
 
 ### Concurrent benchmark lanes (NVFP4 text-only)
 
@@ -77,3 +79,14 @@ was disabled.
 
 Use `./launcher.sh --print-config` after selecting a profile to inspect the
 resolved route before starting the service.
+
+### TP3 routes
+
+The two `*-tp3-*` entries are route profiles for three T10/SM75 GPUs. Select
+the GPU order and target TP outside the profile, for example
+`GPU_DEVICES=7,8,9 TP_SIZE=3`. The DFlash2 route also requires the local draft
+checkpoint through `SPECULATIVE_MODEL`; the launcher merges that path into the
+profile's route-only `SPECULATIVE_CONFIG` and keeps the draft at TP1 because
+the draft's 32 attention heads are not divisible by three. Capacity and
+throughput are intentionally shown as pending until a complete TP3 run reaches
+KV-cache sizing and the fixed benchmark window.

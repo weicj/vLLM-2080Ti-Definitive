@@ -356,6 +356,11 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   STATE_FILE
   FLASHQLA_ROOT
   START_TIMEOUT
+  SPECULATIVE_MODEL
+  SPECULATIVE_DRAFT_TP_SIZE
+  SPECULATIVE_MAX_MODEL_LEN
+  SPECULATIVE_ATTENTION_BACKEND
+  SPECULATIVE_KV_CACHE_DTYPE
 )
 
 NON_INTERACTIVE_BOOLEAN_KEYS=(
@@ -3492,7 +3497,9 @@ build_args() {
   local decode_query_len=$((MTP_K + 1))
   local decode_max_tokens=$((MAX_NUM_SEQS * decode_query_len))
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
-    VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
+    local resolved_speculative_config
+    resolved_speculative_config=$(resolve_speculative_config "$SPECULATIVE_CONFIG") || return 1
+    VLLM_ARGS+=(--speculative-config "$resolved_speculative_config")
   elif (( MTP_K > 0 )); then
     VLLM_ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_K}}")
   fi
@@ -3545,6 +3552,38 @@ build_args() {
     done
     VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture_sizes}],\"max_cudagraph_capture_size\":${capture_max}}")
   fi
+}
+
+resolve_speculative_config() {
+  local config=$1
+  python3 - "$config" "${SPECULATIVE_MODEL:-}" \
+    "${SPECULATIVE_DRAFT_TP_SIZE:-}" "${SPECULATIVE_MAX_MODEL_LEN:-}" \
+    "${SPECULATIVE_ATTENTION_BACKEND:-}" "${SPECULATIVE_KV_CACHE_DTYPE:-}" <<'PY'
+import json
+import sys
+
+raw, model, draft_tp, max_model_len, attention_backend, kv_cache_dtype = sys.argv[1:]
+try:
+    config = json.loads(raw)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid SPECULATIVE_CONFIG JSON: {exc}")
+if not isinstance(config, dict):
+    raise SystemExit("SPECULATIVE_CONFIG must be a JSON object")
+
+if config.get("method") == "dflash":
+    if model and not config.get("model"):
+        config["model"] = model
+    if draft_tp and not config.get("draft_tensor_parallel_size"):
+        config["draft_tensor_parallel_size"] = int(draft_tp)
+    if max_model_len and not config.get("max_model_len"):
+        config["max_model_len"] = int(max_model_len)
+    if attention_backend and not config.get("attention_backend"):
+        config["attention_backend"] = attention_backend
+    if kv_cache_dtype and not config.get("kv_cache_dtype"):
+        config["kv_cache_dtype"] = kv_cache_dtype
+
+print(json.dumps(config, separators=(",", ":")))
+PY
 }
 
 startup_status_line() {
