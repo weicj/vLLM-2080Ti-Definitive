@@ -1445,14 +1445,7 @@ class ModelConfig:
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
-            supports_sequence_sharded_gqa_dcp = (
-                self.model_arch_config.text_model_type
-                in {"qwen3_5_text", "qwen3_next"}
-            )
-            if (
-                not supports_sequence_sharded_gqa_dcp
-                and tensor_parallel_size <= total_num_kv_heads
-            ):
+            if tensor_parallel_size <= total_num_kv_heads:
                 raise ValueError(
                     "Decode context parallelism for GQA/MQA requires "
                     f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
@@ -1462,10 +1455,7 @@ class ModelConfig:
                 )
 
             max_dcp_size = tensor_parallel_size // total_num_kv_heads
-            if (
-                not supports_sequence_sharded_gqa_dcp
-                and decode_context_parallel_size > max_dcp_size
-            ):
+            if decode_context_parallel_size > max_dcp_size:
                 raise ValueError(
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) exceeds the maximum "
@@ -1482,20 +1472,6 @@ class ModelConfig:
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) for GQA/MQA."
                 )
-            if (
-                supports_sequence_sharded_gqa_dcp
-                and tensor_parallel_size <= total_num_kv_heads
-            ):
-                logger.warning(
-                    "Enabling experimental GQA DCP with tensor_parallel_size=%s, "
-                    "total_num_kv_heads=%s, decode_context_parallel_size=%s. "
-                    "This relies on sequence-dimension KV sharding instead of "
-                    "KV-head replication removal.",
-                    tensor_parallel_size,
-                    total_num_kv_heads,
-                    decode_context_parallel_size,
-                )
-
         # torch_shm uses a single IPC queue to rank 0; DP>1 is
         # incompatible because API servers can't know which
         # CoreEngine the scheduler will assign work to. TP>1 is
