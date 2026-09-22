@@ -112,6 +112,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             self.config.hidden_size * 2,
             self.config.hidden_size,
             bias=False,
+            return_bias=False,
             quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
