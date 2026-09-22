@@ -1675,8 +1675,12 @@ class MambaManager(SingleTypeKVCacheManager):
                 <= cdiv(processed_computed_tokens, self.block_size) - 1
             ):
                 blocks = self.req_to_blocks[request_id]
-                if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                block = blocks[last_state_block_idx]
+                # A hashed align-mode state is also a target prefix-cache
+                # snapshot. Keep it until request release so its hash remains
+                # available to the next request.
+                if block != self._null_block and block.block_hash is None:
+                    self.block_pool.free_blocks([block])
                     blocks[last_state_block_idx] = self._null_block
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
