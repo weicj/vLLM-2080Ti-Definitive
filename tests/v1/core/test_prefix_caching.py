@@ -1072,10 +1072,19 @@ def test_mamba_align_keeps_hashed_boundary_state_alive():
     ][0]
     assert block.block_hash is not None
 
+    # Exercise the exact retirement path used after a subsequent aligned
+    # allocation. The state block remains hashed, so it must not be replaced
+    # by a null block or removed from the prefix-cache map.
+    mamba_manager = manager.coordinator.single_type_managers[0]
+    mamba_manager.last_state_block_idx[request.request_id] = 0
     manager.remove_skipped_blocks(request.request_id, 16, 64)
 
     assert not block.is_null
     assert block.block_hash is not None
+
+    resumed = make_request("resumed", list(range(64)), 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(resumed)
+    assert num_computed_tokens == 16
 
 
 def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
