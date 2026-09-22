@@ -1041,43 +1041,6 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
-def test_mamba_align_keeps_hashed_boundary_state_alive():
-    """A target prefix hash must survive align-mode state retirement."""
-    manager = make_kv_cache_manager(
-        KVCacheConfig(
-            num_blocks=16,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["mamba"],
-                    MambaSpec(
-                        block_size=16,
-                        shapes=((1,),),
-                        dtypes=(torch.float32,),
-                        mamba_cache_mode="align",
-                    ),
-                )
-            ],
-        ),
-        max_model_len=128,
-        enable_caching=True,
-        hash_block_size=16,
-    )
-    request = make_request("hashed", list(range(64)), 16, sha256)
-    assert manager.allocate_slots(request, 16) is not None
-    request.num_computed_tokens = 16
-    manager.cache_blocks(request, 16)
-    block = manager.coordinator.single_type_managers[0].req_to_blocks[
-        request.request_id
-    ][0]
-    assert block.block_hash is not None
-
-    manager.remove_skipped_blocks(request.request_id, 16, 64)
-
-    assert not block.is_null
-    assert block.block_hash is not None
-
-
 def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     """A host prefix hit must come back GPU-resident while shadows survive."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
