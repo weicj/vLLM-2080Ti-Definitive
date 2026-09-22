@@ -639,6 +639,13 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
+        if self.language_model_only:
+            weights = (
+                (name, tensor)
+                for name, tensor in weights
+                if not name.startswith("visual.")
+                and not name.startswith("model.visual.")
+            )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
