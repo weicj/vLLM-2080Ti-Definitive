@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import copy
 from dataclasses import replace
 from typing import Any
 
@@ -94,12 +95,18 @@ class DFlashProposer(SpecDecodeBaseProposer):
         assert spec is not None
         # The draft model is text-only — clear the target's multimodal
         # flag so flash_attn is not rejected for mm_prefix support.
-        arch = base.model_config.model_arch_config
+        # Keep target model metadata here: DFlash uses it for absolute layer
+        # offsets and target-vocabulary comparisons while get_model receives
+        # the draft model config explicitly.
+        target_model_config = copy(base.model_config)
+        arch = target_model_config.model_arch_config
         if arch.is_mm_prefix_lm:
-            base.model_config.model_arch_config = replace(arch, is_mm_prefix_lm=False)
+            target_model_config.model_arch_config = replace(
+                arch, is_mm_prefix_lm=False
+            )
         return replace(
             base,
-            model_config=spec.draft_model_config,
+            model_config=target_model_config,
             parallel_config=replace(
                 spec.draft_parallel_config,
                 rank=self.vllm_config.parallel_config.rank,

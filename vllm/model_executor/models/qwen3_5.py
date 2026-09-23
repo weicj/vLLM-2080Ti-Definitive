@@ -43,9 +43,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.head_partition import (
     make_gdn_head_partition,
 )
-from vllm.model_executor.layers.mamba.gdn.head_partition import (
-    make_gdn_head_partition,
-)
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
