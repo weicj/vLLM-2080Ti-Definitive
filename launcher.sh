@@ -300,6 +300,7 @@ ROUTE_PROFILE_KEYS=(
   MTP_K
   MESSAGE_TYPE
   MM_LIMIT_JSON
+  MM_ENCODER_TP_MODE
   LANGUAGE_MODEL_ONLY
   SKIP_MM_PROFILING
   HF_OVERRIDES_JSON
@@ -3481,6 +3482,7 @@ build_args() {
   elif [[ "$MODEL_FAMILY" == gemma* ]]; then
     VLLM_ARGS+=(--limit-mm-per-prompt '{"image":0,"video":0,"audio":0}')
   fi
+  [[ -n "${MM_ENCODER_TP_MODE:-}" ]] && VLLM_ARGS+=(--mm-encoder-tp-mode "$MM_ENCODER_TP_MODE")
 
   if [[ "$MODEL_FAMILY" == qwen* && -n "${MM_LIMIT_JSON:-}" && -z "${ADDITIONAL_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--additional-config '{"gdn_prefill_backend":"flashqla_legacy"}')

@@ -12,29 +12,21 @@ from transformers import Qwen3Config
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention.head_partition import (
     make_attention_head_partition,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    QKVParallelLinearOverlappingGQA,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
@@ -43,7 +35,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
 
-from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
 from .utils import (
     AutoWeightsLoader,
@@ -54,6 +45,40 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class DFlashQwen3MLP(nn.Module):
+    """Replicated draft MLP used when the target is tensor-parallel."""
+
+    def __init__(self, hidden_size, intermediate_size, hidden_act, quant_config, prefix):
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size, intermediate_size],
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+            disable_tp=True,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+            input_is_parallel=False,
+            reduce_results=False,
+            disable_tp=True,
+        )
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
 _SLIDING_ATTENTION = "sliding_attention"
@@ -182,12 +207,14 @@ class DFlashQwen3Attention(nn.Module):
         super().__init__()
         self.layer_name = prefix
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # DFlash is a small auxiliary model.  Replicate its projections on each
+        # target rank so a draft with 32 heads can run alongside TP3 (32 is not
+        # divisible by 3) without changing the target's process group.
+        tp_size = 1
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = 0
         use_overlapping_gqa = (
             self.total_num_kv_heads % tp_size != 0
             and tp_size % self.total_num_kv_heads != 0
@@ -212,25 +239,15 @@ class DFlashQwen3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        qkv_proj_cls = (
-            QKVParallelLinearOverlappingGQA
-            if use_overlapping_gqa
-            else QKVParallelLinear
-        )
-        qkv_kwargs = (
-            {"kv_head_indices": self.attn_head_partition.kv_head_indices}
-            if self.attn_head_partition is not None
-            else {}
-        )
-        self.qkv_proj = qkv_proj_cls(
+        self.qkv_proj = MergedColumnParallelLinear(
             hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
+            [self.total_num_heads * self.head_dim,
+             self.total_num_kv_heads * self.head_dim,
+             self.total_num_kv_heads * self.head_dim],
             bias=attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-            **qkv_kwargs,
+            disable_tp=True,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -238,6 +255,9 @@ class DFlashQwen3Attention(nn.Module):
             bias=attention_bias,  # DFlash has o_proj bias when using attention bias
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            input_is_parallel=False,
+            reduce_results=False,
+            disable_tp=True,
         )
 
         self.rotary_emb = get_rope(
@@ -351,7 +371,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
-        self.mlp = Qwen3MLP(
+        self.mlp = DFlashQwen3MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -429,10 +449,9 @@ class DFlashQwen3Model(nn.Module):
 
         current_vllm_config = get_current_vllm_config()
 
-        self.embed_tokens = VocabParallelEmbedding(
+        self.embed_tokens = nn.Embedding(
             self.config.vocab_size,
             self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
@@ -696,16 +715,7 @@ class DFlashQwen3Model(nn.Module):
     def _preprocess(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
         for name, loaded_weight in weights:
-            if "attention_sink_bias" in name:
-                # Sink bias is per-head; shard it across TP ranks like the
-                # attention heads themselves.
-                heads_per_rank = loaded_weight.shape[0] // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -732,9 +742,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.lm_head = ParallelLMHead(
-            self.config.draft_vocab_size,
+        self.lm_head = ReplicatedLinear(
             self.config.hidden_size,
+            self.config.draft_vocab_size,
+            bias=False,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(

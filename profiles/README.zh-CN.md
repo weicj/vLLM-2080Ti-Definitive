@@ -45,7 +45,8 @@ tok/s。这些数据不能验证采用 upstream nightly `b23433088b` 的 pre4。
 | `qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 310,827 | 1525.37 / 83.51 |
 | `qwen27b/w8a16/normal/fp8kv-220K-mtp3-text-image.env` | normal | 220K | FP8 | 3 | text+image | 231,169 | 1555.1 / 70.1 |
 | `qwen27b/w8a16/normal/fp8kv-256K-mtp3-text-only.env` | normal | 256K | FP8 | 3 | text-only | 320,232 | 1573.95 / 67.58 |
-| `qwen27b/w8a16/normal/fp8kv-128K-mtp4-tp3-text-only.env` | normal | 128K | FP8 | 4 | text-only | - | 等待 TP3 测量 |
+| `qwen27b/w8a16/normal/fp16kv-32K-mtp4-tp3-text-only.env` | normal | 32K | FP16 | 4 | text-only | 54,346 | 4K/128：1025.5/73.0、1290.3/74.8、1204.9/75.0 tok/s；E2E 5.73/4.87/5.09 秒 |
+| `qwen27b/w8a16/normal/fp8kv-96K-mtp4-tp3-text-only.env` | normal | 96K | FP8 | 4 | text-only | 108,693 | warmup 后连续 3 次 4K/128：1175.7/40.3、1074.6/52.9、1157.9/73.6 tok/s；E2E 6.64/6.21/5.26 秒 |
 
 ### [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
 
@@ -55,7 +56,6 @@ tok/s。这些数据不能验证采用 upstream nightly `b23433088b` 的 pre4。
 | `qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
 | `qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
 | `qwen27b/w4a16/fast/tq4nc-262K-mtp3-text-only.env` | fast | 262K | TQ4NC | 3 | text-only | 732,381 | 1402.9 / 103.5 |
-| `qwen27b/w4a16/normal/fp8kv-128K-dflash2-tp3-text-only.env` | normal | 128K | FP8 | DFlash2/7 | text-only | - | 等待 TP3 测量 |
 
 ### 并发测试路线（NVFP4 纯文本）
 
@@ -77,9 +77,7 @@ tok/s。这些数据不能验证采用 upstream nightly `b23433088b` 的 pre4。
 
 ### TP3 路线
 
-两个 `*-tp3-*` 条目是三张 T10/SM75 GPU 的路线 profile。GPU 顺序和 target
-TP 在 profile 外设置，例如 `GPU_DEVICES=7,8,9 TP_SIZE=3`。DFlash2 路线还需要
-通过 `SPECULATIVE_MODEL` 指定本地 draft checkpoint；launcher 会把该路径合并进
-profile 中只描述路线的 `SPECULATIVE_CONFIG`，并将 draft 保持为 TP1，因为 draft 的
-32 个 attention head 不能被 3 整除。在 TP3 完整运行达到 KV cache sizing 并完成固定
-窗口测试前，容量和吞吐量明确保留为待测，不使用旧 TP2/TP4 数据替代。
+`*-tp3-*` 条目是三张 T10/SM75 GPU 的路线 profile。GPU 顺序和 target TP 在
+profile 外设置，例如 `GPU_DEVICES=6,7,8 TP_SIZE=3`。上表均使用
+Qwen3.8-27B-FP8、纯文本、MTP4、关闭 prefix cache，并按标准连续 4K 输入/128
+输出窗口测量。DFlash2 TP3 的独立 draft 并行路线尚未验证，因此不提升为 profile。
