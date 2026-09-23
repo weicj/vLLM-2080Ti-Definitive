@@ -1176,23 +1176,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        output = torch.empty(
-            (hidden_states.shape[0], self.hidden_size),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        torch.ops.vllm.qwen_gdn_full_forward(
-            hidden_states,
-            output,
-            _encode_layer_name(self.prefix),
-        )
-        return output
-
-    def _forward_cuda_impl(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
         """
         Forward pass with three parts:
         1. Input projection
@@ -1223,9 +1206,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out,
                 layer_name=_encode_layer_name(self.prefix),
             )
-            projected_output, _ = self.out_proj(core_attn_out.flatten(-2))
-            output.copy_(projected_output)
-            return
+            output, _ = self.out_proj(core_attn_out.flatten(-2))
+            return output
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
@@ -1266,7 +1248,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        output.copy_(self._output_projection(core_attn_out, z))
+        return self._output_projection(core_attn_out, z)
 
     def forward_xpu(
         self,
@@ -2235,31 +2217,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             output_gate[:num_actual_tokens],
             core_attn_out[:num_actual_tokens],
         )
-
-
-def qwen_gdn_full_forward(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    """Run the complete Qwen GDN forward outside the compiled graph.
-
-    GDN recurrent state is sensitive to tiny projection and normalization
-    differences introduced by Inductor.  Keeping the complete stateful
-    forward behind one custom-op boundary preserves eager kernel ordering
-    while still allowing the surrounding transformer graph to compile.
-    """
-    layer_name = _resolve_layer_name(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    self._forward_cuda_impl(hidden_states, output)
-
-
-direct_register_custom_op(
-    op_name="qwen_gdn_full_forward",
-    op_func=qwen_gdn_full_forward,
-    mutates_args=["output"],
-)
 
 
 @eager_break_during_capture
