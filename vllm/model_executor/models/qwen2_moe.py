@@ -88,20 +88,6 @@ def _padded_intermediate_size(
         alignment = max(alignment, int(weight_block_size[0]))
     if weight_block_size is not None and len(weight_block_size) >= 2:
         alignment = max(alignment, int(weight_block_size[1]))
-    # Compressed-tensors NVFP4 checkpoints carry the packing block size in
-    # their per-target schemes rather than on QuantizationConfig.  Keep every
-    # TP shard aligned to the 128-wide packed row boundary.
-    if getattr(quant_config, "quant_format", None) == "mixed-precision":
-        schemes = getattr(quant_config, "target_scheme_map", {}).values()
-        if any(
-            getattr(scheme, "format", None) == "nvfp4-pack-quantized"
-            or (
-                isinstance(scheme, dict)
-                and scheme.get("format") == "nvfp4-pack-quantized"
-            )
-            for scheme in schemes
-        ):
-            alignment = max(alignment, 128)
     if alignment < 1:
         raise ValueError("TP partition alignment must be positive.")
     partition_alignment = tp_size * alignment if tp_size > 1 else 1
