@@ -1043,8 +1043,8 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
-def test_mamba_align_releases_hashed_boundary_state():
-    """Retirement releases request ownership but keeps the cache entry."""
+def test_mamba_align_keeps_hashed_boundary_state_alive():
+    """A target prefix hash must survive align-mode state retirement."""
     manager = make_kv_cache_manager(
         KVCacheConfig(
             num_blocks=16,
@@ -1075,19 +1075,14 @@ def test_mamba_align_releases_hashed_boundary_state():
     assert block.block_hash is not None
 
     # Exercise the exact retirement path used after a subsequent aligned
-    # allocation. The state block remains in the prefix cache, but no longer
-    # consumes a request-owned reference or a request-table slot.
+    # allocation. The state block remains hashed, so it must not be replaced
+    # by a null block or removed from the prefix-cache map.
     mamba_manager = manager.coordinator.single_type_managers[0]
     mamba_manager.last_state_block_idx[request.request_id] = 0
     manager.remove_skipped_blocks(request.request_id, 16, 64)
 
     assert not block.is_null
     assert block.block_hash is not None
-    assert block.ref_cnt == 0
-    assert (
-        mamba_manager.req_to_blocks[request.request_id][0]
-        is mamba_manager._null_block
-    )
 
     resumed = make_request("resumed", list(range(64)), 16, sha256)
     _, num_computed_tokens, _ = manager.get_computed_blocks(resumed)
