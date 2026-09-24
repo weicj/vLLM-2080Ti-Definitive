@@ -18,8 +18,10 @@ profiles/
 ```
 
 Profile filenames use `<decoder>-<kv>-<concurrency><context>-<message>.env`.
-For example, `dflash2-tqk8v4-2x172k-text-only.env` is a DFlash2 route using
-TQK8V4 KV, two concurrent requests, 172K context per request, and text-only
+The context label is the decimal-token value (floor of `MAX_MODEL_LEN / 1000`),
+not a binary Ki-token conversion; for example, `262144` is labeled `262K`.
+Thus `dflash2-tqk8v4-4x220K-text-only.env` is a DFlash2 route using TQK8V4 KV,
+four concurrent requests, 220K decimal-token context per request, and text-only
 messages. Decode routing uses `SPECULATIVE_METHOD=none|mtp|dflash` and
 `SPECULATIVE_TOKENS`; the defaults are `0`, `3`, and `7`, respectively.
 Per-request speculative metrics are a launcher setting:
@@ -32,7 +34,7 @@ required route fields are `MODEL_FAMILY`, `MODEL_VARIANT`, `QUANTIZATION`,
 `MODE`, `MAX_BATCHED_TOKENS`, and `ENABLE_YARN`.
 
 For example, save the following as
-`qwen27b/w8a16/mtp4-fp8kv-1x256k-text-only.env`:
+`qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env`:
 
 ```dotenv
 MODEL_FAMILY=qwen35

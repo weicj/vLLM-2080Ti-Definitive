@@ -16,8 +16,9 @@ profiles/
 ```
 
 Profile 文件名统一使用 `<解码类型>-<KV精度>-<并发数><上下文>-<消息类型>.env`。
-例如 `dflash2-tqk8v4-2x172k-text-only.env` 表示 DFlash2、TQK8V4 KV、双并发、
-每路 172K 上下文、纯文本消息。投机解码通过
+例如 `dflash2-tqk8v4-4x220K-text-only.env` 表示 DFlash2、TQK8V4 KV、四并发、
+每路 220K（十进制 token）上下文、纯文本消息。文件名中的上下文标签取
+`MAX_MODEL_LEN / 1000` 的整数部分，例如 262144 标记为 262K。投机解码通过
 `SPECULATIVE_METHOD=none|mtp|dflash` 路由，`SPECULATIVE_TOKENS` 默认分别为
 `0`、`3`、`7`。逐请求投机指标由 launcher 设置：
 `PER_REQUEST_SPEC_DECODE_METRICS=none|summary|detailed`。
@@ -29,7 +30,7 @@ Profile 文件名统一使用 `<解码类型>-<KV精度>-<并发数><上下文>-
 `MAX_BATCHED_TOKENS` 和 `ENABLE_YARN`。
 
 例如，将下面内容保存为
-`qwen27b/w8a16/mtp4-fp8kv-1x256k-text-only.env`：
+`qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env`：
 
 ```dotenv
 MODEL_FAMILY=qwen35

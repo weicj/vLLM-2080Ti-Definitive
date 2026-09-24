@@ -7,7 +7,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 write_valid_profile() {
   local dir=$1
-  local name=${2:-nomtp-fp16kv-1x128k-text-only.env}
+  local name=${2:-nomtp-fp16kv-1x131k-text-only.env}
   mkdir -p "$dir"
   printf '%s\n' \
     'MODEL_FAMILY=qwen35moe' \
@@ -76,17 +76,21 @@ write_valid_profile "$case_dir" >/dev/null
 expect_invalid "$TEST_ROOT/legacy-dir" 'fast/normal must be selected by the launcher'
 
 case_dir="$TEST_ROOT/yarn"
-profile=$(write_valid_profile "$case_dir" 'yarn-fp16kv-1x128k-text-only.env')
+profile=$(write_valid_profile "$case_dir" 'yarn-fp16kv-1x131k-text-only.env')
 printf 'ENABLE_YARN=1\n' >> "$profile"
 expect_valid "$case_dir"
 
 case_dir="$TEST_ROOT/yarn-missing-flag"
-write_valid_profile "$case_dir" 'yarn-fp16kv-1x128k-text-only.env' >/dev/null
+write_valid_profile "$case_dir" 'yarn-fp16kv-1x131k-text-only.env' >/dev/null
 expect_invalid "$case_dir" 'YaRN profile filename requires ENABLE_YARN=1'
 
 case_dir="$TEST_ROOT/context-mismatch"
 profile=$(write_valid_profile "$case_dir")
 sed -i 's/MAX_MODEL_LEN=131072/MAX_MODEL_LEN=65536/' "$profile"
+expect_invalid "$case_dir" 'filename context does not match MAX_MODEL_LEN'
+
+case_dir="$TEST_ROOT/binary-context-label"
+profile=$(write_valid_profile "$case_dir" 'nomtp-fp16kv-1x128k-text-only.env')
 expect_invalid "$case_dir" 'filename context does not match MAX_MODEL_LEN'
 
 echo "profile_validator_ok"
