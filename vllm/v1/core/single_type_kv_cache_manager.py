@@ -1637,12 +1637,6 @@ class MambaManager(SingleTypeKVCacheManager):
         for i in range(last_block - 1, first_block - 1, -1):
             if blocks[i].is_null:
                 continue
-            # A hashed align-mode state is also a target prefix-cache
-            # snapshot. Keep it in the request table until the request is
-            # released; freeing it would make the next state allocation reuse
-            # the block and evict the hash before another request can hit it.
-            if blocks[i].block_hash is not None:
-                continue
             freed.append(blocks[i])
             blocks[i] = self._null_block
         if freed:
