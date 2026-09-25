@@ -1060,9 +1060,10 @@ class MambaSpec(KVCacheSpec):
         # no CP scaling applies.
         if vllm_config.cache_config.mamba_cache_mode == "align":
             # Block table rows are position-indexed over the full sequence
-            # even though only 2 + num_speculative_blocks state blocks are
-            # resident at a time (earlier states are nulled out by
-            # remove_skipped_blocks), so the row length must cover max_len
+            # even though only a small resident state set is live at a time:
+            # normally 2 + num_speculative_blocks blocks, or 3 resident
+            # blocks for DFlash/DSpark. Earlier states are nulled out by
+            # remove_skipped_blocks, so the row length must cover max_len
             # rather than max_memory_usage_bytes.
             return cdiv(max_len, self.block_size) + self.num_speculative_blocks
         return cdiv(self.max_memory_usage_bytes(vllm_config), self.page_size_bytes)
