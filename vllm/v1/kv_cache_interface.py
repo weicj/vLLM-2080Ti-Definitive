@@ -1041,10 +1041,10 @@ class MambaSpec(KVCacheSpec):
             speculative_method = getattr(
                 vllm_config.speculative_config, "method", None
             )
-            # DFlash keeps draft KV in independent pools and does not execute
-            # Mamba layers for lookahead tokens. Keep one active replay page
-            # plus three hashed boundary pages for target reuse while omitting
-            # draft lookahead pages from this pool.
+            # DFlash keeps draft KV in independent pools, but the target
+            # verifier still consumes speculative Mamba state pages. Keep one
+            # active replay page plus three hashed boundary pages for target
+            # prefix reuse in addition to those verifier pages.
             resident_state_blocks = (
                 4 if speculative_method in ("dflash", "dspark") else 2
             )
