@@ -68,19 +68,6 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        speculative_method = getattr(vllm_config.speculative_config, "method", None)
-        # DFlash keeps draft KV in independent pools and does not execute
-        # Mamba layers for lookahead tokens. Target Mamba therefore does not
-        # need speculative state pages for these methods.
-        num_speculative_blocks = (
-            0
-            if speculative_method in ("dflash", "dspark")
-            else (
-                0
-                if vllm_config.cache_config.use_kda_recoverssm
-                else vllm_config.num_speculative_tokens
-            )
-        )
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
@@ -91,7 +78,11 @@ class MambaBase(AttentionLayerBase):
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
             # RecoverSSM verifies the whole window off one checkpoint, so it
             # never writes the baseline's per-draft-token state slots.
-            num_speculative_blocks=num_speculative_blocks,
+            num_speculative_blocks=(
+                0
+                if vllm_config.cache_config.use_kda_recoverssm
+                else vllm_config.num_speculative_tokens
+            ),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:

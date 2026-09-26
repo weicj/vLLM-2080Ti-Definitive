@@ -34,8 +34,8 @@ from vllm.v1.kv_cache_interface import (
 pytestmark = pytest.mark.cpu_test
 
 
-def test_dflash_target_mamba_does_not_reserve_speculative_pages():
-    """DFlash uses independent draft KV and four target replay-state pages."""
+def test_dflash_target_mamba_reserves_speculative_pages():
+    """DFlash draft KV remains independent of target verifier state pages."""
 
     class StubMamba:
         get_state_shape = lambda self: ((1, 1),)
@@ -63,11 +63,11 @@ def test_dflash_target_mamba_does_not_reserve_speculative_pages():
     dflash_spec = MambaBase.get_kv_cache_spec(StubMamba(), dflash_config)
     mtp_spec = MambaBase.get_kv_cache_spec(StubMamba(), mtp_config)
 
-    assert dflash_spec.num_speculative_blocks == 0
+    assert dflash_spec.num_speculative_blocks == 7
     assert mtp_spec.num_speculative_blocks == 3
     assert dflash_spec.max_memory_usage_bytes(
         dflash_config
-    ) == 4 * dflash_spec.page_size_bytes
+    ) == 11 * dflash_spec.page_size_bytes
     assert mtp_spec.max_memory_usage_bytes(
         mtp_config
     ) == 5 * mtp_spec.page_size_bytes
