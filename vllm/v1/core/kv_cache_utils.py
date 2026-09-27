@@ -791,12 +791,11 @@ def resolve_kv_cache_block_sizes(
         isinstance(spec, MambaSpec)
         and spec.mamba_cache_mode == "align"
         and (
-            # Equality is important for hybrid routes whose full-attention
-            # and Mamba groups have the same physical block size.  The
-            # scheduler may still use a larger LCM/budget alignment (for
-            # example 2048 with 1648-token FP8 KV blocks), but hashes remain
-            # valid at the group block boundary.
-            (dcp == 1 and block_size >= hash_block_size)
+            # For TP-style routes (DCP=1), equality means the Mamba block is
+            # already exactly one hash unit, so keep the cache scheduler-
+            # aligned instead of arming the partial-hash path. DCP retains
+            # equality because sharding changes the effective attention block.
+            (dcp == 1 and block_size > hash_block_size)
             or (dcp > 1 and block_size >= hash_block_size)
         )
         for group, block_size in zip(groups, group_block_sizes)

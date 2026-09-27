@@ -879,10 +879,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             isinstance(g.kv_cache_spec, MambaSpec)
             and g.kv_cache_spec.mamba_cache_mode == "align"
             and (
-                # Keep partial-hash alignment when the Mamba block is exactly
-                # the hash unit too.  This is required when the scheduler's
-                # chunk budget is larger than both hybrid group blocks.
-                (dcp_world_size == 1 and g.kv_cache_spec.block_size >= hash_block_size)
+                # TP=1 uses partial hashes only when the Mamba block is
+                # larger than the hash unit; equality stays scheduler-aligned.
+                # DCP retains equality because it scales the effective full-
+                # attention block.
+                (dcp_world_size == 1 and g.kv_cache_spec.block_size > hash_block_size)
                 or (
                     dcp_world_size > 1 and g.kv_cache_spec.block_size >= hash_block_size
                 )

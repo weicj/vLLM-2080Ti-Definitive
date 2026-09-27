@@ -169,6 +169,19 @@ def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
     assert num_computed == 6
 
 
+def test_tp_partial_hash_requires_larger_mamba_block():
+    """TP=1 does not arm partial hashes when block sizes are equal."""
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=hash_block_size,
+    )
+
+    assert not manager.coordinator.enable_partial_hash_hits
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
