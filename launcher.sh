@@ -882,6 +882,8 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   TOOL_CALL_PARSER
   TOOL_PARSER_PLUGIN
   ENABLE_PREFIX_CACHING
+  KV_STORE_BACKEND
+  MOONCAKE_CONFIG_PATH
   ENABLE_YARN
   ENABLE_PROMPT_TOKENS_DETAILS
   DISABLE_PREFIX_CACHING
@@ -1373,6 +1375,8 @@ save_manager_state() {
     printf 'KV_CACHE_DTYPE=%q\n' "${KV_CACHE_DTYPE:-}"
     printf 'MAMBA_CACHE_MODE=%q\n' "${MAMBA_CACHE_MODE:-}"
     printf 'ENABLE_PREFIX_CACHING=%q\n' "${ENABLE_PREFIX_CACHING:-1}"
+    printf 'KV_STORE_BACKEND=%q\n' "${KV_STORE_BACKEND:-none}"
+    printf 'MOONCAKE_CONFIG_PATH=%q\n' "${MOONCAKE_CONFIG_PATH:-}"
     printf 'ENABLE_PROMPT_TOKENS_DETAILS=%q\n' "${ENABLE_PROMPT_TOKENS_DETAILS:-1}"
     printf 'MAX_MODEL_LEN=%q\n' "${MAX_MODEL_LEN:-}"
     printf 'GPU_UTIL=%q\n' "${GPU_UTIL:-}"
@@ -1737,6 +1741,55 @@ current_prefix_cache_label() {
     printf 'enabled'
   else
     printf 'auto'
+  fi
+}
+
+current_kv_store_label() {
+  case "${KV_STORE_BACKEND:-none}" in
+    mooncake) printf 'Mooncake Store (experimental)' ;;
+    *) printf 'none' ;;
+  esac
+}
+
+validate_kv_store_config() {
+  KV_STORE_BACKEND=${KV_STORE_BACKEND:-none}
+  case "$KV_STORE_BACKEND" in
+    none) return 0 ;;
+    mooncake) ;;
+    *)
+      echo "ERROR: KV_STORE_BACKEND must be none or mooncake." >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -z "${MOONCAKE_CONFIG_PATH:-}" || ! -r "$MOONCAKE_CONFIG_PATH" ]]; then
+    echo "ERROR: Mooncake requires a readable MOONCAKE_CONFIG_PATH." >&2
+    return 1
+  fi
+  "$RUNTIME_ROOT/.venv/bin/python" - "$MOONCAKE_CONFIG_PATH" <<'PY' || return 1
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    if not isinstance(config, dict):
+        raise ValueError("expected a JSON object")
+    for key in ("metadata_server", "master_server_address"):
+        if not isinstance(config.get(key), str) or not config[key].strip():
+            raise ValueError(f"{key} must be a nonempty string")
+except (OSError, ValueError) as exc:
+    print(f"ERROR: Invalid Mooncake config: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+  export MOONCAKE_CONFIG_PATH
+}
+
+check_kv_store_dependency() {
+  [[ "${KV_STORE_BACKEND:-none}" == mooncake ]] || return 0
+  if ! "$RUNTIME_ROOT/.venv/bin/python" -c 'import mooncake.store' >/dev/null 2>&1; then
+    echo "ERROR: Mooncake Store is unavailable in the runtime venv. Install the CUDA-matched mooncake-transfer-engine package." >&2
+    return 1
   fi
 }
 
@@ -2626,6 +2679,8 @@ Notes:
     quality risk.
   - Chat-template presets live under profiles/templates and are global launcher
     settings, not route-profile fields.
+  - External KV store is an experimental service setting. Mooncake Store
+    requires a separate Mooncake deployment and a config JSON path.
   - Model architecture is detected from config.json. Qwen profiles use qwen35,
     qwen35moe, or qwen4 so presets can be filtered by runtime architecture.
   - Tool-calling defaults are global launcher settings. Enable automatic tool
@@ -3285,6 +3340,7 @@ edit_advanced_parameters() {
   NO_ASYNC_SCHEDULING=$(prompt_toggle01 "No async scheduling" "${NO_ASYNC_SCHEDULING:-0}") || return 0
   DISABLE_HYBRID_KV_CACHE_MANAGER=$(prompt_toggle01 "Disable hybrid KV cache manager" "${DISABLE_HYBRID_KV_CACHE_MANAGER:-0}") || return 0
   DISABLE_PREFIX_CACHING=$(prompt_toggle01 "Disable prefix caching" "${DISABLE_PREFIX_CACHING:-0}") || return 0
+  edit_kv_store_menu
   CUSTOM_ALL_REDUCE_MODE=$(prompt_optional "Custom all-reduce mode (auto/off)" "${CUSTOM_ALL_REDUCE_MODE:-auto}") || return 0
   unset DISABLE_CUSTOM_ALL_REDUCE
   DISABLE_LOG_STATS=$(prompt_toggle01 "Disable log stats" "${DISABLE_LOG_STATS:-0}") || return 0
@@ -3393,6 +3449,18 @@ edit_prefix_cache_menu() {
       ENABLE_PROMPT_TOKENS_DETAILS=1
       ;;
   esac
+  save_manager_state
+}
+
+edit_kv_store_menu() {
+  local choice config_path
+
+  choice=$(menu_select "External KV store" "${KV_STORE_BACKEND:-none}" none mooncake) || return 0
+  if [[ "$choice" == mooncake ]]; then
+    config_path=$(prompt_default "Mooncake config JSON path" "${MOONCAKE_CONFIG_PATH:-}") || return 0
+    MOONCAKE_CONFIG_PATH=$config_path
+  fi
+  KV_STORE_BACKEND=$choice
   save_manager_state
 }
 
@@ -3521,7 +3589,7 @@ runtime_parameter_menu() {
   local model_family_value model_variant_value served_name_value
   local quantization_value kv_value context_value gpu_util_value
   local batch_tokens_value max_sequences_value spec_decode_value spec_metrics_value message_type_value
-  local template_value reasoning_value tool_calling_value prefix_cache_value
+  local template_value reasoning_value tool_calling_value prefix_cache_value kv_store_value
   local ple_placement_value
 
   while true; do
@@ -3541,6 +3609,7 @@ runtime_parameter_menu() {
     reasoning_value=$(menu_value "$(current_reasoning_label)")
     tool_calling_value=$(menu_value "$(current_tool_calling_label)")
     prefix_cache_value=$(menu_value "$(current_prefix_cache_label)")
+    kv_store_value=$(menu_value "$(current_kv_store_label)")
 
     if is_tty; then
       clear >/dev/tty 2>/dev/null || true
@@ -3565,6 +3634,7 @@ runtime_parameter_menu() {
       "Reasoning defaults: $reasoning_value"
       "Tool calling: $tool_calling_value"
       "Prefix cache: $prefix_cache_value"
+      "External KV store: $kv_store_value"
       "Advanced options"
       "Edit all fields"
       "Return"
@@ -3627,6 +3697,9 @@ runtime_parameter_menu() {
         ;;
       "Prefix cache:"*)
         edit_prefix_cache_menu
+        ;;
+      "External KV store:"*)
+        edit_kv_store_menu
         ;;
       "Advanced options")
         edit_advanced_parameters || continue
@@ -4700,6 +4773,9 @@ build_args() {
   elif [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]]; then
     VLLM_ARGS+=(--enable-prefix-caching)
   fi
+  if [[ "${KV_STORE_BACKEND:-none}" == mooncake ]]; then
+    VLLM_ARGS+=(--kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both"}')
+  fi
   [[ "${ENABLE_PROMPT_TOKENS_DETAILS:-1}" == "1" ]] && VLLM_ARGS+=(--enable-prompt-tokens-details)
   [[ "${LANGUAGE_MODEL_ONLY:-0}" == "1" ]] && VLLM_ARGS+=(--language-model-only)
   [[ "${SKIP_MM_PROFILING:-0}" == "1" ]] && VLLM_ARGS+=(--skip-mm-profiling)
@@ -5404,6 +5480,7 @@ launch_server() {
     return 0
   fi
 
+  check_kv_store_dependency || return 1
   configure_dflash_download_route || return 1
   [[ -n "${HF_ACTIVE_ENDPOINT:-}" ]] && server_env+=("HF_ENDPOINT=$HF_ACTIVE_ENDPOINT")
   check_checkpoint_mmap_policy || return 1
@@ -5758,6 +5835,7 @@ prepare_runtime_defaults() {
   derive_yarn_overrides || return 1
   apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
+  validate_kv_store_config || return 1
   ENABLE_AUTO_TOOL_CHOICE=$(normalize_bool "${ENABLE_AUTO_TOOL_CHOICE:-0}")
   apply_family_reasoning_defaults
   if [[ "$ENABLE_AUTO_TOOL_CHOICE" == "1" ]]; then
@@ -5804,6 +5882,8 @@ Launch summary:
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)
+  External KV store:    $(current_kv_store_label)
+  Mooncake config:      $([[ "$KV_STORE_BACKEND" == mooncake ]] && printf '%s' "$MOONCAKE_CONFIG_PATH" || printf 'n/a')
   Custom all-reduce:    $(current_custom_all_reduce_label)
   Mamba cache mode:     ${MAMBA_CACHE_MODE:-auto}
   Context tokens:       $MAX_MODEL_LEN
@@ -5990,6 +6070,8 @@ render_main_menu() {
   printf '     KV precision:     %s\n' "$(menu_value "${KV_CACHE_DTYPE:-fp16}")"
   MAIN_MENU_RENDERED_LINES=$((MAIN_MENU_RENDERED_LINES + 1))
   printf '     Prefix cache:     %s\n' "$(menu_value "$(current_prefix_cache_label)")"
+  MAIN_MENU_RENDERED_LINES=$((MAIN_MENU_RENDERED_LINES + 1))
+  printf '     External KV store: %s\n' "$(menu_value "$(current_kv_store_label)")"
   MAIN_MENU_RENDERED_LINES=$((MAIN_MENU_RENDERED_LINES + 1))
   printf '     Context tokens:   %s\n' "$(menu_value "${MAX_MODEL_LEN:-$(default_context_tokens)}")"
   MAIN_MENU_RENDERED_LINES=$((MAIN_MENU_RENDERED_LINES + 1))
