@@ -835,6 +835,26 @@ ROUTE_PROFILE_KEYS=(
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
   MESSAGE_TYPE
+  MM_LIMIT_JSON
+  MM_ENCODER_TP_MODE
+  LANGUAGE_MODEL_ONLY
+  SKIP_MM_PROFILING
+  HF_OVERRIDES_JSON
+  ADDITIONAL_CONFIG_JSON
+  SPECULATIVE_CONFIG
+  COMPILATION_CONFIG_JSON
+  ATTENTION_BACKEND
+  DISABLE_HYBRID_KV_CACHE_MANAGER
+  DISABLE_CUSTOM_ALL_REDUCE
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN
+  VLLM_INT8KV_FA_CASCADE_DEQUANT
+  VLLM_INT8KV_FA_CASCADE_TILE_TOKENS
+  VLLM_INT8KV_FA_CONTINUATION_DEQUANT
+  VLLM_INT8KV_FA_PREFILL
+  VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE
+  VLLM_TURBOQUANT_CONTINUATION_PREFIX_COMBINE_MIN_TOKENS
+  VLLM_TURBOQUANT_MAX_KV_SPLITS
+  VLLM_TURBOQUANT_DECODE_BLOCK_KV
 )
 
 PROFILE_RESET_KEYS=(
@@ -901,20 +921,11 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   STATE_FILE
   FLASHQLA_ROOT
   START_TIMEOUT
-  MM_IMAGE_LIMIT
-  MM_LIMIT_JSON
-  CUDA_HOME
-  CUDA_VISIBLE_DEVICES
-  CUDA_DEVICE_ORDER
-  CUDACXX
-  CC
-  CXX
-  CUDAHOSTCXX
-  TORCH_CUDA_ARCH_LIST
-  TORCH_EXTENSIONS_DIR
-  FLASHINFER_ENABLE_AOT
-  FLASHINFER_WORKSPACE_BASE
-  RUN_HOME
+  SPECULATIVE_MODEL
+  SPECULATIVE_DRAFT_TP_SIZE
+  SPECULATIVE_MAX_MODEL_LEN
+  SPECULATIVE_ATTENTION_BACKEND
+  SPECULATIVE_KV_CACHE_DTYPE
 )
 
 NON_INTERACTIVE_BOOLEAN_KEYS=(
@@ -4981,6 +4992,7 @@ build_args() {
   elif [[ "$MODEL_FAMILY" == gemma* ]]; then
     VLLM_ARGS+=(--limit-mm-per-prompt '{"image":0,"video":0,"audio":0}')
   fi
+  [[ -n "${MM_ENCODER_TP_MODE:-}" ]] && VLLM_ARGS+=(--mm-encoder-tp-mode "$MM_ENCODER_TP_MODE")
 
   if [[ "$MODEL_FAMILY" == qwen* && -n "${MM_LIMIT_JSON:-}" && -z "${ADDITIONAL_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--additional-config '{"gdn_prefill_backend":"flashqla_legacy"}')
@@ -4994,19 +5006,21 @@ build_args() {
   fi
   [[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE_FILE")
 
-  local spec_method spec_tokens capture_sizes capture_max generated_speculative_config
-  spec_method=$(effective_speculative_method)
-  spec_tokens=$(effective_speculative_tokens)
-  if [[ "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )) && \
-     [[ -n "${PER_REQUEST_SPEC_DECODE_METRICS:-}" && "${PER_REQUEST_SPEC_DECODE_METRICS:-}" != "none" ]]; then
-    VLLM_ARGS+=(--per-request-spec-decode-metrics "$PER_REQUEST_SPEC_DECODE_METRICS")
-  fi
+  local decode_query_len=$((MTP_K + 1))
   if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
-    VLLM_ARGS+=(--speculative-config "$SPECULATIVE_CONFIG")
-  elif [[ -n "$spec_method" && "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )); then
-    generated_speculative_config=$(build_generated_speculative_config \
-      "$spec_method" "$spec_tokens" "$(effective_speculative_attention_backend)" "$(effective_speculative_use_local_argmax_reduction)" "$(effective_speculative_draft_sample_method)")
-    VLLM_ARGS+=(--speculative-config "$generated_speculative_config")
+    local configured_speculative_tokens
+    configured_speculative_tokens=$(speculative_config_tokens "$SPECULATIVE_CONFIG") || return 1
+    if [[ "$configured_speculative_tokens" =~ ^[1-9][0-9]*$ ]]; then
+      decode_query_len=$((configured_speculative_tokens + 1))
+    fi
+  fi
+  local decode_max_tokens=$((MAX_NUM_SEQS * decode_query_len))
+  if [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
+    local resolved_speculative_config
+    resolved_speculative_config=$(resolve_speculative_config "$SPECULATIVE_CONFIG") || return 1
+    VLLM_ARGS+=(--speculative-config "$resolved_speculative_config")
+  elif (( MTP_K > 0 )); then
+    VLLM_ARGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_K}}")
   fi
 
   local cudagraph_mode
@@ -5039,6 +5053,52 @@ build_args() {
   else
     VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[1],\"max_cudagraph_capture_size\":1}")
   fi
+}
+
+resolve_speculative_config() {
+  local config=$1
+  python3 - "$config" "${SPECULATIVE_MODEL:-}" \
+    "${SPECULATIVE_DRAFT_TP_SIZE:-}" "${SPECULATIVE_MAX_MODEL_LEN:-}" \
+    "${SPECULATIVE_ATTENTION_BACKEND:-}" "${SPECULATIVE_KV_CACHE_DTYPE:-}" <<'PY'
+import json
+import sys
+
+raw, model, draft_tp, max_model_len, attention_backend, kv_cache_dtype = sys.argv[1:]
+try:
+    config = json.loads(raw)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid SPECULATIVE_CONFIG JSON: {exc}")
+if not isinstance(config, dict):
+    raise SystemExit("SPECULATIVE_CONFIG must be a JSON object")
+
+if config.get("method") == "dflash":
+    if model and not config.get("model"):
+        config["model"] = model
+    if draft_tp and not config.get("draft_tensor_parallel_size"):
+        config["draft_tensor_parallel_size"] = int(draft_tp)
+    if max_model_len and not config.get("max_model_len"):
+        config["max_model_len"] = int(max_model_len)
+    if attention_backend and not config.get("attention_backend"):
+        config["attention_backend"] = attention_backend
+    if kv_cache_dtype and not config.get("kv_cache_dtype"):
+        config["kv_cache_dtype"] = kv_cache_dtype
+
+print(json.dumps(config, separators=(",", ":")))
+PY
+}
+
+speculative_config_tokens() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    config = json.loads(sys.argv[1])
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"invalid SPECULATIVE_CONFIG JSON: {exc}")
+value = config.get("num_speculative_tokens", 0) if isinstance(config, dict) else 0
+print(value)
+PY
 }
 
 startup_status_line() {

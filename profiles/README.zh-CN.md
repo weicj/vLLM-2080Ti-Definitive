@@ -46,10 +46,47 @@ SPECULATIVE_TOKENS=4
 MESSAGE_TYPE=text-only
 ```
 
-文件名和字段值必须保持一致：`nomtp`、`mtpN`、`dflash` 要分别匹配投机方法和
-token 数；文件名中的并发数和 `K` 形式的上下文要分别匹配 `MAX_NUM_SEQS` 和
-`MAX_MODEL_LEN`；KV 与消息类型后缀也要匹配对应字段。手写完成后，先运行
-`bash tools/validate_profiles.sh` 校验，再使用该 Profile。
+| Profile | 启动模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
+|---|---|---:|---|---:|---|---:|---:|
+| `qwen27b/w8a16/normal/fp16kv-104K-mtp3-text-image.env` | normal | 104K | FP16 | 3 | text+image | 110,784 | 1506.86 / 82.88 |
+| `qwen27b/w8a16/normal/fp16kv-128K-mtp3-text-only.env` | normal | 128K | FP16 | 3 | text-only | 138,394 | 1496.95 / 83.90 |
+| `qwen27b/w8a16/normal/fp16kv-144K-nomtp-text-only.env` | normal | 144K | FP16 | 0 | text-only | 152,749 | 1501.39 / 30.40 |
+| `qwen27b/w8a16/fast/tqk8v4-256K-mtp3-text-only.env` | fast | 256K | TQK8V4 | 3 | text-only | 310,827 | 1525.37 / 83.51 |
+| `qwen27b/w8a16/normal/fp8kv-220K-mtp3-text-image.env` | normal | 220K | FP8 | 3 | text+image | 231,169 | 1555.1 / 70.1 |
+| `qwen27b/w8a16/normal/fp8kv-256K-mtp3-text-only.env` | normal | 256K | FP8 | 3 | text-only | 320,232 | 1573.95 / 67.58 |
+| `qwen27b/w8a16/normal/fp16kv-32K-mtp4-tp3-text-only.env` | normal | 32K | FP16 | 4 | text-only | 54,346 | 4K/128：1025.5/73.0、1290.3/74.8、1204.9/75.0 tok/s；E2E 5.73/4.87/5.09 秒 |
+| `qwen27b/w8a16/normal/fp8kv-96K-mtp4-tp3-text-only.env` | normal | 96K | FP8 | 4 | text-only | 108,693 | warmup 后连续 3 次 4K/128：1175.7/40.3、1074.6/52.9、1157.9/73.6 tok/s；E2E 6.64/6.21/5.26 秒 |
 
-选择 profile 后，可执行 `./launcher.sh --print-config` 检查最终生效的路线参数，
-然后再启动服务。
+### [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
+
+| Profile | 启动模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
+|---|---|---:|---|---:|---|---:|---:|
+| `qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-only.env` | normal | 240K | FP8 | 3 | text-only | 463,890 | 1433.2 / 76.8 |
+| `qwen27b/w4a16/normal/fp8kv-240K-mtp3-text-image.env` | normal | 240K | FP8 | 3 | text+image | 426,080 | 1250.6 / 52.5 |
+| `qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 | 0 | text-only | 518,191 | 1372.1 / 42.0 |
+| `qwen27b/w4a16/fast/tq4nc-262K-mtp3-text-only.env` | fast | 262K | TQ4NC | 3 | text-only | 732,381 | 1402.9 / 103.5 |
+
+### 并发测试路线（NVFP4 纯文本）
+
+| Profile | 模式 | 上下文 | KV/MTP | GPU KV tokens | C1 | C2 | C4 | C8 | 证据 |
+|---|---|---:|---|---:|---:|---:|---:|---:|---|
+| `qwen27b/w4a16/normal/fp8kv-192K-nomtp-text-only.env` | normal | 192K | FP8 / 0 | 518,191 | 1372.1 / 42.0 | 1507.4 / 80.4 | 1535.9 / 152.0 | 1523.4 / 270.8 | 完整窗口正式测试 |
+| `qwen27b/w4a16/fast/tq4nc-262K-mtp3-text-only.env` | fast | 262K | TQ4NC / 3 | 732,381 | 1402.9 / 103.5 | 1449.1 / 180.4 | 1460.0 / 220.7 | 1449.1 / 347.3 | 完整窗口正式测试 |
+
+每个 C 单元格均为 `prefill / 完整窗口 aggregate decode` tok/s，并已关闭 prefix cache。
+
+### [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)
+
+| Profile | 启动模式 | 上下文 | KV | MTP | 消息 | GPU KV tokens | 性能 |
+|---|---|---:|---|---:|---|---:|---:|
+| `qwen35b/w8a16/normal/fp16kv-256K-nomtp-text-only.env` | normal | 256K | FP16 | 0 | text-only | 273,586 | 7378 / 128.7 |
+| `qwen35b/w8a16/normal/fp16kv-136K-nomtp-text-image.env` | normal | 136K | FP16 | 0 | text+image | 146,485 | 5965.8 / 127.6 |
+
+选定 profile 后，启动服务前执行 `./launcher.sh --print-config` 检查最终生效的路线参数。
+
+### TP3 路线
+
+`*-tp3-*` 条目是三张 T10/SM75 GPU 的路线 profile。GPU 顺序和 target TP 在
+profile 外设置，例如 `GPU_DEVICES=6,7,8 TP_SIZE=3`。上表均使用
+Qwen3.8-27B-FP8、纯文本、MTP4、关闭 prefix cache，并按标准连续 4K 输入/128
+输出窗口测量。DFlash2 TP3 的独立 draft 并行路线尚未验证，因此不提升为 profile。
