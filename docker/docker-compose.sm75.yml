@@ -1,0 +1,60 @@
+# vLLM 2080 Ti Definitive Edition（SM75）服务配置
+# 容器名 vllm-sm75：同一时刻只跑一个生产模型。
+#
+#   mkdir vllm-sm75 && cd vllm-sm75
+#   curl -fsSL -o compose.yaml https://raw.githubusercontent.com/weicj/vLLM-2080Ti-Definitive/main/docker/docker-compose.sm75.yml
+#   在 .env 里填 MODELS_DIR 和 MODEL_NAME（缺了会直接报错），然后 docker compose up -d
+#
+# 只运行已发布镜像，不构建。需要宿主机可用的 NVIDIA 驱动与 GPU 透传。
+# 为什么这样配：
+#   * --dtype half         2080 Ti 没有 bfloat16，bf16 会被降级转换，白花代价。
+#   * 不加 --enforce-eager  保留 CUDA Graph 默认行为；关掉会明显掉性能。
+#   * shm_size 24g         多卡 tensor parallel 依赖共享内存，不足会启动即失败。
+#   其余参数（--api-key、--kv-cache-dtype、--enable-prefix-caching …）按需自己往
+#   command 里加；镜像入口已经是 `vllm serve`。
+
+name: vllm-sm75
+
+services:
+  vllm:
+    image: ${IMAGE:-ghcr.io/weicj/vllm-2080ti-definitive:main}
+    container_name: vllm-sm75
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: 24g
+    ports:
+      # vLLM 默认没有认证，所以默认只监听本机。要对外提供服务，先在 command 里加
+      # --api-key，再把这里改成 "0.0.0.0:8000:8000"。
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # 必填：宿主机存放模型的目录，只读挂载为 /models。
+      - ${MODELS_DIR:?请设置 MODELS_DIR，即宿主机存放模型的目录}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      /models/${MODEL_NAME:?请设置 MODEL_NAME，即 MODELS_DIR 下的模型目录名}
+      --served-model-name ${MODEL_ALIAS:-sm75}
+      --dtype half
+      --tensor-parallel-size ${TP_SIZE:-2}
+      --max-model-len ${MAX_MODEL_LEN:-32768}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.90}
+      --max-num-seqs ${MAX_NUM_SEQS:-4}
+      --host 0.0.0.0
+      --port 8000
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # 首次启动要加载权重，SM75 上还可能触发内核 JIT 编译。
+      start_period: 600s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"

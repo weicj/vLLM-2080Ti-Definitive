@@ -127,6 +127,78 @@ NON_INTERACTIVE=1 ./launcher.sh
 Use `./launcher.sh --print-config` to preview a route. See the
 [non-interactive launch guide](docs/non-interactive-launch.md) for automation.
 
+### Docker
+
+Published images behave like the official vLLM image: the entrypoint is
+`vllm serve`, so the model and flags go directly after the image name.
+`weicj/vLLM-2080Ti-Definitive` publishes to
+`ghcr.io/weicj/vllm-2080ti-definitive`.
+
+#### Docker Compose (recommended)
+
+```bash
+mkdir vllm-sm75 && cd vllm-sm75
+curl -fsSL -o compose.yaml https://raw.githubusercontent.com/weicj/vLLM-2080Ti-Definitive/main/docker/docker-compose.sm75.yml
+```
+
+Then configure it. `MODELS_DIR` is the host directory that holds your models and
+`MODEL_NAME` is the directory name under it. Both are required: the compose file
+stops with an error if they are missing, instead of silently running something
+you did not pick.
+
+```bash
+cat > .env <<'EOF'
+MODELS_DIR=/path/to/models
+MODEL_NAME=Qwen3-0.6B
+EOF
+docker compose up -d
+```
+
+Optional: `IMAGE`, `MODEL_ALIAS`, `TP_SIZE`, `MAX_MODEL_LEN`,
+`GPU_MEMORY_UTILIZATION`, `MAX_NUM_SEQS`. Add any other vLLM flag to
+`command:` in the compose file — the image entrypoint is already `vllm serve`.
+
+Check the logs and confirm it is serving (add `-f` to the logs command to follow
+them live):
+
+```bash
+docker compose logs --tail=100
+curl --fail http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/v1/models
+```
+
+Update to the latest image later with:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+#### Docker
+
+```bash
+docker run -d --name vllm-sm75 --restart unless-stopped --gpus all --ipc=host \
+  -p 127.0.0.1:8000:8000 \
+  -v /path/to/models:/models:ro \
+  ghcr.io/weicj/vllm-2080ti-definitive:main \
+  /models/Qwen3-0.6B --dtype half --tensor-parallel-size 2
+```
+
+Check it the same way as above. The server has no authentication unless you
+configure it, which is why the compose file warns you to add `--api-key` before
+exposing it.
+
+Both methods only run a published image; neither builds one. See the bilingual
+[SM75 Docker guide](docs/deployment/docker-sm75.md) for two-GPU tensor parallel,
+cache mounts, image verification, and the WSL2 note. `docker/Dockerfile.sm75`
+builds the image from this fork's source (SM75 only, Linux amd64, CUDA 13.0.3,
+Ubuntu 24.04, Python 3.12) with the Torch and FlashQLA patches applied; it is
+separate from the upstream-derived `docker/Dockerfile`, and the host build,
+launcher, and profiles are unchanged.
+
+**Validated on two RTX 2080 Ti** (27B production-style model, text and
+multimodal, tensor parallel 2); throughput and capacity on this hardware are not
+yet measured.
+
 ## 🧭 Profiles
 
 Read the [Profile Guide](profiles/README.md) for the layout and route fields.

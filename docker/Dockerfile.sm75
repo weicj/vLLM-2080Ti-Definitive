@@ -1,0 +1,108 @@
+# syntax=docker/dockerfile:1.7
+# SPDX-License-Identifier: Apache-2.0
+# Based on upstream vLLM and vLLM 2080 Ti Definitive Edition (github.com/weicj).
+# This is the fork's SM75 route, not a replacement for docker/Dockerfile.
+
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:b7ae301dea2c162444795462ce17a05f6a516e5a75944b57af5b88540a1a2266
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.10@sha256:bca7f6959666f3524e0c42129f9d8bbcfb0c180d847f5187846b98ff06125ead
+FROM ${UV_IMAGE} AS uv
+
+# Keep the compiler/toolkit in the runtime: FlashInfer and FlashQLA use JIT.
+FROM ${CUDA_IMAGE} AS base
+ARG TARGETARCH
+RUN test "${TARGETARCH}" = amd64
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl git libgomp1 libnuma1 \
+        libibverbs1 libsm6 libxext6 pkg-config python3.12 python3.12-dev \
+        python3.12-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/uv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/cuda/bin:${PATH} \
+    CUDA_HOME=/usr/local/cuda \
+    CUDA_PATH=/usr/local/cuda \
+    CUDACXX=/usr/local/cuda/bin/nvcc \
+    TORCH_CUDA_ARCH_LIST=7.5 \
+    FLASHINFER_CUDA_ARCH_LIST=7.5 \
+    VLLM_DISABLE_TILELANG=1 \
+    UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=500
+RUN uv venv --python /usr/bin/python3.12 /opt/venv
+
+# Dependency metadata is deliberately separate from the native source layers.
+FROM base AS dependencies
+WORKDIR /src
+COPY PROJECT_RELEASE.env pyproject.toml setup.py README.md LICENSE CMakeLists.txt ./
+COPY requirements/ requirements/
+COPY vllm/envs.py vllm/__init__.py vllm/
+COPY tools/build_rust.py tools/build_rust.py
+COPY docker/build-sm75.sh /opt/build-sm75.sh
+ENV VLLM_TARGET_DEVICE=cuda VLLM_MAIN_CUDA_VERSION=13.0
+RUN --mount=type=cache,target=/root/.cache/uv \
+    bash /opt/build-sm75.sh dependencies
+
+FROM dependencies AS build
+ARG MAX_JOBS=2
+ARG NVCC_THREADS=1
+ENV MAX_JOBS=${MAX_JOBS} \
+    NVCC_THREADS=${NVCC_THREADS} \
+    CARGO_BUILD_JOBS=${MAX_JOBS} \
+    CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    bash /opt/build-sm75.sh wheel
+
+FROM base AS flashqla
+ARG FLASHQLA_COMMIT=3ab27d77d8ca01d7a4718903b726add1a8886c0e
+COPY tools/patch_flashqla_sm75_imports.py /tmp/patch_flashqla_sm75_imports.py
+COPY tools/flashqla_sm75_patches/ /tmp/flashqla_sm75_patches/
+RUN test "${#FLASHQLA_COMMIT}" -eq 40 \
+    && printf '%s' "$FLASHQLA_COMMIT" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$' \
+    && git init /opt/FlashQLA \
+    && git -C /opt/FlashQLA remote add origin https://github.com/weicj/FlashQLA-SM70-SM75.git \
+    && git -C /opt/FlashQLA fetch --depth=1 origin "$FLASHQLA_COMMIT" \
+    && git -C /opt/FlashQLA checkout --detach FETCH_HEAD \
+    && test "$(git -C /opt/FlashQLA rev-parse HEAD)" = "$FLASHQLA_COMMIT" \
+    && python /tmp/patch_flashqla_sm75_imports.py /opt/FlashQLA /tmp/flashqla_sm75_patches \
+    && printf '%s\n' "$FLASHQLA_COMMIT" > /opt/FlashQLA/.vllm-source-revision \
+    && rm -rf /opt/FlashQLA/.git
+
+FROM base AS vllm-openai
+ARG VLLM_BUILD_COMMIT=unknown
+ARG VLLM_IMAGE_TAG=local
+ARG VLLM_BUILD_URL=
+ARG VLLM_IMAGE_SOURCE=https://github.com/weicj/vLLM-2080Ti-Definitive
+LABEL org.opencontainers.image.title="vLLM 2080 Ti Definitive Edition (SM75)" \
+      org.opencontainers.image.description="SM75 source build based on upstream vLLM and vLLM 2080 Ti Definitive Edition by github.com/weicj" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="${VLLM_IMAGE_SOURCE}" \
+      org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      org.opencontainers.image.url="${VLLM_BUILD_URL}"
+COPY --from=build /opt/venv /opt/venv
+COPY --from=flashqla /opt/FlashQLA /opt/FlashQLA
+COPY LICENSE README.md README.zh-CN.md /usr/share/doc/vllm-sm75/
+# vLLM's own examples pass these reranker templates by relative path; keep that
+# documented path working inside the image.
+COPY examples/pooling/score/template/ /vllm-workspace/examples/pooling/score/template/
+COPY PROJECT_RELEASE.env pyproject.toml /opt/vllm-tools/
+COPY tools/check_torch_inductor_e8m0.py tools/smoke_docker_sm75.py /opt/vllm-tools/
+ENV FLASHQLA_ROOT=/opt/FlashQLA \
+    FLASHQLA_DIR=/opt/FlashQLA \
+    TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions \
+    VLLM_USAGE_SOURCE=production-docker-image \
+    VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT} \
+    VLLM_IMAGE_TAG=${VLLM_IMAGE_TAG} \
+    VLLM_BUILD_URL=${VLLM_BUILD_URL}
+# Integrate the pinned legacy source without imposing FlashQLA's SM90-only
+# dependency pins on the fork's newer Torch/TileLang runtime. Keep CUDA sources
+# available: its upstream wheel packaging does not include the legacy .cu file.
+RUN python -c 'import pathlib, sysconfig; pathlib.Path(sysconfig.get_path("purelib"), "flashqla-sm75.pth").write_text("/opt/FlashQLA\n")' \
+    && uv pip check \
+    && python /opt/vllm-tools/check_torch_inductor_e8m0.py
+WORKDIR /vllm-workspace
+EXPOSE 8000
+ENTRYPOINT ["vllm", "serve"]

@@ -1,0 +1,99 @@
+name: SM75 Docker
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - '.gitattributes'
+      - '.github/workflows/docker-sm75*.yml'
+      - 'docker/Dockerfile.sm75*'
+      - 'docker/build-sm75.sh'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'csrc/**'
+      - 'vllm/**'
+      - 'rust/**'
+      - 'rust-toolchain.toml'
+      - 'build_rust.sh'
+      - 'requirements/**'
+      - 'tools/**'
+      - 'tests/tools/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'PROJECT_RELEASE.env'
+      - 'README.md'
+      - 'README.zh-CN.md'
+      - 'LICENSE'
+      - 'VERSION'
+  pull_request:
+    paths:
+      - '.gitattributes'
+      - '.github/workflows/docker-sm75*.yml'
+      - 'docker/Dockerfile.sm75*'
+      - 'docker/build-sm75.sh'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'csrc/**'
+      - 'vllm/**'
+      - 'rust/**'
+      - 'rust-toolchain.toml'
+      - 'build_rust.sh'
+      - 'requirements/**'
+      - 'tools/**'
+      - 'tests/tools/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'PROJECT_RELEASE.env'
+      - 'README.md'
+      - 'README.zh-CN.md'
+      - 'LICENSE'
+      - 'VERSION'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a unique test image after smoke (never latest/main)
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Release runs share one group so two releases cannot promote `latest` out of
+  # order; every other event keeps its own ref.
+  group: docker-sm75-${{ github.event_name }}-${{ github.event_name == 'release' && 'publish' || github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+        (github.event_name == 'push' &&
+         github.ref != format('refs/heads/{0}', github.event.repository.default_branch)) }}
+
+jobs:
+  # These conditions are complements. Only a trusted publication gets a token
+  # with package write access; the reusable workflow cannot elevate permissions.
+  build-only:
+    if: >-
+      ${{ !((github.event_name == 'push' &&
+             github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+            (github.event_name == 'release' && github.event.action == 'published') ||
+            (github.event_name == 'workflow_dispatch' && inputs.publish)) }}
+    uses: ./.github/workflows/docker-sm75-build.yml
+    with:
+      publish: false
+
+  publish:
+    if: >-
+      ${{ (github.event_name == 'push' &&
+           github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+          (github.event_name == 'release' && github.event.action == 'published') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-sm75-build.yml
+    with:
+      publish: true

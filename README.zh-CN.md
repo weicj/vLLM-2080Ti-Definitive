@@ -118,6 +118,71 @@ NON_INTERACTIVE=1 ./launcher.sh
 使用 `./launcher.sh --print-config` 预览路线。自动化部署见
 [非交互启动说明](docs/non-interactive-launch.zh-CN.md)。
 
+### Docker
+
+已发布的镜像与官方 vLLM 镜像行为一致：入口为 `vllm serve`，模型和参数直接写在
+镜像名后面即可。`weicj/vLLM-2080Ti-Definitive` 发布到
+`ghcr.io/weicj/vllm-2080ti-definitive`。
+
+#### Docker Compose（推荐）
+
+```bash
+mkdir vllm-sm75 && cd vllm-sm75
+curl -fsSL -o compose.yaml https://raw.githubusercontent.com/weicj/vLLM-2080Ti-Definitive/main/docker/docker-compose.sm75.yml
+```
+
+然后先配置。`MODELS_DIR` 是宿主机存放模型的目录，`MODEL_NAME` 是它下面的模型目录
+名。两者都必填：缺了会直接报错退出，而不是静默用你没选过的配置跑起来。
+
+```bash
+cat > .env <<'EOF'
+MODELS_DIR=/path/to/models
+MODEL_NAME=Qwen3-0.6B
+EOF
+docker compose up -d
+```
+
+可选变量：`IMAGE`、`MODEL_ALIAS`、`TP_SIZE`、`MAX_MODEL_LEN`、
+`GPU_MEMORY_UTILIZATION`、`MAX_NUM_SEQS`。需要其他 vLLM 参数时，自己加到 compose
+文件的 `command:` 里即可——镜像入口已经是 `vllm serve`。
+
+查看日志并确认服务正常（想持续跟踪日志就给 logs 加上 `-f`）：
+
+```bash
+docker compose logs --tail=100
+curl --fail http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/v1/models
+```
+
+更新到最新镜像：
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+#### Docker
+
+```bash
+docker run -d --name vllm-sm75 --restart unless-stopped --gpus all --ipc=host \
+  -p 127.0.0.1:8000:8000 \
+  -v /path/to/models:/models:ro \
+  ghcr.io/weicj/vllm-2080ti-definitive:main \
+  /models/Qwen3-0.6B --dtype half --tensor-parallel-size 2
+```
+
+按上面的方式同样确认。除非自行配置，服务本身没有认证，因此 compose 文件里也注明
+了：对外暴露前先加 `--api-key`。
+
+两种方式都只运行已发布镜像，都不会构建镜像。双卡 tensor parallel、缓存挂载、
+镜像验证以及 WSL2 说明见双语
+[SM75 Docker 指南](docs/deployment/docker-sm75.zh-CN.md)。
+`docker/Dockerfile.sm75` 从本仓库源码构建镜像（仅 SM75、Linux amd64、CUDA
+13.0.3、Ubuntu 24.04、Python 3.12），并应用 Torch 与 FlashQLA 补丁；它与沿用上游的
+`docker/Dockerfile` 相互独立，原生构建、launcher 和 Profile 均未改动。
+
+**已在两张 RTX 2080 Ti 上验证**（27B 生产形态模型、文本与多模态、tensor parallel 2）；
+该硬件上的吞吐与容量尚未测量。
+
 ## 🧭 Profile 与推荐路线
 
 目录结构和路线字段请参阅 [Profile 指南](profiles/README.zh-CN.md)；详细 Profile
