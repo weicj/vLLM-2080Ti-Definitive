@@ -474,6 +474,26 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+        # This fused projection reads ``weight`` directly instead of going
+        # through the layer's quantization method, so it only works when the
+        # QKV projection is unquantized. A draft checkpoint stores the tensor
+        # in full precision whenever its ``modules_to_not_convert`` lists it;
+        # if that metadata did not match the draft's module names, the layer is
+        # built quantized and the raw checkpoint values were loaded without
+        # scales. Fail here with the actionable cause instead of letting
+        # ``F.linear`` raise a bare dtype mismatch.
+        qkv_weight = layers_attn[0].qkv_proj.weight
+        if qkv_weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError(
+                "DFlash context-KV precomputation needs an unquantized QKV "
+                f"projection, but {layers_attn[0].qkv_proj.prefix or 'qkv_proj'} "
+                f"has dtype {qkv_weight.dtype}. The draft checkpoint keeps this "
+                "tensor in full precision, so its quantization metadata did not "
+                "mark the module as excluded (draft modules are renamed, e.g. "
+                "``q_proj`` becomes ``model.layers.<target_layers + i>.self_attn"
+                ".qkv_proj``). Add the QKV projection to the draft's "
+                "``modules_to_not_convert``."
+            )
         kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:

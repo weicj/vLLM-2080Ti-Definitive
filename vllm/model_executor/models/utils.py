@@ -949,6 +949,34 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
+def _relax_draft_ignored_layer_matching(
+    quant_config: "QuantizationConfig | None",
+) -> None:
+    """Match a draft checkpoint's ``modules_to_not_convert`` by suffix.
+
+    Third-party speculative-decoding packs list the modules they exported in
+    full precision with abbreviated paths, e.g. ``["q_proj", "qkv_proj",
+    "fc", "layers.0.self_attn.q_proj"]``. Those names do not survive vLLM's
+    draft module naming:
+
+    * the draft is instantiated under ``model.`` (``model.layers.0...``), and
+    * DFlash-style drafts are renumbered after the target, so with a 64-layer
+      target the same projection becomes
+      ``model.layers.64.self_attn.qkv_proj``.
+
+    With exact matching every one of those entries is missed, so a full
+    precision checkpoint tensor is loaded into a quantized layer: the
+    quantized parameter receives the raw values without the scales the kernel
+    expects. Code paths that use the weight directly (e.g. DFlash's fused
+    context-KV projection) then fail on the dtype mismatch, and code paths
+    that go through the kernel compute with wrong values. Suffix matching
+    keeps the author's intent, because a listed name only matches when it ends
+    at a module component boundary.
+    """
+    if getattr(quant_config, "ignored_layers_match_mode", None) == "exact":
+        quant_config.ignored_layers_match_mode = "suffix"
+
+
 def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
     """Get quantization config for Draft models.
 
@@ -964,11 +992,14 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     draft_model_config = vllm_config.speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
-    return (
-        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-        if draft_model_config
-        else None
+    if not draft_model_config:
+        return None
+
+    quant_config = VllmConfig.get_quantization_config(
+        draft_model_config, draft_load_config
     )
+    _relax_draft_ignored_layer_matching(quant_config)
+    return quant_config
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:

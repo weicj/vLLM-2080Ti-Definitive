@@ -22,6 +22,10 @@ from vllm.triton_utils import tl, triton
 _ACTIVATION_GAIN = 32.0
 _RESIDUAL_GAIN = 256.0
 _HALF_PAYLOAD_LIMIT = 32752.0
+# Weight dtypes that are applied as-is by the linear kernel. Note that
+# ``float8`` dtypes report ``is_floating_point == True`` even though they are
+# 8-bit payloads that need their scale applied, so list the dense ones out.
+_DENSE_WEIGHT_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 
 def synchronize_dflash2_mlp_scales(
@@ -332,6 +336,67 @@ class Sm75DFlash2ResidualNorm(nn.Module):
         return output if residual is None else (output, next_state)
 
 
+def _dense_float_weight(layer: nn.Module, weight: torch.Tensor) -> torch.Tensor:
+    """Return a layer's *effective* weight in float32.
+
+    The SM75 transport bound must reflect the weights the kernel actually
+    applies. Quantized checkpoints store low-precision values plus separate
+    scales, so normalizing the serialized values directly overestimates the
+    row norms by roughly ``1 / scale``. For block-FP8 drafts whose
+    ``weight_scale_inv`` sits in ``[1e-3, 2e-2]`` that is a factor of 50-1000,
+    which makes the transport pick an activation scale two orders of magnitude
+    larger than needed: the FP16 headroom the bound exists to protect is
+    wasted, and small activations are pushed towards the subnormal range.
+    """
+    # ``float8`` dtypes report ``is_floating_point == True`` even though they
+    # are 8-bit payloads with separate scales, so the dense dtypes are listed
+    # explicitly in _DENSE_WEIGHT_DTYPES.
+    if weight.dtype in _DENSE_WEIGHT_DTYPES:
+        return weight.float()
+
+    scale = getattr(layer, "weight_scale_inv", None)
+    if not isinstance(scale, torch.Tensor):
+        scale = getattr(layer, "weight_scale", None)
+    if not isinstance(scale, torch.Tensor):
+        raise ValueError(
+            "DFlash2 SM75 transport cannot derive the down-projection bound: "
+            f"weight dtype is {weight.dtype} and the layer exposes no "
+            "weight_scale_inv/weight_scale to dequantize it. A packed weight "
+            "means the bound was requested after the quantization kernel "
+            "rewrote the parameter; initialize it during load_weights instead."
+        )
+
+    flat_weight = weight.float()
+    flat_scale = scale.float()
+    if flat_scale.numel() == 1:
+        return flat_weight * flat_scale.reshape(())
+
+    if flat_scale.dim() == 2 and flat_scale.shape[0] == 1:
+        if flat_scale.shape[1] != weight.shape[1]:
+            raise ValueError(
+                "DFlash2 SM75 transport cannot align per-channel scales "
+                f"{tuple(scale.shape)} with the local down-projection weight "
+                f"{tuple(weight.shape)}."
+            )
+        return flat_weight * flat_scale.expand_as(flat_weight)
+
+    if flat_scale.dim() == 2:
+        block = getattr(layer, "weight_block_size", None) or (128, 128)
+        block_n, block_k = int(block[0]), int(block[1])
+        expanded = flat_scale.repeat_interleave(block_n, 0).repeat_interleave(
+            block_k, 1
+        )
+        expanded = expanded[: weight.shape[0], : weight.shape[1]]
+        if expanded.shape == weight.shape:
+            return flat_weight * expanded
+
+    raise ValueError(
+        "DFlash2 SM75 transport cannot align block scales "
+        f"{tuple(scale.shape)} with the local down-projection weight "
+        f"{tuple(weight.shape)}."
+    )
+
+
 class Sm75DFlash2MLP(nn.Module):
     """SM75 implementation of DFlash2's BF16-trained SwiGLU transport."""
 
@@ -347,12 +412,13 @@ class Sm75DFlash2MLP(nn.Module):
         weight = getattr(self.down_proj, "weight", None)
         if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
             raise ValueError(
-                "DFlash2 SM75 transport requires an unquantized 2-D down projection."
+                "DFlash2 SM75 transport requires a 2-D down projection weight."
             )
         tp_size = max(1, int(getattr(self.down_proj, "tp_size", 1)))
         with torch.no_grad():
+            dense_weight = _dense_float_weight(self.down_proj, weight)
             self._down_projection_l2_bound = float(
-                torch.linalg.vector_norm(weight.float(), dim=1).amax().item()
+                torch.linalg.vector_norm(dense_weight, dim=1).amax().item()
             )
         # Each rank contributes a FP16 tensor to the row-parallel all-reduce.
         self._accumulation_limit = _HALF_PAYLOAD_LIMIT / tp_size
