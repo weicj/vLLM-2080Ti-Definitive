@@ -94,17 +94,39 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
         bf16_mtp_draft = os.getenv("VLLM_QWOPUS_MTP_BF16_DRAFT") == "1"
         quant_name = quant_config.get_name() if quant_config else None
-        fc_quant = (
-            None
-            if quant_name == "modelopt_fp4"
-            or (bf16_mtp_draft and quant_name != "fp8")
-            else quant_config
+        hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        excluded_modules = (
+            hf_quant_config.get("modules_to_not_convert") or []
+            if isinstance(hf_quant_config, dict)
+            else []
         )
+        # A checkpoint can export the whole MTP head unquantized by listing
+        # "mtp" in modules_to_not_convert; the head then carries plain BF16
+        # tensors and no scales. Layer quant configs match module prefixes
+        # exactly, so a parent entry like "mtp" never reaches
+        # `mtp.layers.0.mlp.down_proj`, and the BF16 weights would be loaded
+        # into FP8 parameters without scales. That failure is silent: the head
+        # predicts noise and draft acceptance drops to zero while the rest of
+        # the engine looks healthy. Honour the whole-head exclusion here.
+        mtp_head_unquantized = "mtp" in excluded_modules
+        if mtp_head_unquantized:
+            logger.info(
+                "MTP head is listed as unquantized (\"mtp\" in "
+                "modules_to_not_convert): building it without the target "
+                "quantization config."
+            )
         if bf16_mtp_draft:
             logger.info(
                 "VLLM_QWOPUS_MTP_BF16_DRAFT=1: loading Qwen3.5 MTP "
                 "fc/layer weights without the target quantization config."
             )
+        mtp_unquantized = bf16_mtp_draft or mtp_head_unquantized
+        self.mtp_head_unquantized = mtp_unquantized
+        fc_quant = (
+            None
+            if quant_name == "modelopt_fp4" or mtp_unquantized
+            else quant_config
+        )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
@@ -119,12 +141,11 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # quantization_config.dynamic with "-:pattern" entries. When detected,
         # disable quantization for MTP layers so they use unquantized params.
         original_quant = vllm_config.quant_config
-        if bf16_mtp_draft and quant_name != "fp8":
+        if mtp_unquantized:
             vllm_config.quant_config = None
         elif quant_config and quant_name not in ("modelopt_fp4",):
-            hf_qc = getattr(model_config.hf_config, "quantization_config", None)
-            if isinstance(hf_qc, dict):
-                dynamic = hf_qc.get("dynamic", {})
+            if isinstance(hf_quant_config, dict):
+                dynamic = hf_quant_config.get("dynamic", {})
                 if any(k.startswith("-:") and "mtp" in k for k in dynamic):
                     vllm_config.quant_config = None
         try:
@@ -332,6 +353,34 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        unquantized_head = getattr(self.model, "mtp_head_unquantized", False)
+        quant_name = self.quant_config.get_name() if self.quant_config else None
+
+        def warn_on_full_precision_head(weights):
+            for name, weight in weights:
+                # A full precision head on a quantized target means the head was
+                # built quantized anyway, so the loader copies BF16 tensors into
+                # FP8 parameters that expect scales. Nothing else complains: the
+                # drafter then predicts noise and acceptance stays at zero.
+                if (
+                    not unquantized_head
+                    and quant_name == "fp8"
+                    and name.startswith("mtp.layers.")
+                    and name.endswith(".weight")
+                    and weight.dtype.is_floating_point
+                    and weight.dtype.itemsize >= 2
+                ):
+                    logger.warning(
+                        "MTP head weights are full precision (%s) but the target "
+                        "is FP8-quantized: they are being loaded into FP8 "
+                        "parameters without scales, so speculative decoding will "
+                        "produce garbage. List \"mtp\" in the checkpoint's "
+                        "modules_to_not_convert, or set "
+                        "VLLM_QWOPUS_MTP_BF16_DRAFT=1.",
+                        weight.dtype,
+                    )
+                yield name, weight
+
         def remap_weight_names(weights):
             for name, weight in weights:
                 if name.startswith("mtp."):
@@ -344,7 +393,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(remap_weight_names(weights))
+        return loader.load_weights(
+            warn_on_full_precision_head(remap_weight_names(weights))
+        )
 
 
 class Qwen3_5MoeMTP(Qwen3_5MTP, QwenNextMixtureOfExperts):
