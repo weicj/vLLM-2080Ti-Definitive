@@ -2189,6 +2189,24 @@ class FlashInferImpl(AttentionImpl):
             bmm1_scale *= layer._k_scale_float
         return bmm1_scale
 
+    def _get_kv_scales(self, layer: torch.nn.Module) -> tuple[float, float, float]:
+        """Effective (q, k, v) scales for flashinfer kernel calls.
+
+        Checkpoint q/k/v scales are only meaningful when the KV cache is
+        actually quantized (fp8/nvfp4): the cache-write op
+        (reshape_and_cache_flash) stores values unscaled for fp16/bf16
+        caches, so re-applying the scales on the read side would shrink
+        attention logits by k_scale (near-uniform softmax) and outputs by
+        v_scale.  Mirrors the gating already used for bmm1/bmm2 scales.
+        """
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            return (
+                layer._q_scale_float,
+                layer._k_scale_float,
+                layer._v_scale_float,
+            )
+        return 1.0, 1.0, 1.0
+
     # SM90 may need FP8-Q for native prefill and BF16/FP16-Q for XQA decode,
     # so quantize only the slice whose target dtype differs.
     def maybe_quant_query(
@@ -2250,6 +2268,11 @@ class FlashInferImpl(AttentionImpl):
             self.bmm2_scale = 1.0
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._v_scale_float
+
+        # Checkpoint q/k/v scales only apply to quantized KV caches; with an
+        # fp16/bf16 cache the write op stores values unscaled, so the read
+        # side must not re-apply them (see _get_kv_scales).
+        q_sc, k_sc, v_sc = self._get_kv_scales(layer)
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
         decode_kernel = (
@@ -2476,17 +2499,17 @@ class FlashInferImpl(AttentionImpl):
                             prefill_query,
                             kv_cache_for_fi,
                             self.sinks,
-                            self.scale * layer._q_scale_float * layer._k_scale_float,
-                            v_scale=layer._v_scale_float,
+                            self.scale * q_sc * k_sc,
+                            v_scale=v_sc,
                             out=out_prefill,
                         )
                     else:
                         prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
-                            q_scale=layer._q_scale_float,
-                            k_scale=layer._k_scale_float,
-                            v_scale=layer._v_scale_float,
+                            q_scale=q_sc,
+                            k_scale=k_sc,
+                            v_scale=v_sc,
                             out=out_prefill,
                             kv_cache_sf=kv_cache_sf,
                         )
@@ -2655,9 +2678,9 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
+                        q_scale=q_sc,
+                        k_scale=k_sc,
+                        v_scale=v_sc,
                         out=output_tmp,
                         lse=lse,
                         return_lse=True,
@@ -2673,9 +2696,9 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
+                        q_scale=q_sc,
+                        k_scale=k_sc,
+                        v_scale=v_sc,
                         out=out_decode,
                         kv_cache_sf=kv_cache_sf,
                         sinks=self.sinks,
