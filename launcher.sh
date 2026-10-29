@@ -5339,11 +5339,15 @@ smoke_test() {
   local model_id model_output
   model_output=$("$RUNTIME_ROOT/.venv/bin/python" - "$url_host" "$PORT" <<'PY'
 import json
+import os
 import sys
 import urllib.request
 
 host, port = sys.argv[1], sys.argv[2]
-with urllib.request.urlopen(f"http://{host}:{port}/v1/models", timeout=30) as resp:
+api_key = os.environ.get("VLLM_API_KEY", "")
+models_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+models_req = urllib.request.Request(f"http://{host}:{port}/v1/models", headers=models_headers)
+with urllib.request.urlopen(models_req, timeout=30) as resp:
     data = json.load(resp)
 items = data.get("data") or []
 if not items:
@@ -5356,6 +5360,7 @@ PY
 
   "$RUNTIME_ROOT/.venv/bin/python" - "$url_host" "$PORT" "$model_id" <<'PY'
 import json
+import os
 import sys
 import urllib.request
 
@@ -5368,10 +5373,14 @@ payload = {
     "stream": False,
     "chat_template_kwargs": {"enable_thinking": False},
 }
+api_key = os.environ.get("VLLM_API_KEY", "")
+smoke_headers = {"Content-Type": "application/json"}
+if api_key:
+    smoke_headers["Authorization"] = f"Bearer {api_key}"
 req = urllib.request.Request(
     f"http://{host}:{port}/v1/chat/completions",
     data=json.dumps(payload).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
+    headers=smoke_headers,
     method="POST",
 )
 with urllib.request.urlopen(req, timeout=120) as resp:

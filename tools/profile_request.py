@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import os
 import subprocess
 import threading
 import time
@@ -129,7 +130,9 @@ def stream_request(url: str, payload: dict[str, Any], endpoint: str, timeout: fl
     raw_preview: list[str] = []
 
     try:
-        with requests.post(f"{url}/{endpoint}", json=payload, stream=True, timeout=(30, timeout)) as resp:
+        api_key = os.environ.get("VLLM_API_KEY", "")
+        auth_headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        with requests.post(f"{url}/{endpoint}", json=payload, stream=True, timeout=(30, timeout), headers=auth_headers) as resp:
             status = resp.status_code
             resp.raise_for_status()
             for raw in resp.iter_lines(decode_unicode=True):
