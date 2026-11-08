@@ -249,6 +249,7 @@ class MooncakeStoreCoordinator:
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
             exclude_mamba=True,
+            exclude_draft=True,
         )
 
     def lookup_mask(
@@ -266,6 +267,7 @@ class MooncakeStoreCoordinator:
             0,
             retention_interval=None,
             num_prompt_tokens=None,
+            exclude_draft=True,
         )
 
     def _reachable_masks(
@@ -276,6 +278,7 @@ class MooncakeStoreCoordinator:
         retention_interval: int | None,
         num_prompt_tokens: int | None,
         exclude_mamba: bool = False,
+        exclude_draft: bool = False,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
             self.hash_block_size
@@ -292,6 +295,17 @@ class MooncakeStoreCoordinator:
             end_chunk = aligned_token_len // spec.block_size
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             if exclude_mamba and isinstance(spec, MambaSpec):
+                masks.append([False] * (end_chunk - start_chunk))
+                continue
+            if exclude_draft and g_idx in self.eagle_group_ids:
+                # The drafter never reads the restored prefix: it hides those
+                # blocks from its own attention window by shifting the draft
+                # block table, and rebuilds its context KV from the target's
+                # hidden states for the tokens it does attend to. Persisting
+                # draft KV therefore only burns store traffic and space, and
+                # loading it back is pure waste. Exclude it on both sides:
+                # here (so nothing is written) and in _find_hit_blocks (so its
+                # absence does not zero the hit length).
                 masks.append([False] * (end_chunk - start_chunk))
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
@@ -380,6 +394,18 @@ class MooncakeStoreCoordinator:
             ):
                 first_group_id = group_ids[0]
                 cached = hit_blocks_by_group[first_group_id]
+                # The draft groups are never written to the store (see
+                # _reachable_masks), so their keys cannot exist. They also must
+                # not constrain the hit length: the drafter hides the restored
+                # prefix from its own attention window, so it never reads those
+                # pages back. Report them as entirely uncached and move on.
+                if all(gid in self.eagle_group_ids for gid in group_ids):
+                    null = cached_block_pool.null_block
+                    span = cdiv(max_length, spec.block_size)
+                    for gid in group_ids:
+                        hit_blocks_by_group[gid] = [null] * span
+                        hit_length_by_group[gid] = 0
+                    continue
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
                     curr_hit_length = min(
                         curr_hit_length, hit_length_by_group[first_group_id]

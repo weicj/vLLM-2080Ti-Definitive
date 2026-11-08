@@ -1081,12 +1081,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 else None
             )
 
-            logger.debug(
-                "Storing KV cache for %d blocks (groups=%s) for request %s",
-                len(keys),
-                set(group_indices),
-                req_id,
-            )
 
             addrs: list[list[int]] = []
             sizes: list[list[int]] = []
@@ -1920,7 +1914,15 @@ class MooncakeStoreWorker:
 
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
-        use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
+        # A group's tensors must be viewed with that group's own block count.
+        # With ``independent_block_pools`` the groups have different capacities
+        # (and group-local block ids), so the shared single-count path cannot
+        # describe them: ``group_kernel_blocks`` would assert on the first tensor
+        # whose block count differs from the global one.
+        use_group_regions = (
+            self._kv_cache_config.hisparse_host_num_blocks is not None
+            or self._kv_cache_config.independent_block_pools
+        )
 
         if not use_group_regions:
             seen_storage_ptrs: set[int] = set()
@@ -1950,9 +1952,15 @@ class MooncakeStoreWorker:
         num_host_segments = 0
         num_device_segments = 0
 
-        for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
+        transfer_group_ids = self._kv_cache_config.transfer_group_ids
+        for t_idx, (group, db) in enumerate(
+            zip(self._kv_cache_groups, self.token_dbs, strict=True)
+        ):
             if not use_group_regions:
                 continue
+            # ``_kv_cache_groups`` is the transfer-group tuple; block capacities
+            # are keyed by the global group id.
+            global_group_id = transfer_group_ids[t_idx]
             missing_layers = [
                 layer_name
                 for layer_name in group.layer_names
@@ -1976,7 +1984,9 @@ class MooncakeStoreWorker:
                     num_blocks = self._kv_cache_config.hisparse_host_num_blocks
                     assert num_blocks is not None
                 else:
-                    num_blocks = self._kv_cache_config.num_blocks
+                    num_blocks = self._kv_cache_config.num_blocks_for_group(
+                        global_group_id
+                    )
                 cache = group_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:
@@ -1985,10 +1995,17 @@ class MooncakeStoreWorker:
                 else:
                     base_addr = cache_storage.data_ptr()
                     region_len = cache_storage.nbytes()
-                if region_len % num_blocks != 0:
+                # The storage a layer view is carved from can be shared by
+                # several layers (Mamba groups keep their per-layer views in one
+                # backing buffer), so the storage size is not num_blocks blocks
+                # of this layer. What must hold is that the layer's own block
+                # stride covers num_blocks blocks inside it.
+                per_block_bytes = cache.stride(0) * cache.element_size()
+                if per_block_bytes * num_blocks > region_len:
                     raise ValueError(
                         f"KV cache region for {layer_name} has size {region_len}, "
-                        f"which is not divisible by its {num_blocks} blocks."
+                        f"too small for {num_blocks} blocks of "
+                        f"{per_block_bytes} bytes."
                     )
 
                 registered_len = registered_buffers.get(base_addr)
@@ -2263,6 +2280,11 @@ class MooncakeStoreWorker:
         for g_idx, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
                 continue
+            if g_idx in self.coord.eagle_group_ids:
+                # Draft groups hold no keys in the store (see
+                # _tail_key_boundaries / _reachable_masks), so probing them
+                # would only add lookup traffic and never match.
+                continue
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
             if fine_grained:
@@ -2375,6 +2397,13 @@ class MooncakeStoreWorker:
         for group_id, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
                 # Scratch groups are never stored, so they have no tail key.
+                continue
+            if group_id in self.coord.eagle_group_ids:
+                # Draft groups are excluded from the store on both sides (see
+                # KVCacheStoreCoordinator._reachable_masks): the drafter hides
+                # the restored prefix from its own attention window, so its KV
+                # is never read back. They therefore have no key in the pool,
+                # and demanding a hit boundary for them would assert.
                 continue
             chunk_id = cdiv(hit_length, db.block_size) - 1
             boundary_tokens = hit_length

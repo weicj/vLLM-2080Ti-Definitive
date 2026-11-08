@@ -993,7 +993,9 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.num_prompt_tokens == 12
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    # Block ids are group-local, so a job's references are recorded per
+    # global KV-cache group id. Group 1 is this fixture's boundary group.
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7]}
     assert scheduler._gpu_block_pool.blocks[0].ref_cnt == 0
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     tracker = scheduler._request_trackers["req-0"]
@@ -1052,7 +1054,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
     assert req_meta.block_ids == block_ids
     assert req_meta.block_hashes == request.block_hashes
     assert req_meta.boundary_state_offloads == [(1, 9, 12)]
-    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [9]
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == {1: [9]}
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
     assert scheduler._finished_partial_tail_metas == {}
 
@@ -1158,7 +1160,7 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     # 16 and 20 are inside the resumed prefill; 24 is past it.
     assert meta.requests[0].boundary_state_offloads == [(1, 7, 16), (1, 9, 20)]
     store_job_id = meta.requests[0].store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7, 9]}
 
 
 def test_boundary_state_job_pins_exact_blocks_once():
@@ -1178,7 +1180,7 @@ def test_boundary_state_job_pins_exact_blocks_once():
         (1, 9, 48),
     ]
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 8, 9]
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7, 8, 9]}
     assert [scheduler._gpu_block_pool.blocks[i].ref_cnt for i in (7, 8, 9)] == [
         1,
         1,
@@ -1236,7 +1238,10 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     req_meta = meta.requests[0]
     assert req_meta.block_ids == current_block_ids
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [8, 7, 2, 6]
+    # Group 1 is the boundary group, so its table row is skipped; only the
+    # hand-off block 8 is referenced there. Group 0 contributes its own
+    # non-null blocks.
+    assert scheduler._pinned_saves[store_job_id][0] == {0: [7, 2, 6], 1: [8]}
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[5].ref_cnt == 0
     assert [pool.blocks[i].ref_cnt for i in (21, 22, 23, 24, 25, 26)] == [
@@ -1375,7 +1380,7 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     store_job_id = meta.requests[0].store_job_id
     # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
     # puts it last in eviction priority.
-    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7]}
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[7].ref_cnt == 1
 

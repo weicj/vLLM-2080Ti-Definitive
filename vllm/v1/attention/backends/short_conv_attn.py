@@ -193,6 +193,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
             has_initial_states_d = num_computed_tokens[: metadata.num_decodes] > 0
             if (
+                # Fixed-shape branch is gated by the configured cudagraph mode.
                 self.use_full_cuda_graph
                 and metadata.num_prefills == 0
                 and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -207,7 +208,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 self.has_initial_states_d[metadata.num_decodes : num_decode_rows].fill_(
                     False
                 )
-                has_initial_states_d = self.has_initial_states_d[:num_decode_rows]
+                has_initial_states_d = self.has_initial_states_d[:num_decode_rows].clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
         max_prefill_query_len = 0
         if metadata.num_prefills > 0:
@@ -452,6 +453,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         # use their independently bounded token count.
         batch_size = m.num_reqs
         if (
+            # Fixed-shape branch is gated by the configured cudagraph mode.
             self.use_full_cuda_graph
             and num_prefills == 0
             and num_decodes == 0
@@ -465,11 +467,12 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             )
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+            spec_state_indices_tensor = spec_state_indices_tensor.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.spec_sequence_masks[:batch_size].copy_(
                 spec_sequence_masks[:batch_size], non_blocking=True
             )
-            spec_sequence_masks = self.spec_sequence_masks[:batch_size]
+            spec_sequence_masks = self.spec_sequence_masks[:batch_size].clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             assert spec_query_start_loc is not None
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
@@ -478,6 +481,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             spec_num_query_tokens = spec_query_start_loc[-1]
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+            spec_query_start_loc = spec_query_start_loc.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             assert num_accepted_tokens is not None
             self.num_accepted_tokens[:num_spec_decodes].copy_(
@@ -485,6 +489,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             )
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
+            num_accepted_tokens = num_accepted_tokens.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
         return PleShortConvAttentionMetadata(
             num_prefills=num_prefills,

@@ -257,6 +257,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for connector in self._connectors:
             connector.bind_kv_cache_manager(kv_cache_manager)
 
+    def bind_gpu_block_pools(self, gpu_block_pools: list["BlockPool"]) -> None:
+        """Forward the per-group block pools to every sub-connector."""
+        for c in self._connectors:
+            c.bind_gpu_block_pools(gpu_block_pools)
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         for c in self._connectors:
             c.bind_gpu_block_pool(gpu_block_pool)

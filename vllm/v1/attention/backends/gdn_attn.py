@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import os
 from dataclasses import dataclass
 from typing import Literal
 
@@ -431,6 +432,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         batch_size = m.num_reqs
 
         if (
+            # Fixed-shape branch is gated by the configured cudagraph mode.
             self.use_full_cuda_graph
             and num_prefills == 0
             and num_decodes == 0
@@ -444,12 +446,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             # GDN state slot 0 is valid, so graph padding must use -1.
             spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
+            spec_state_indices_tensor = spec_state_indices_tensor.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
                 spec_sequence_masks[:num_spec_decodes], non_blocking=True
             )
             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
+            spec_sequence_masks = spec_sequence_masks.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             assert non_spec_token_indx is not None and spec_token_indx is not None
             self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
@@ -457,12 +461,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             non_spec_token_indx = self.non_spec_token_indx[
                 : non_spec_token_indx.size(0)
-            ]
+            ].clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.spec_token_indx[: spec_token_indx.size(0)].copy_(
                 spec_token_indx, non_blocking=True
             )
-            spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
+            spec_token_indx = self.spec_token_indx[
+                : spec_token_indx.size(0)
+            ].clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
                 spec_query_start_loc, non_blocking=True
@@ -470,14 +476,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+            spec_query_start_loc = spec_query_start_loc.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.num_accepted_tokens[:num_spec_decodes].copy_(
                 num_accepted_tokens, non_blocking=True
             )
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
+            num_accepted_tokens = num_accepted_tokens.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
         if (
+            # Fixed-shape branch is gated by the configured cudagraph mode.
             self.use_full_cuda_graph
             and num_prefills == 0
             and num_spec_decodes == 0
@@ -491,6 +500,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             ]
             # GDN state slot 0 is valid, so graph padding must use -1.
             non_spec_state_indices_tensor[num_decodes:].fill_(PAD_SLOT_ID)
+            non_spec_state_indices_tensor = non_spec_state_indices_tensor.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True
@@ -498,6 +508,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+            non_spec_query_start_loc = non_spec_query_start_loc.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,

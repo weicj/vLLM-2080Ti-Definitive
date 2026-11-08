@@ -90,12 +90,29 @@ class MooncakeStoreScheduler:
             spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
+        # Transfer-group tuple index -> global KV-cache group id.
+        #
+        # ``ReqMeta.block_ids`` carries one entry per *transfer* group
+        # (``select_transfer_block_ids``), while block pools, boundary hand-offs
+        # and ``_boundary_state_group_ids`` are all keyed by the *global* group id.
+        # The two only coincide when every group participates in transfer, so the
+        # translation has to be explicit.
+        self._transfer_group_ids: tuple[int, ...] = tuple(
+            kv_cache_config.transfer_group_ids
+        )
 
+        # One pool per KV-cache group, indexed by the global group id. Block ids
+        # are group-local whenever ``independent_block_pools`` is set, so every
+        # id must be resolved against its own group's pool.
+        self._gpu_block_pools: list[BlockPool] | None = None
+        # Legacy single-pool slot, kept so a caller that binds through
+        # bind_gpu_block_pool (or an older test harness) still resolves.
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
         self._next_store_job_id = 0
-        # store_job_id -> (referenced block ids, ranks yet to report completion)
-        self._pinned_saves: dict[int, tuple[list[int], int]] = {}
+        # store_job_id -> (global group id -> referenced block ids, ranks yet to
+        # report completion). Kept per group because block ids are group-local.
+        self._pinned_saves: dict[int, tuple[dict[int, list[int]], int]] = {}
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
@@ -104,8 +121,83 @@ class MooncakeStoreScheduler:
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
+    def bind_gpu_block_pools(self, gpu_block_pools: list[BlockPool]) -> None:
+        """Bind one BlockPool per KV-cache group, indexed by the global group id.
+
+        Matches ``KVCacheConfig.kv_cache_groups`` and
+        ``KVCoordinator.block_pools``. With ``independent_block_pools`` each group
+        owns its pool and its block ids never leave that group.
+        """
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        if len(gpu_block_pools) != num_groups:
+            raise ValueError(
+                f"expected one block pool per KV-cache group, got "
+                f"{len(gpu_block_pools)} pools for {num_groups} groups"
+            )
+        self._gpu_block_pools = gpu_block_pools
+
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
-        self._gpu_block_pool = gpu_block_pool
+        """Legacy single-pool binding: broadcast to every group.
+
+        Only valid for shared-pool layouts; the coordinator hands out the same
+        pool object for every group in that case.
+        """
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        self.bind_gpu_block_pools([gpu_block_pool] * num_groups)
+
+    def _global_group_id(self, transfer_index: int) -> int:
+        """Global KV-cache group id for a transfer-group position.
+
+        ``ReqMeta.block_ids`` is indexed by transfer-group position, while block
+        pools, boundary hand-offs and ``_boundary_state_group_ids`` are keyed by
+        the global group id. The two coincide when every group participates in
+        transfer, which is the identity fallback kept here for callers that bind
+        state without running ``__init__``.
+        """
+        ids = getattr(self, "_transfer_group_ids", None)
+        if ids is None or not 0 <= transfer_index < len(ids):
+            return transfer_index
+        return ids[transfer_index]
+
+    def _shared_pool(self) -> BlockPool | None:
+        """The one pool every group shares, or None when pools are per-group.
+
+        Block ids are group-local only under ``independent_block_pools``. When
+        every group shares a single pool the ids are global, and the same
+        physical block can appear in more than one group's row for a request --
+        so a reference taken per group would over-count it.
+        """
+        pools = getattr(self, "_gpu_block_pools", None)
+        if pools is None:
+            return getattr(self, "_gpu_block_pool", None)
+        first = pools[0]
+        return first if all(pool is first for pool in pools) else None
+
+    def _pools_bound(self) -> bool:
+        """Whether any block pool has been bound yet."""
+        return (
+            getattr(self, "_gpu_block_pools", None) is not None
+            or getattr(self, "_gpu_block_pool", None) is not None
+        )
+
+    def _pool_for_group(self, group_id: int) -> BlockPool:
+        """The BlockPool owning ``group_id``'s block ids.
+
+        ``_gpu_block_pools`` is the per-group form written by
+        ``bind_gpu_block_pools``, indexed by the global group id.
+        ``_gpu_block_pool`` is still honoured for callers that bind a single
+        pool through the legacy hook: it then stands for every group, which is
+        only correct for shared-pool layouts (the coordinator hands out one pool
+        object in that case).
+        """
+        pools = getattr(self, "_gpu_block_pools", None)
+        if pools is not None:
+            return pools[group_id]
+        single = getattr(self, "_gpu_block_pool", None)
+        assert single is not None, (
+            "GPU block pools must be bound before any block id is referenced"
+        )
+        return single
 
     def get_num_new_matched_tokens(
         self,
@@ -447,45 +539,63 @@ class MooncakeStoreScheduler:
         so a reference keeps them out of the free queue even once the request
         itself is freed, until every rank reports the job done.
         """
-        pool = self._gpu_block_pool
+        assert self._pools_bound(), (
+            "GPU block pools must be bound before any store job is emitted"
+        )
         for req_meta in meta.requests:
             if not req_meta.can_save:
                 continue
-            assert pool is not None, (
-                "GPU block pool must be bound before any store job is emitted"
-            )
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
-            block_ids: list[int] = []
+            # Boundary hand-offs already carry the global group id; the request's
+            # block table is indexed by transfer-group position.
+            per_group: dict[int, list[int]] = {}
             if req_meta.boundary_state_offloads:
-                block_ids.extend(
-                    block_id for _, block_id, _ in req_meta.boundary_state_offloads
-                )
-            assert NULL_BLOCK_ID not in block_ids, (
-                "A null block cannot back a boundary-state offload"
-            )
+                for group_id, block_id, _ in req_meta.boundary_state_offloads:
+                    assert block_id != NULL_BLOCK_ID, (
+                        "A null block cannot back a boundary-state offload"
+                    )
+                    per_group.setdefault(group_id, []).append(block_id)
             # Every allocated block is referenced, not just the ones covering
             # this job's token range: a rank resumes from its own last
             # successful offset, which lags the scheduler's whenever a save was
             # skipped or failed, so it may read anywhere below the range.
-            block_ids.extend(
-                block_id
-                for group_id, group in enumerate(req_meta.block_ids)
-                if group_id not in self._boundary_state_group_ids
-                for block_id in group
-                if block_id != NULL_BLOCK_ID
-            )
+            for t_idx, group in enumerate(req_meta.block_ids):
+                global_id = self._global_group_id(t_idx)
+                if global_id in self._boundary_state_group_ids:
+                    # A boundary group's state blocks are handed over explicitly.
+                    continue
+                per_group.setdefault(global_id, []).extend(
+                    block_id for block_id in group if block_id != NULL_BLOCK_ID
+                )
             # An aligned boundary block may also be present in the request's
             # block table. Take and release exactly one reference per block.
-            block_ids = list(dict.fromkeys(block_ids))
-            assert NULL_BLOCK_ID not in block_ids
-            if not block_ids:
+            per_group = {
+                group_id: deduped
+                for group_id, ids in per_group.items()
+                if (deduped := list(dict.fromkeys(ids)))
+            }
+            shared_pool = self._shared_pool()
+            if shared_pool is not None:
+                # One physical block can appear in several groups' rows; each id
+                # must be referenced once in total, not once per group.
+                seen: set[int] = set()
+                for group_id in list(per_group):
+                    kept = [bid for bid in per_group[group_id] if bid not in seen]
+                    seen.update(kept)
+                    if kept:
+                        per_group[group_id] = kept
+                    else:
+                        del per_group[group_id]
+            if not per_group:
                 continue
-            self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
-            pool.touch([pool.blocks[block_id] for block_id in block_ids])
+            self._pinned_saves[store_job_id] = (per_group, self._num_workers)
+            for group_id, ids in per_group.items():
+                group_pool = self._pool_for_group(group_id)
+                group_pool.touch([group_pool.blocks[block_id] for block_id in ids])
 
     def register_finished_partial_tail(
         self,
@@ -508,24 +618,29 @@ class MooncakeStoreScheduler:
         if boundary_tokens > tracker.prefill_end_tokens:
             return False
 
-        pinned_block_ids: list[int] = []
+        per_group: dict[int, list[int]] = {}
         for group_id, block_id, _ in partial_tail_offloads:
             if group_id not in self._boundary_state_group_ids:
                 return False
             if block_id == NULL_BLOCK_ID:
                 return False
-            pinned_block_ids.append(block_id)
-        pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
+            per_group.setdefault(group_id, []).append(block_id)
+        per_group = {
+            group_id: deduped
+            for group_id, ids in per_group.items()
+            if (deduped := list(dict.fromkeys(ids)))
+        }
 
-        pool = self._gpu_block_pool
-        assert pool is not None, (
-            "GPU block pool must be bound before a finish-time handoff"
+        assert self._pools_bound(), (
+            "GPU block pools must be bound before a finish-time handoff"
         )
         assert request.request_id not in self._finished_partial_tail_metas
         store_job_id = self._next_store_job_id
         self._next_store_job_id += 1
-        self._pinned_saves[store_job_id] = (pinned_block_ids, self._num_workers)
-        pool.touch([pool.blocks[block_id] for block_id in pinned_block_ids])
+        self._pinned_saves[store_job_id] = (per_group, self._num_workers)
+        for group_id, ids in per_group.items():
+            group_pool = self._pool_for_group(group_id)
+            group_pool.touch([group_pool.blocks[block_id] for block_id in ids])
 
         self._finished_partial_tail_metas[request.request_id] = ReqMeta(
             req_id=request.request_id,
@@ -600,24 +715,27 @@ class MooncakeStoreScheduler:
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
             return
-        pool = self._gpu_block_pool
-        assert pool is not None
+        assert self._pools_bound()
         for store_job_id, count in meta.completed_saves.items():
             pinned = self._pinned_saves.get(store_job_id)
             if pinned is None:
                 # The job referenced no blocks, so nothing was recorded for it.
                 continue
-            block_ids, remaining = pinned
+            per_group, remaining = pinned
             remaining -= count
             if remaining > 0:
-                self._pinned_saves[store_job_id] = (block_ids, remaining)
+                self._pinned_saves[store_job_id] = (per_group, remaining)
                 continue
             assert remaining == 0, (
                 f"store job {store_job_id} reported by too many ranks"
             )
             del self._pinned_saves[store_job_id]
             # Tail-first, as elsewhere, so the shared prefix is evicted last.
-            pool.free_blocks(pool.blocks[bid] for bid in reversed(block_ids))
+            for group_id, block_ids in per_group.items():
+                group_pool = self._pool_for_group(group_id)
+                group_pool.free_blocks(
+                    group_pool.blocks[bid] for bid in reversed(block_ids)
+                )
 
     def has_pending_push_work(self) -> bool:
         """Keep the engine stepping while any store job still holds block refs.

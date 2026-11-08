@@ -230,7 +230,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             request, blocks, num_external_tokens
         )
 
+    def bind_gpu_block_pools(self, gpu_block_pools: list[BlockPool]) -> None:
+        """Bind one BlockPool per KV-cache group, indexed by group id.
+
+        With ``independent_block_pools`` each group owns its pool and its block
+        ids are group-local, so a single pool cannot represent every group: ids
+        from one group would alias or fall out of range in another.
+        """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_gpu_block_pools(gpu_block_pools)
+
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        """Legacy single-pool binding; forwards as one pool per group."""
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 
