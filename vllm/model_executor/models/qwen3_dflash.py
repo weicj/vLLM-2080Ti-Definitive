@@ -17,6 +17,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    mp_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -360,6 +363,29 @@ class DFlashQwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def _kv_row_weights(
+    layer: nn.Module, start: int, dtype: torch.dtype
+) -> torch.Tensor:
+    """Return the local K/V output rows of a possibly quantized qkv projection.
+
+    The context-KV precompute fuses every layer's K/V projection into one GEMM,
+    so a packed weight-only quantization has to contribute a dequantized copy
+    of those rows. That copy replaces the FP16 buffer the unquantized path
+    keeps anyway, so the fused GEMM and its memory footprint are unchanged.
+    """
+    weight = getattr(layer, "weight", None)
+    if isinstance(weight, torch.Tensor) and weight.ndim == 2:
+        return weight[start:]
+    dequantize = getattr(mp_linear_kernel(layer), "dequantized_weight", None)
+    if callable(dequantize):
+        return dequantize(layer, start=start, dtype=dtype)
+    raise ValueError(
+        "DFlash context-KV precompute needs the qkv projection weights, but "
+        f"{type(layer).__name__} exposes neither a 2-D weight nor a "
+        "dequantizing quantization kernel."
+    )
+
+
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
@@ -474,7 +500,10 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        weight_dtype = self._hidden_norm_weight.dtype
+        kv_weights = [
+            _kv_row_weights(a.qkv_proj, a.q_size, weight_dtype) for a in layers_attn
+        ]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
