@@ -835,6 +835,7 @@ ROUTE_PROFILE_KEYS=(
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
   MESSAGE_TYPE
+  KV_CACHE_MEMORY_BYTES
 )
 
 PROFILE_RESET_KEYS=(
@@ -850,6 +851,7 @@ PROFILE_RESET_KEYS=(
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
   MESSAGE_TYPE
+  KV_CACHE_MEMORY_BYTES
 )
 
 # Tracks the optional MODE value installed by the last profile. This lets a
@@ -1175,7 +1177,8 @@ reset_route_profile_fields() {
 profile_key_is_allowed() {
   case "$1" in
 MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
+MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE|\
+KV_CACHE_MEMORY_BYTES)
       return 0
       ;;
     *)
@@ -4941,6 +4944,7 @@ build_args() {
 
   [[ -n "${QUANTIZATION:-}" ]] && VLLM_ARGS+=(--quantization "$QUANTIZATION")
   [[ -n "${KV_CACHE_DTYPE:-}" ]] && VLLM_ARGS+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+  [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]] && VLLM_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
   [[ -n "${MAMBA_CACHE_MODE:-}" ]] && VLLM_ARGS+=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
   [[ "${ENFORCE_EAGER:-0}" == "1" ]] && VLLM_ARGS+=(--enforce-eager)
   [[ "${NO_ASYNC_SCHEDULING:-0}" == "1" ]] && VLLM_ARGS+=(--no-async-scheduling)

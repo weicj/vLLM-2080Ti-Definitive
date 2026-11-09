@@ -6,18 +6,29 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+    mp_linear_kernel,
+    packed_dequantized_weight,
+    packed_weight_column_norm_bound,
+)
 from vllm.model_executor.models.dflash2_sm75 import (
+    Sm75DFlash2MLP,
     Sm75DFlash2ResidualNorm,
+    down_projection_l2_bound,
     encode_dflash2_mlp_sm75,
     restore_dflash2_mlp_sm75,
     should_enable_dflash2_sm75,
     synchronize_dflash2_mlp_scales,
 )
+from vllm.model_executor.models.qwen3_dflash import _kv_row_weights
 from vllm.model_executor.models.qwen3_dflash2 import (
     DFlash2Qwen3Model,
     _grouped_conv,
     _score_edges,
 )
+from vllm.scalar_type import scalar_types
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
@@ -561,3 +572,294 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+
+
+def _attach_layout(
+    tensor: torch.Tensor,
+    *,
+    output_dim: int,
+    input_dim: int,
+    packed_dim: int | None = None,
+) -> torch.Tensor:
+    """Stamp a packed tensor with the layout metadata vLLM parameters carry."""
+    tensor.output_dim = output_dim
+    tensor.input_dim = input_dim
+    if packed_dim is not None:
+        tensor.packed_dim = packed_dim
+    return tensor
+
+
+def _pack_int4_codes(codes: torch.Tensor, packed_dim: int) -> torch.Tensor:
+    """Pack ``[outputs, inputs]`` int4 codes into int32 words, little endian."""
+    per_word = 8
+    outputs, inputs = codes.shape
+    words = codes.to(torch.int32).reshape(outputs, inputs // per_word, per_word)
+    shifts = torch.arange(0, 32, 4, dtype=torch.int32)
+    packed = (words << shifts).sum(-1).to(torch.int32)
+    return packed if packed_dim == 1 else packed.transpose(0, 1).contiguous()
+
+
+def _packed_layout_tensors(
+    layout: str,
+) -> tuple[MPLinearLayerConfig, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """A packed weight, its scale, and the brute-force effective matrix."""
+    torch.manual_seed(0)
+    outputs, inputs, group = 6, 64, 32
+    codes = torch.randint(0, 16, (outputs, inputs), dtype=torch.int32)
+    scales = torch.rand(outputs, inputs // group) + 0.5
+    if layout == "gptq":
+        # AutoGPTQ: [input // pack, output], input axis first.
+        w_q = _attach_layout(
+            _pack_int4_codes(codes, packed_dim=0),
+            output_dim=1,
+            input_dim=0,
+            packed_dim=0,
+        )
+        w_s = _attach_layout(
+            scales.transpose(0, 1).contiguous(), output_dim=1, input_dim=0
+        )
+    else:
+        # compressed-tensors WNA16: [output, input // pack], output axis first.
+        w_q = _attach_layout(
+            _pack_int4_codes(codes, packed_dim=1),
+            output_dim=0,
+            input_dim=1,
+            packed_dim=1,
+        )
+        w_s = _attach_layout(scales.contiguous(), output_dim=0, input_dim=1)
+    config = MPLinearLayerConfig(
+        full_weight_shape=(inputs, outputs),
+        partition_weight_shape=(inputs, outputs),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=group,
+        zero_points=False,
+    )
+    effective = (codes.to(torch.float32) - 8.0) * scales.repeat_interleave(
+        group, dim=1
+    )
+    return config, w_q, w_s, effective
+
+
+def _packed_bound_fixture(
+    layout: str,
+) -> tuple[MPLinearLayerConfig, torch.Tensor, torch.Tensor, float]:
+    config, w_q, w_s, effective = _packed_layout_tensors(layout)
+    reference = float(torch.linalg.vector_norm(effective, dim=1).amax())
+    return config, w_q, w_s, reference
+
+
+@pytest.mark.parametrize("layout", ["gptq", "compressed-tensors"])
+def test_packed_dequantized_weight_matches_brute_force(layout: str):
+    config, w_q, w_s, effective = _packed_layout_tensors(layout)
+
+    full = packed_dequantized_weight(config, w_q, w_s)
+    tail = packed_dequantized_weight(config, w_q, w_s, start=2)
+
+    num_inputs, num_outputs = config.partition_weight_shape
+    assert full.shape == (num_outputs, num_inputs)
+    torch.testing.assert_close(full, effective.to(torch.float16))
+    torch.testing.assert_close(tail, full[2:])
+
+
+def test_packed_dequantized_weight_rejects_an_empty_row_range():
+    config, w_q, w_s, _effective = _packed_layout_tensors("gptq")
+
+    with pytest.raises(ValueError, match="Empty weight row range"):
+        packed_dequantized_weight(config, w_q, w_s, start=6)
+
+
+def test_fused_kv_rows_dequantize_a_compressed_tensors_qkv():
+    config, w_q, w_s, effective = _packed_layout_tensors("compressed-tensors")
+    kernel = _StubMPLinearKernel(config, "weight_packed", "weight_scale")
+    # compressed-tensors keeps the scheme (and its kernel) on the layer.
+    qkv_proj = SimpleNamespace(
+        weight_packed=w_q,
+        weight_scale=w_s,
+        g_idx=None,
+        scheme=SimpleNamespace(kernel=kernel),
+    )
+
+    rows = _kv_row_weights(qkv_proj, 2, torch.float16)
+
+    torch.testing.assert_close(rows, effective[2:].to(torch.float16))
+
+
+def test_fused_kv_rows_dequantize_a_gptq_qkv():
+    config, w_q, w_s, effective = _packed_layout_tensors("gptq")
+    kernel = _StubMPLinearKernel(config, "qweight", "scales")
+    # AutoGPTQ keeps the kernel on the quantization method itself.
+    qkv_proj = SimpleNamespace(
+        qweight=w_q,
+        scales=w_s,
+        g_idx=None,
+        quant_method=SimpleNamespace(kernel=kernel),
+    )
+
+    rows = _kv_row_weights(qkv_proj, 2, torch.float16)
+
+    torch.testing.assert_close(rows, effective[2:].to(torch.float16))
+
+
+def test_mp_linear_kernel_finds_every_nesting_style():
+    config, _w_q, _w_s, _effective = _packed_layout_tensors("compressed-tensors")
+    kernel = _StubMPLinearKernel(config, "weight_packed", "weight_scale")
+
+    on_method = SimpleNamespace(quant_method=SimpleNamespace(kernel=kernel))
+    on_scheme = SimpleNamespace(scheme=SimpleNamespace(kernel=kernel))
+    nested_in_method = SimpleNamespace(
+        quant_method=SimpleNamespace(scheme=SimpleNamespace(kernel=kernel))
+    )
+
+    assert mp_linear_kernel(on_method) is kernel
+    assert mp_linear_kernel(on_scheme) is kernel
+    assert mp_linear_kernel(nested_in_method) is kernel
+    assert mp_linear_kernel(SimpleNamespace(quant_method=SimpleNamespace())) is None
+
+
+def test_down_projection_bound_reads_a_compressed_tensors_scheme():
+    config, w_q, w_s, reference = _packed_bound_fixture("compressed-tensors")
+    kernel = _StubMPLinearKernel(config, "weight_packed", "weight_scale")
+    layer = SimpleNamespace(
+        weight_packed=w_q,
+        weight_scale=w_s,
+        g_idx=None,
+        scheme=SimpleNamespace(kernel=kernel),
+    )
+
+    assert down_projection_l2_bound(layer) == pytest.approx(reference, rel=1e-2)
+
+
+def test_fused_kv_rows_slice_an_unquantized_qkv_projection():
+    weight = torch.arange(24, dtype=torch.float16).reshape(6, 4)
+    qkv_proj = SimpleNamespace(weight=weight)
+
+    rows = _kv_row_weights(qkv_proj, 2, torch.float16)
+
+    torch.testing.assert_close(rows, weight[2:])
+
+
+def test_fused_kv_rows_reject_a_layer_without_weights():
+    with pytest.raises(ValueError, match="neither a 2-D weight"):
+        _kv_row_weights(SimpleNamespace(), 0, torch.float16)
+
+
+@pytest.mark.parametrize("layout", ["gptq", "compressed-tensors"])
+def test_packed_weight_column_norm_bound_matches_brute_force(layout: str):
+    config, w_q, w_s, reference = _packed_bound_fixture(layout)
+
+    bound = packed_weight_column_norm_bound(config, w_q, w_s)
+
+    assert bound >= reference * (1.0 - 1e-6)
+    assert bound <= reference * (1.0 + 1e-2)
+
+
+def test_packed_weight_column_norm_bound_rejects_asymmetric_zero_points():
+    config, w_q, w_s, _reference = _packed_bound_fixture("gptq")
+    config.zero_points = True
+
+    with pytest.raises(NotImplementedError):
+        packed_weight_column_norm_bound(
+            config, w_q, w_s, torch.zeros(1, dtype=torch.int32)
+        )
+
+
+def test_packed_weight_column_norm_bound_rejects_missing_zero_points():
+    config, w_q, w_s, _reference = _packed_bound_fixture("gptq")
+    config.zero_points = True
+
+    with pytest.raises(NotImplementedError):
+        packed_weight_column_norm_bound(config, w_q, w_s)
+
+
+def test_packed_weight_column_norm_bound_needs_the_checkpoint_layout():
+    config, _w_q, w_s, _reference = _packed_bound_fixture("gptq")
+    unpacked_layout = torch.zeros(2, 8, dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="layout metadata is missing"):
+        packed_weight_column_norm_bound(config, unpacked_layout, w_s)
+
+
+def test_down_projection_bound_scales_a_float8_weight_by_its_scale():
+    weight = torch.tensor([[3.0, 4.0], [0.0, 0.0]], dtype=torch.float16)
+    layer = SimpleNamespace(weight=weight, weight_scale=torch.tensor([0.5]))
+
+    assert down_projection_l2_bound(layer) == pytest.approx(2.5)
+
+
+def test_down_projection_bound_uses_per_channel_weight_scales():
+    weight = torch.eye(3, dtype=torch.float16)
+    layer = SimpleNamespace(
+        weight=weight, weight_scale=torch.tensor([2.0, 3.0, 4.0])
+    )
+
+    assert down_projection_l2_bound(layer) == pytest.approx(4.0)
+
+
+class _StubMPLinearKernel(MPLinearKernel):
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
+
+    @classmethod
+    def can_implement(cls, config: MPLinearLayerConfig):
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        return None
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return x
+
+
+def _packed_layer_fixture(layout: str, *, g_idx: torch.Tensor | None = None):
+    config, w_q, w_s, reference = _packed_bound_fixture(layout)
+    kernel = _StubMPLinearKernel(config, "qweight", "scales")
+    layer = SimpleNamespace(
+        qweight=w_q,
+        scales=w_s,
+        g_idx=g_idx,
+        quant_method=SimpleNamespace(kernel=kernel),
+    )
+    return layer, reference
+
+
+def test_down_projection_bound_reads_packed_weights_through_the_kernel():
+    layer, reference = _packed_layer_fixture("compressed-tensors")
+
+    assert down_projection_l2_bound(layer) == pytest.approx(reference, rel=1e-2)
+
+
+def test_down_projection_bound_rejects_activation_ordering():
+    layer, _reference = _packed_layer_fixture(
+        "gptq", g_idx=torch.zeros(64, dtype=torch.int64)
+    )
+
+    with pytest.raises(NotImplementedError, match="g_idx"):
+        down_projection_l2_bound(layer)
+
+
+def test_down_projection_bound_rejects_unknown_quantization():
+    with pytest.raises(ValueError, match="symmetric weight-only packed"):
+        down_projection_l2_bound(SimpleNamespace())
+
+
+def test_sm75_mlp_seeds_its_budget_from_a_quantized_down_projection():
+    down_proj = SimpleNamespace(
+        weight=torch.tensor([[3.0, 4.0]], dtype=torch.float16),
+        weight_scale=torch.tensor([0.5]),
+        tp_size=2,
+    )
+    codec_mlp = Sm75DFlash2MLP(
+        SimpleNamespace(gate_up_proj=torch.nn.Identity(), down_proj=down_proj)
+    )
+
+    codec_mlp.initialize_down_projection_bound()
+
+    assert codec_mlp._down_projection_l2_bound == pytest.approx(2.5)
+    assert codec_mlp._accumulation_limit == pytest.approx(32752.0 / 2)

@@ -17,6 +17,9 @@ import torch
 from torch import nn
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    mp_linear_kernel,
+)
 from vllm.triton_utils import tl, triton
 
 _ACTIVATION_GAIN = 32.0
@@ -332,6 +335,68 @@ class Sm75DFlash2ResidualNorm(nn.Module):
         return output if residual is None else (output, next_state)
 
 
+def _row_scale_multiplier(layer: object, rows: int) -> torch.Tensor | None:
+    """Per-output-row multiplier implied by a weight scale, if there is one."""
+    scale = getattr(layer, "weight_scale", None)
+    if not isinstance(scale, torch.Tensor):
+        return None
+    flat = scale.detach().to(torch.float32).reshape(-1)
+    if flat.numel() == 1:
+        return flat
+    if flat.numel() == rows:
+        return flat
+    # Unknown scale layout: keep the bound an upper bound.
+    return flat.abs().amax().reshape(1)
+
+
+def _unquantized_row_bound(
+    layer: object, weight: torch.Tensor, chunk_rows: int
+) -> float:
+    rows = weight.shape[0]
+    multiplier = _row_scale_multiplier(layer, rows)
+    best = 0.0
+    with torch.no_grad():
+        for start in range(0, rows, chunk_rows):
+            stop = min(start + chunk_rows, rows)
+            block = weight[start:stop].detach().to(torch.float32)
+            if multiplier is not None:
+                factor = (
+                    multiplier if multiplier.numel() == 1 else multiplier[start:stop]
+                )
+                block = block * factor.reshape(-1, 1)
+            best = max(best, float(torch.linalg.vector_norm(block, dim=1).amax()))
+    return best
+
+
+def down_projection_l2_bound(layer: object, *, chunk_rows: int = 1024) -> float:
+    """Upper bound on the effective per-output-row L2 norm of a down projection.
+
+    The bound feeds the Cauchy-Schwarz budget of ``encode_dflash2_mlp_sm75``,
+    so it has to describe the weights the local GEMM really multiplies: a
+    floating checkpoint tensor times its (possibly per-tensor)
+    ``weight_scale``, or the dequantized row norms of a packed weight-only
+    quantization. Anything else fails loudly, because an under-estimate would
+    overflow the FP16 payload silently.
+    """
+    weight = getattr(layer, "weight", None)
+    if (
+        isinstance(weight, torch.Tensor)
+        and weight.ndim == 2
+        and weight.is_floating_point()
+    ):
+        return _unquantized_row_bound(layer, weight, chunk_rows)
+
+    packed_bound = getattr(mp_linear_kernel(layer), "weight_column_norm_bound", None)
+    if callable(packed_bound):
+        return float(packed_bound(layer))
+
+    raise ValueError(
+        "DFlash2 SM75 transport requires a 2-D unquantized down projection or "
+        "a symmetric weight-only packed quantization, got "
+        f"{type(layer).__name__}."
+    )
+
+
 class Sm75DFlash2MLP(nn.Module):
     """SM75 implementation of DFlash2's BF16-trained SwiGLU transport."""
 
@@ -344,16 +409,8 @@ class Sm75DFlash2MLP(nn.Module):
 
     def initialize_down_projection_bound(self) -> None:
         """Derive a finite FP16 partial-sum bound from loaded local weights."""
-        weight = getattr(self.down_proj, "weight", None)
-        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
-            raise ValueError(
-                "DFlash2 SM75 transport requires an unquantized 2-D down projection."
-            )
         tp_size = max(1, int(getattr(self.down_proj, "tp_size", 1)))
-        with torch.no_grad():
-            self._down_projection_l2_bound = float(
-                torch.linalg.vector_norm(weight.float(), dim=1).amax().item()
-            )
+        self._down_projection_l2_bound = down_projection_l2_bound(self.down_proj)
         # Each rank contributes a FP16 tensor to the row-parallel all-reduce.
         self._accumulation_limit = _HALF_PAYLOAD_LIMIT / tp_size
 
