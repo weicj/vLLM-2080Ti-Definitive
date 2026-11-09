@@ -764,6 +764,14 @@ def test_packed_weight_column_norm_bound_rejects_asymmetric_zero_points():
         )
 
 
+def test_packed_weight_column_norm_bound_rejects_missing_zero_points():
+    config, w_q, w_s, _reference = _packed_bound_fixture("gptq")
+    config.zero_points = True
+
+    with pytest.raises(NotImplementedError):
+        packed_weight_column_norm_bound(config, w_q, w_s)
+
+
 def test_packed_weight_column_norm_bound_needs_the_checkpoint_layout():
     config, _w_q, w_s, _reference = _packed_bound_fixture("gptq")
     unpacked_layout = torch.zeros(2, 8, dtype=torch.int32)

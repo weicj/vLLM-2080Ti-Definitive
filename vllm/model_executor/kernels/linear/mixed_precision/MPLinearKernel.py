@@ -119,7 +119,7 @@ def _packed_weight_geometry(
         raise ValueError(
             f"Packed weight needs an integer weight type, got {weight_type}."
         )
-    if w_zp is not None and config.zero_points:
+    if config.zero_points:
         raise NotImplementedError(
             "Asymmetric quantized weights (zero points) cannot be decoded "
             "without their exact scale layout."
