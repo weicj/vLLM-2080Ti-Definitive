@@ -4950,7 +4950,9 @@ build_args() {
   elif [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]]; then
     VLLM_ARGS+=(--enable-prefix-caching)
   fi
-  if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
+  if [[ -n "${KV_TRANSFER_CONFIG:-}" ]]; then
+    VLLM_ARGS+=(--kv-transfer-config "$KV_TRANSFER_CONFIG")
+  elif [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
     VLLM_ARGS+=(--kv-transfer-config "$(disk_kv_transfer_config)")
   fi
   [[ "${ENABLE_PROMPT_TOKENS_DETAILS:-1}" == "1" ]] && VLLM_ARGS+=(--enable-prompt-tokens-details)
