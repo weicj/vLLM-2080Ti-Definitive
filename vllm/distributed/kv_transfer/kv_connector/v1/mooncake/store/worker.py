@@ -2280,7 +2280,7 @@ class MooncakeStoreWorker:
         for g_idx, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
                 continue
-            if g_idx in self.coord.eagle_group_ids:
+            if g_idx in self.coord.draft_group_ids:
                 # Draft groups hold no keys in the store (see
                 # _tail_key_boundaries / _reachable_masks), so probing them
                 # would only add lookup traffic and never match.
@@ -2398,7 +2398,7 @@ class MooncakeStoreWorker:
             if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
                 # Scratch groups are never stored, so they have no tail key.
                 continue
-            if group_id in self.coord.eagle_group_ids:
+            if group_id in self.coord.draft_group_ids:
                 # Draft groups are excluded from the store on both sides (see
                 # KVCacheStoreCoordinator._reachable_masks): the drafter hides
                 # the restored prefix from its own attention window, so its KV

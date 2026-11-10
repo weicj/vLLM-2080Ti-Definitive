@@ -1747,6 +1747,10 @@ current_prefix_cache_label() {
 
 validate_disk_kv_cache_config() {
   [[ -n "${KV_DISK_CACHE_DIR:-}" ]] || return 0
+  if [[ -n "${KV_TRANSFER_CONFIG:-}" ]]; then
+    echo "ERROR: KV_TRANSFER_CONFIG and KV_DISK_CACHE_DIR are mutually exclusive; unset one." >&2
+    return 1
+  fi
   if [[ "$KV_DISK_CACHE_DIR" != /* ]]; then
     echo "ERROR: KV_DISK_CACHE_DIR must be an absolute path." >&2
     return 1

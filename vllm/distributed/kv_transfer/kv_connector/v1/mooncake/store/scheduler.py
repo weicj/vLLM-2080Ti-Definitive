@@ -530,7 +530,11 @@ class MooncakeStoreScheduler:
             assert block_ids is not None, (
                 f"Missing current block table for store request {req_meta.req_id}"
             )
-            req_meta.block_ids = block_ids
+            # The current table is indexed by global group position; ReqMeta
+            # keeps the transfer-group view, so reselect before replacing it.
+            req_meta.block_ids = self.kv_cache_config.select_transfer_block_ids(
+                block_ids
+            )
 
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.

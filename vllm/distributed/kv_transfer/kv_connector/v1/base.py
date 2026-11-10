@@ -489,7 +489,10 @@ class KVConnectorBase_V1(ABC):
         Connectors that track group-local block ids should override this. The
         default forwards to ``bind_gpu_block_pool`` when every group shares one
         pool, so connectors implementing only the legacy hook keep working for
-        shared-pool layouts.
+        shared-pool layouts. With different pools the group-0 pool is forwarded
+        anyway: that is what those connectors received before
+        ``independent_block_pools`` (the manager's single pool was group 0's),
+        and losing the binding entirely would trip their pool assertions.
         """
         if not gpu_block_pools:
             return
@@ -498,13 +501,14 @@ class KVConnectorBase_V1(ABC):
             self.bind_gpu_block_pool(first_pool)
             return
         logger.warning_once(
-            "%s does not implement bind_gpu_block_pools; no GPU block pool is "
-            "bound because the %d KV-cache groups own different pools "
-            "(independent_block_pools) and group-local block ids cannot be "
-            "tracked by a single pool.",
+            "%s does not implement bind_gpu_block_pools; binding the group-0 "
+            "pool through the legacy hook because the %d KV-cache groups own "
+            "different pools (independent_block_pools) and group-local block "
+            "ids cannot be tracked by a single pool.",
             type(self).__name__,
             len(gpu_block_pools),
         )
+        self.bind_gpu_block_pool(first_pool)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """

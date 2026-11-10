@@ -667,10 +667,14 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     DSV4 splits SWA layers into several KV cache groups sharing one spec, and
     only the group containing the MTP layer is annotated ``is_eagle_group``.
     The lookup merges equal-spec groups, applies the eagle drop to the merged
-    group, and requires each chunk hash to exist in EVERY member group — so
-    the save-side masks must eagle-shift every member, not just the annotated
-    one. Without propagation the non-annotated groups never store the eagle
-    proof-run chunks and every external lookup returns 0.
+    group, and requires each chunk hash to exist in EVERY stored member group
+    — so the save-side masks must eagle-shift the merged group's members, not
+    just the annotated one. Without propagation the non-annotated groups never
+    store the eagle proof-run chunks and every external lookup returns 0.
+
+    The drafter's own group is excluded from the store entirely
+    (``draft_group_ids``); the spec merge only propagates the eagle flag for
+    the mask shift, so the co-merged target group keeps being stored.
     """
     swa = _swa(block_size=16, sliding_window=32)
     groups = [
@@ -680,10 +684,13 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     assert coord.eagle_group_ids == {1, 2}
+    assert coord.draft_group_ids == {2}
 
-    # Save side: both SWA groups must produce identical (eagle-shifted) masks.
+    # Save side: the drafter's group is excluded outright; the co-merged target
+    # group still produces its (eagle-shifted) store mask.
     masks = coord.store_mask(128, num_prompt_tokens=130)
-    assert masks[1] == masks[2]
+    assert all(value is False for value in masks[2])
+    assert any(masks[1])
 
     # Round trip: everything store_mask kept is in the store; the eagle
     # lookup must then serve a non-zero hit (it was 0 before the fix).
@@ -739,3 +746,25 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     # The final 256-token segment has no lookahead block, so EAGLE falls back
     # to the previous aligned boundary instead of consuming all 768 tokens.
     assert hit == 512
+
+
+def test_store_mask_excludes_only_real_draft_groups_after_spec_merge():
+    """A target group that shares its spec with a drafter group must keep
+    being stored. The merged spec group inherits ``use_eagle`` (so it lands in
+    ``eagle_group_ids``), but draft exclusion has to follow the real drafter
+    groups (``draft_group_ids``), which never merge across gids."""
+    target = KVCacheGroupSpec(["L0"], _full(16))
+    draft = KVCacheGroupSpec(["L1"], _full(16), is_eagle_group=True)
+    coord = _make_coord([target, draft], hash_block_size=16, use_eagle=True)
+
+    # The spec merge makes the target group inherit the eagle flag...
+    assert coord.eagle_group_ids == {0, 1}
+    # ...but only the drafter is a real draft group.
+    assert coord.draft_group_ids == {1}
+
+    masks = coord.store_mask(aligned_token_len=64)
+    # The merged-in target group is still stored (None is the all-True
+    # sentinel for the suffix)...
+    assert masks[0] is None
+    # ...while the drafter's own group stays excluded.
+    assert masks[1] == [False, False, False, False]
