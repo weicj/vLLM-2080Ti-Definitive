@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseResidentSpec,
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -690,7 +691,11 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     # group still produces its (eagle-shifted) store mask.
     masks = coord.store_mask(128, num_prompt_tokens=130)
     assert all(value is False for value in masks[2])
-    assert any(masks[1])
+    # The co-merged target SWA group must keep its eagle-shifted mask exactly:
+    # the two-block window plus the eagle peek, kept once per 64-token
+    # segment (per_segment=4, need=3, shift=1) — a regression that drops the
+    # eagle propagation would leave this mask unshifted (window without peek).
+    assert masks[1] == [False, False, True, True, True, False, True, True]
 
     # Round trip: everything store_mask kept is in the store; the eagle
     # lookup must then serve a non-zero hit (it was 0 before the fix).
@@ -706,6 +711,37 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
         hs, max_length=128, cached_block_pool=ExternalCachedBlockPool(16, exists)
     )
     assert hit == 64
+
+
+def test_find_hit_blocks_single_draft_spec_sized_by_global_group_count():
+    """The single-spec fast path must return a tuple sized by the global group
+    count with entries placed at each gid, not positionally by ``group_ids``.
+    ``worker.load_mask`` indexes it by global ``g_idx`` over every KV group
+    (including non-cacheable ones that never enter ``attention_groups``), so a
+    positional ``len(group_ids)``-sized tuple misaligns or raises IndexError."""
+    swa = _swa(block_size=16, sliding_window=32)
+    groups = [
+        KVCacheGroupSpec(["swa_drafter"], swa, is_eagle_group=True),
+        # Non-cacheable group: excluded from attention_groups, yet the returned
+        # masks tuple must still have a slot for it at global index 1.
+        KVCacheGroupSpec(["scratch"], HiSparseResidentSpec(page_size=16, block_size=16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    assert len(coord.attention_groups) == 1
+    assert coord.draft_group_ids == {0}
+
+    hs = _hashes(128 // 16)
+    cmap = ExternalCachedBlockPool(16)
+    masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=128, cached_block_pool=cmap
+    )
+    # Sized by the global group count, indexed by gid.
+    assert len(masks) == 2
+    # The draft member is null-filled (all False); the non-cacheable scratch
+    # group stays empty.
+    assert all(value is False for value in masks[0])
+    assert masks[1] == []
+    assert hit == 0
 
 
 def test_dsv4_five_group_eagle_store_lookup_round_trip():

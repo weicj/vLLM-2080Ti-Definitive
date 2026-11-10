@@ -378,9 +378,16 @@ class MooncakeStoreCoordinator:
                 gid for gid in group_ids if gid not in self.draft_group_ids
             ]
             if not member_ids:
+                # Callers index the result by global group id, so size the
+                # tuple by the full group count and place entries at each
+                # gid; groups outside this spec group stay empty (all False).
+                num_groups = len(self.kv_cache_groups)
                 null = cached_block_pool.null_block
                 span = cdiv(max_length, spec.block_size)
-                return tuple([null] * span for _ in group_ids), 0
+                nulls: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
+                for gid in group_ids:
+                    nulls[gid] = [null] * span
+                return tuple(nulls), 0
             hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,  # type: ignore[arg-type]
                 max_length=max_length,
