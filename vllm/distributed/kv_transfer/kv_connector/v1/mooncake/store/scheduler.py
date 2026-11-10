@@ -90,6 +90,15 @@ class MooncakeStoreScheduler:
             spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
+        # Draft (drafter/eagle) groups are excluded from the store on both the
+        # write and hit sides (see KVCacheStoreCoordinator._reachable_masks and
+        # draft_group_ids): their KV is never read back, so a save must not
+        # hold a GPU reference on their blocks either. Mirrors the coordinator.
+        self._draft_group_ids = frozenset(
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.is_eagle_group
+        )
         # Transfer-group tuple index -> global KV-cache group id.
         #
         # ``ReqMeta.block_ids`` carries one entry per *transfer* group
@@ -571,6 +580,14 @@ class MooncakeStoreScheduler:
                 global_id = self._global_group_id(t_idx)
                 if global_id in self._boundary_state_group_ids:
                     # A boundary group's state blocks are handed over explicitly.
+                    continue
+                # Draft KV is never written to the store (_reachable_masks masks
+                # it out) and the drafter rebuilds its context from the target's
+                # hidden states, so it never reads these pages back. Hold no GPU
+                # reference on them: pinning the whole table on a no-op DMA
+                # exhausted the small draft pools and pre-empted the very request
+                # the save was meant to back.
+                if global_id in self._draft_group_ids:
                     continue
                 per_group.setdefault(global_id, []).extend(
                     block_id for block_id in group if block_id != NULL_BLOCK_ID
