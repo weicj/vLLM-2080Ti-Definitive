@@ -993,7 +993,9 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.num_prompt_tokens == 12
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    # Block ids are group-local, so a job's references are recorded per
+    # global KV-cache group id. Group 1 is this fixture's boundary group.
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7]}
     assert scheduler._gpu_block_pool.blocks[0].ref_cnt == 0
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     tracker = scheduler._request_trackers["req-0"]
@@ -1052,7 +1054,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
     assert req_meta.block_ids == block_ids
     assert req_meta.block_hashes == request.block_hashes
     assert req_meta.boundary_state_offloads == [(1, 9, 12)]
-    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [9]
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == {1: [9]}
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
     assert scheduler._finished_partial_tail_metas == {}
 
@@ -1158,7 +1160,7 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     # 16 and 20 are inside the resumed prefill; 24 is past it.
     assert meta.requests[0].boundary_state_offloads == [(1, 7, 16), (1, 9, 20)]
     store_job_id = meta.requests[0].store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7, 9]}
 
 
 def test_boundary_state_job_pins_exact_blocks_once():
@@ -1178,7 +1180,7 @@ def test_boundary_state_job_pins_exact_blocks_once():
         (1, 9, 48),
     ]
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 8, 9]
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7, 8, 9]}
     assert [scheduler._gpu_block_pool.blocks[i].ref_cnt for i in (7, 8, 9)] == [
         1,
         1,
@@ -1236,7 +1238,10 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     req_meta = meta.requests[0]
     assert req_meta.block_ids == current_block_ids
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [8, 7, 2, 6]
+    # Group 1 is the boundary group, so its table row is skipped; only the
+    # hand-off block 8 is referenced there. Group 0 contributes its own
+    # non-null blocks.
+    assert scheduler._pinned_saves[store_job_id][0] == {0: [7, 2, 6], 1: [8]}
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[5].ref_cnt == 0
     assert [pool.blocks[i].ref_cnt for i in (21, 22, 23, 24, 25, 26)] == [
@@ -1252,6 +1257,130 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
 
     assert [pool.blocks[i].ref_cnt for i in (8, 7, 2, 6)] == [0, 0, 0, 0]
+
+
+def test_current_save_table_is_reselected_to_transfer_groups():
+    # The core's current block table is indexed by the global group position,
+    # but ReqMeta keeps the transfer-group view. With a group excluded from
+    # transfer, replacing the table raw would pin that group's blocks into the
+    # wrong pool (row i read as transfer position i).
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    transfer_group_ids = (0, 2)
+    scheduler._transfer_group_ids = transfer_group_ids
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[None, None, None],
+        transfer_group_ids=transfer_group_ids,
+        select_transfer_block_ids=lambda block_ids: tuple(
+            block_ids[group_id] for group_id in transfer_group_ids
+        ),
+    )
+    scheduler._boundary_state_group_ids = frozenset()
+    pool_0 = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    pool_1 = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    pool_2 = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    scheduler.bind_gpu_block_pools([pool_0, pool_1, pool_2])
+    request = SimpleNamespace(
+        all_token_ids=list(range(48)),
+        block_hashes=[bytes([i]) for i in range(12)],
+        num_output_placeholders=0,
+    )
+    current_block_ids = ([7, 2, 0, 6], [40, 41], [21, 22, 25])
+    scheduler._unfinished_requests["req-0"] = (request, current_block_ids)
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=44,
+        allocated_block_ids=([7, 2, 0], [21, 22]),
+        num_saved_tokens=32,
+        token_ids=list(range(44)),
+        prefill_end_tokens=48,
+    )
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[([6], [41], [25])],
+            num_computed_tokens=[44],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 4},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=current_block_ids,
+        ),
+    )
+    meta = scheduler.build_connector_meta(out)
+    req_meta = meta.requests[0]
+    # The excluded group's row stays out of the ReqMeta view...
+    assert req_meta.block_ids == ([7, 2, 0, 6], [21, 22, 25])
+    # ...and its blocks are never referenced.
+    store_job_id = req_meta.store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == {
+        0: [7, 2, 6],
+        2: [21, 22, 25],
+    }
+    assert [pool_1.blocks[i].ref_cnt for i in (40, 41)] == [0, 0]
+    assert [pool_0.blocks[i].ref_cnt for i in (7, 2, 6)] == [1, 1, 1]
+    assert [pool_2.blocks[i].ref_cnt for i in (21, 22, 25)] == [1, 1, 1]
+
+
+def test_independent_pools_reference_each_group_locally():
+    # With a pool per group, block ids are group-local: the same id in two
+    # groups pins a block in each group's own pool. A shared pool would dedupe
+    # the id instead, so the two pools must not be interchangeable.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[None, None],
+        transfer_group_ids=(0, 1),
+        select_transfer_block_ids=lambda block_ids: tuple(block_ids),
+    )
+    scheduler._boundary_state_group_ids = frozenset()
+    pool_0 = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    pool_1 = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    scheduler.bind_gpu_block_pools([pool_0, pool_1])
+    request = SimpleNamespace(
+        all_token_ids=list(range(48)),
+        block_hashes=[bytes([i]) for i in range(12)],
+        num_output_placeholders=0,
+    )
+    current_block_ids = ([5, 6], [5, 6])
+    scheduler._unfinished_requests["req-0"] = (request, current_block_ids)
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=44,
+        allocated_block_ids=([5], [5]),
+        num_saved_tokens=32,
+        token_ids=list(range(44)),
+        prefill_end_tokens=48,
+    )
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[([6], [6])],
+            num_computed_tokens=[44],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 4},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=current_block_ids,
+        ),
+    )
+    meta = scheduler.build_connector_meta(out)
+    req_meta = meta.requests[0]
+    assert req_meta.block_ids == current_block_ids
+    store_job_id = req_meta.store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == {0: [5, 6], 1: [5, 6]}
+    assert [pool_0.blocks[i].ref_cnt for i in (5, 6)] == [1, 1]
+    assert [pool_1.blocks[i].ref_cnt for i in (5, 6)] == [1, 1]
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+    assert [pool_0.blocks[i].ref_cnt for i in (5, 6)] == [0, 0]
+    assert [pool_1.blocks[i].ref_cnt for i in (5, 6)] == [0, 0]
 
 
 def test_boundary_state_release_is_per_store_job():
@@ -1375,7 +1504,7 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     store_job_id = meta.requests[0].store_job_id
     # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
     # puts it last in eviction priority.
-    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert scheduler._pinned_saves[store_job_id][0] == {1: [7]}
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[7].ref_cnt == 1
 

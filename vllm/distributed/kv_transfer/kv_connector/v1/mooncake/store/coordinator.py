@@ -108,6 +108,15 @@ class MooncakeStoreCoordinator:
             for group_id, group in enumerate(kv_cache_groups)
             if isinstance(_unwrap_spec(group.kv_cache_spec), MambaSpec)
         }
+        # The actual drafter groups. Kept separate from ``eagle_group_ids``
+        # (built from the spec-merged attention groups, where ``use_eagle``
+        # propagates to every group sharing the spec): store/lookup exclusion
+        # must follow the drafter's own groups, not the merged-group flag.
+        self.draft_group_ids = {
+            group_id
+            for group_id, group in enumerate(kv_cache_groups)
+            if group.is_eagle_group
+        }
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
@@ -160,10 +169,11 @@ class MooncakeStoreCoordinator:
         if self.use_eagle and not any(g.use_eagle for g in attention_groups):
             attention_groups = [g._replace(use_eagle=True) for g in attention_groups]
         self.attention_groups = attention_groups
-        # Per-group eagle bits. SpecGroup carries use_eagle for the whole
-        # merged spec group, so the per-group store/lookup masks agree with
-        # the merged-group hit check, which applies the eagle drop to every
-        # group sharing the spec.
+        # Per-group eagle bits for the hit-search pop, kept on the merged
+        # spec groups: the eagle drop applies to every group sharing the
+        # spec. Draft-group store/lookup exclusion instead follows
+        # ``draft_group_ids``, which stays per real drafter group and does
+        # not inherit across the spec merge.
         self.eagle_group_ids = {
             gid for g in attention_groups if g.use_eagle for gid in g.group_ids
         }
@@ -249,6 +259,7 @@ class MooncakeStoreCoordinator:
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
             exclude_mamba=True,
+            exclude_draft=True,
         )
 
     def lookup_mask(
@@ -266,6 +277,7 @@ class MooncakeStoreCoordinator:
             0,
             retention_interval=None,
             num_prompt_tokens=None,
+            exclude_draft=True,
         )
 
     def _reachable_masks(
@@ -276,6 +288,7 @@ class MooncakeStoreCoordinator:
         retention_interval: int | None,
         num_prompt_tokens: int | None,
         exclude_mamba: bool = False,
+        exclude_draft: bool = False,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
             self.hash_block_size
@@ -292,6 +305,17 @@ class MooncakeStoreCoordinator:
             end_chunk = aligned_token_len // spec.block_size
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             if exclude_mamba and isinstance(spec, MambaSpec):
+                masks.append([False] * (end_chunk - start_chunk))
+                continue
+            if exclude_draft and g_idx in self.draft_group_ids:
+                # The drafter never reads the restored prefix: it hides those
+                # blocks from its own attention window by shifting the draft
+                # block table, and rebuilds its context KV from the target's
+                # hidden states for the tokens it does attend to. Persisting
+                # draft KV therefore only burns store traffic and space, and
+                # loading it back is pure waste. Exclude it on both sides:
+                # here (so nothing is written) and in _find_hit_blocks (so its
+                # absence does not zero the hit length).
                 masks.append([False] * (end_chunk - start_chunk))
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
@@ -347,10 +371,27 @@ class MooncakeStoreCoordinator:
         )
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls, group_eagle = self.attention_groups[0]
+            # A single spec group can still mix real and drafter members (the
+            # merge keys on spec identity). Draft members hold no store keys,
+            # so only the remaining members take part in the hit check.
+            member_ids = [
+                gid for gid in group_ids if gid not in self.draft_group_ids
+            ]
+            if not member_ids:
+                # Callers index the result by global group id, so size the
+                # tuple by the full group count and place entries at each
+                # gid; groups outside this spec group stay empty (all False).
+                num_groups = len(self.kv_cache_groups)
+                null = cached_block_pool.null_block
+                span = cdiv(max_length, spec.block_size)
+                nulls: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
+                for gid in group_ids:
+                    nulls[gid] = [null] * span
+                return tuple(nulls), 0
             hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,  # type: ignore[arg-type]
                 max_length=max_length,
-                kv_cache_group_ids=group_ids,
+                kv_cache_group_ids=member_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
                 drop_eagle_block=apply_eagle and group_eagle,
@@ -358,7 +399,7 @@ class MooncakeStoreCoordinator:
             )
             num_groups = len(self.kv_cache_groups)
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
-            for gid, blks in zip(group_ids, hit_blocks, strict=True):
+            for gid, blks in zip(member_ids, hit_blocks, strict=True):
                 blocks_by_group[gid] = blks
             return tuple(blocks_by_group), hit_length
 
@@ -378,7 +419,35 @@ class MooncakeStoreCoordinator:
             for idx, (spec, group_ids, manager_cls, group_eagle) in enumerate(
                 self.attention_groups
             ):
-                first_group_id = group_ids[0]
+                # A merged spec group may mix real and drafter members (the
+                # merge keys on spec identity and use_eagle propagates). The
+                # drafter members hold no store keys and never read the
+                # restored prefix back, so they cannot constrain the hit
+                # length: null them out and let only the remaining members
+                # take part in the manager's hit check.
+                member_ids = tuple(
+                    gid for gid in group_ids if gid not in self.draft_group_ids
+                )
+                if len(member_ids) != len(group_ids):
+                    null = cached_block_pool.null_block
+                    span = cdiv(max_length, spec.block_size)
+                    for gid in group_ids:
+                        if gid in self.draft_group_ids:
+                            hit_blocks_by_group[gid] = [null] * span
+                            hit_length_by_group[gid] = 0
+                # The draft groups are never written to the store (see
+                # _reachable_masks), so their keys cannot exist. They also must
+                # not constrain the hit length: the drafter hides the restored
+                # prefix from its own attention window, so it never reads those
+                # pages back. Report them as entirely uncached and move on.
+                if not member_ids:
+                    null = cached_block_pool.null_block
+                    span = cdiv(max_length, spec.block_size)
+                    for gid in group_ids:
+                        hit_blocks_by_group[gid] = [null] * span
+                        hit_length_by_group[gid] = 0
+                    continue
+                first_group_id = member_ids[0]
                 cached = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
                     curr_hit_length = min(
@@ -405,7 +474,7 @@ class MooncakeStoreCoordinator:
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
+                    kv_cache_group_ids=member_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
@@ -416,7 +485,7 @@ class MooncakeStoreCoordinator:
                 elif _new_hit_length < curr_hit_length:
                     eagle_verified.clear()
                 curr_hit_length = _new_hit_length
-                for gid, blocks in zip(group_ids, hit_blocks, strict=True):
+                for gid, blocks in zip(member_ids, hit_blocks, strict=True):
                     hit_blocks_by_group[gid] = blocks
                     hit_length_by_group[gid] = _new_hit_length
 

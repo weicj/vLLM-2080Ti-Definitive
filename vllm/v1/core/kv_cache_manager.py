@@ -183,6 +183,12 @@ class KVCacheManager:
                     manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        # One pool per KV-cache group, indexed by the global group id. With
+        # ``independent_block_pools`` every group owns its pool and its block ids
+        # are group-local; otherwise the coordinator broadcasts the same pool to
+        # every entry. Connectors that translate group-local block ids must use
+        # this list rather than the single ``block_pool``.
+        self.block_pools = self.coordinator.block_pools
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers

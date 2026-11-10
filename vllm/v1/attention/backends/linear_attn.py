@@ -230,6 +230,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             num_accepted_tokens = None
 
         legacy_state_indices_tensor = state_indices_tensor[:, 0]
+        # Fixed-shape branch is gated by the configured cudagraph mode.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         use_full_cudagraph = (
             cudagraph_mode is not None and cudagraph_mode.has_full_cudagraphs()
@@ -253,6 +254,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
                 )
                 state_indices_tensor_d = self.decode_state_indices_tensor[:padded_bs]
                 state_indices_tensor_d[num_decodes:] = PAD_SLOT_ID
+                state_indices_tensor_d = state_indices_tensor_d.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             self.decode_legacy_state_indices_tensor[:num_decodes].copy_(
                 torch.where(
@@ -269,6 +271,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
                 :padded_bs
             ]
             legacy_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+            legacy_state_indices_tensor = legacy_state_indices_tensor.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
             if state_indices_tensor_d.dim() == 1:
                 state_indices_tensor_d = legacy_state_indices_tensor
 
@@ -281,6 +284,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
                 decode_num_query_tokens = query_start_loc_d[-1]
                 query_start_loc_d = self.decode_query_start_loc[: padded_bs + 1]
                 query_start_loc_d[num_decodes + 1 :] = decode_num_query_tokens
+                query_start_loc_d = query_start_loc_d.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
                 self.decode_num_accepted_tokens[:num_decodes].copy_(
                     num_accepted_tokens,
@@ -288,6 +292,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
                 )
                 num_accepted_tokens = self.decode_num_accepted_tokens[:padded_bs]
                 num_accepted_tokens[num_decodes:] = 1
+                num_accepted_tokens = num_accepted_tokens.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
         return BailingLinearAttentionMetadata(
             num_prefills=num_prefills,

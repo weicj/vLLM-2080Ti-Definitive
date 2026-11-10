@@ -112,7 +112,7 @@ def test_linear_attention_spec_decode_full_graph_metadata_pads_cache_slots():
     assert metadata.num_accepted_tokens.tolist() == [1, 2, 1]
 
 
-def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
+def test_linear_attention_full_graph_metadata_snapshots_decode_buffers():
     vllm_config = create_vllm_config(
         hf_config_override={
             "architectures": ["BailingMoeV2_5ForCausalLM"],
@@ -176,9 +176,12 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
     assert second.state_indices_tensor_d is not None
     assert second.query_start_loc_d is not None
     assert second.num_accepted_tokens is not None
-    assert second.state_indices_tensor_d.data_ptr() == state_ptr
-    assert second.query_start_loc_d.data_ptr() == query_ptr
-    assert second.num_accepted_tokens.data_ptr() == accepted_ptr
+    # Each capture build hands out a fresh snapshot of the decode buffers, so
+    # a later refresh copy into the shared pool cannot rewrite what the
+    # replayed graph reads.
+    assert second.state_indices_tensor_d.data_ptr() != state_ptr
+    assert second.query_start_loc_d.data_ptr() != query_ptr
+    assert second.num_accepted_tokens.data_ptr() != accepted_ptr
     assert second.state_indices_tensor_d.tolist() == [
         [20, 21],
         [PAD_SLOT_ID, PAD_SLOT_ID],

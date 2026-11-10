@@ -73,9 +73,10 @@ def test_mamba_single_token_prompt_runs_as_prefill():
 
 
 def test_update_block_table_copies_block_idx_to_persistent_buffers():
-    """update_block_table() must write block_idx tensors to the current
-    builder's persistent buffers, not leave them pointing to a different
-    builder's buffers."""
+    """update_block_table() must take the block_idx values into the current
+    builder's persistent buffers and hand back a fresh snapshot of them, not a
+    view of either builder's buffers (a later refresh copy into the shared
+    staging storage must not rewrite what the replayed graph reads)."""
 
     block_size = 16
     max_model_len = 256
@@ -142,21 +143,22 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
 
     metadata_b = builder_b.update_block_table(metadata_a, blk_table, slot_mapping)
 
-    # block_idx tensors must live in builder_b's persistent buffers.
+    # block_idx tensors must be a fresh snapshot of builder_b's values, not a
+    # view of its persistent buffer (and not of builder_a's).
     def shares_storage(tensor, buffer):
         return (
             tensor.untyped_storage().data_ptr() == buffer.untyped_storage().data_ptr()
         )
 
-    assert shares_storage(
+    assert not shares_storage(
         metadata_b.block_idx_last_scheduled_token,
         builder_b.block_idx_last_scheduled_token,
-    ), "block_idx_last_scheduled_token not in builder_b's persistent buffer"
+    ), "block_idx_last_scheduled_token must not alias builder_b's persistent buffer"
 
-    assert shares_storage(
+    assert not shares_storage(
         metadata_b.block_idx_last_computed_token,
         builder_b.block_idx_last_computed_token,
-    ), "block_idx_last_computed_token not in builder_b's persistent buffer"
+    ), "block_idx_last_computed_token must not alias builder_b's persistent buffer"
 
     # Must NOT point to builder_a's buffers.
     assert not shares_storage(
@@ -343,11 +345,11 @@ def test_block_idx_prev_step_persistent_buffer_skipped_without_spec_decode():
     assert not hasattr(builder, "block_idx_last_scheduled_token_prev_step")
 
 
-def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
+def test_block_idx_prev_step_cudagraph_capture_snapshots_persistent_buffer():
     """_update_metadata_for_cudagraph_capture must copy the prev-step anchor
-    into the builder's persistent buffer (so cudagraph replay reads from the
-    same underlying memory), pad past num_decodes with zero, and return a
-    slice of the persistent buffer in the metadata."""
+    out of the builder's persistent buffer into a fresh snapshot (the pool is
+    shared staging storage that later refresh copies would overwrite), pad
+    past num_decodes with zero, and return that snapshot in the metadata."""
     block_size = 16
     max_model_len = 256
     max_num_seqs = 8
@@ -409,14 +411,14 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 
     out = builder._update_metadata_for_cudagraph_capture(metadata)
 
-    # Output field exists and is identity-shared with the persistent buffer.
+    # Output field is a fresh snapshot, not a view of the persistent buffer:
+    # a later refresh copy into the pool must not change what replay reads.
     assert out.block_idx_last_scheduled_token_prev_step is not None
     assert (
         out.block_idx_last_scheduled_token_prev_step.untyped_storage().data_ptr()
-        == builder.block_idx_last_scheduled_token_prev_step.untyped_storage().data_ptr()
+        != builder.block_idx_last_scheduled_token_prev_step.untyped_storage().data_ptr()
     ), (
-        "prev-step buffer must live in the builder's persistent buffer, not "
-        "in the caller-provided tensor"
+        "prev-step snapshot must not alias the builder's persistent buffer"
     )
 
     # Padded by num_reqs (not num_decode_tokens) — same fix as bug 2 for the

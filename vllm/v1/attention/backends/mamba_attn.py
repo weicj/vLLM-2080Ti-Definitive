@@ -771,6 +771,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
+            # Fixed-shape branch is gated by the configured cudagraph mode.
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             padded_bs = metadata.num_reqs
@@ -779,6 +780,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = NULL_BLOCK_ID
+            state_indices_tensor_d = state_indices_tensor_d.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
@@ -790,6 +792,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_accepted_tokens[metadata.num_decodes :] = (
                     1  # pad with 1st slot index
                 )
+                num_accepted_tokens = num_accepted_tokens.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 assert block_idx_last_scheduled_token is not None
@@ -802,6 +805,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     :padded_bs
                 ]
                 block_idx_last_scheduled_token[metadata.num_decodes :] = 0
+                block_idx_last_scheduled_token = block_idx_last_scheduled_token.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
                 self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
                     block_idx_last_computed_token[: metadata.num_decodes],
@@ -811,6 +815,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     :padded_bs
                 ]
                 block_idx_last_computed_token[metadata.num_decodes :] = 0
+                block_idx_last_computed_token = block_idx_last_computed_token.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
                 if (
                     self.use_spec_decode
@@ -828,6 +833,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                         self.block_idx_last_scheduled_token_prev_step[:padded_bs]
                     )
                     block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
+                    block_idx_last_scheduled_token_prev_step = block_idx_last_scheduled_token_prev_step.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
             if self.use_replayssm and not self.use_flashinfer_replayssm:
                 assert write_pos_d is not None
@@ -838,6 +844,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 )
                 write_pos_d = self.decode_write_pos_d[:padded_bs]
                 write_pos_d[metadata.num_decodes :] = 0
+                write_pos_d = write_pos_d.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
                 self.decode_is_flush_d[: metadata.num_decodes].copy_(
                     is_flush_d[: metadata.num_decodes],
@@ -845,16 +852,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 )
                 is_flush_d = self.decode_is_flush_d[:padded_bs]
                 is_flush_d[metadata.num_decodes :] = 0
+                is_flush_d = is_flush_d.clone()  # Fresh tensor each step; the persistent pool is only staging storage.
 
                 if self.decode_bc_pre_scratch is not None:
-                    bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
+                    bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs].clone()  # Fresh tensor each step; the persistent pool is only staging storage.
             elif self.use_flashinfer_replayssm:
                 assert self.decode_replayssm_scratch is not None
                 cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
                 replayssm_scratch = (
-                    cb_scaled[:padded_bs],
-                    cumAdt_vec[:padded_bs],
-                    cb_old[:padded_bs],
+                    cb_scaled[:padded_bs].clone(),  # Fresh tensor each step; the persistent pool is only staging storage.
+                    cumAdt_vec[:padded_bs].clone(),  # Fresh tensor each step; the persistent pool is only staging storage.
+                    cb_old[:padded_bs].clone(),  # Fresh tensor each step; the persistent pool is only staging storage.
                 )
 
         return replace(
