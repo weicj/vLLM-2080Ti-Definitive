@@ -203,6 +203,10 @@ particularly during long prefill and repeated CUDA Graph/AOT compilation.
   toolbox for dual-2080-Ti model routes, benchmark summaries, model notes, and
   operational guidance. This repository focuses on the patched vLLM runtime.
 
+- [Inkling 2 Mini on dual Tesla T10](https://github.com/uos1231234/inkling2-mini-t10):
+  independent NInfer-all deployment and benchmark on two 16 GiB T10s without
+  CUDA peer access, reported in [Discussion #269](https://github.com/weicj/vLLM-2080Ti-Definitive/discussions/269).
+
 ## 🙏 Credits And Upstream Projects
 
 This repository is a hardware-focused fork of

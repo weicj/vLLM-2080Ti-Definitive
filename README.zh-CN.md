@@ -185,6 +185,10 @@ CUDA Graph/AOT 编译时降频很容易被误判为软件性能回退。
   模型路线、benchmark 汇总、模型记录和运行建议的配套工具箱。本仓库聚焦于补丁后
   的 vLLM runtime。
 
+- [双 Tesla T10 部署 Inkling 2 Mini](https://github.com/uos1231234/inkling2-mini-t10)：
+  在无法启用 CUDA P2P 的两张 16 GiB T10 上，用 NInfer-all 完成的独立部署与实测。
+  详见 [讨论 #269](https://github.com/weicj/vLLM-2080Ti-Definitive/discussions/269)。
+
 ## 🙏 致谢 / 上游项目
 
 本仓库是基于上游 [vLLM](https://github.com/vllm-project/vllm) 的硬件定向 fork，
