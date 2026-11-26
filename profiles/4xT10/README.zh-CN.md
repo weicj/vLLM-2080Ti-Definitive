@@ -27,7 +27,7 @@
 ## 说明
 
 1. Profile 直接放在各模型/权重目录下，不再按 mode 分目录。Mode 由 launcher 选择，默认使用 `fast`。
-2. 性能数据统一使用 launcher 的可复测参考口径：仅在测试期间关闭 Prefix Cache、单次只发送一个纯文本请求、预热不计入统计、4K/128 取三次中位数，并完整运行 32K/512。图文 Profile 同样使用纯文本性能口径，图像语义另行验证。`4K/128` 表示准确的 4,096 输入 token，`32K/512` 表示准确的 32,768 输入 token；原始日志和请求 JSON 保存在仓库外部的内部审计目录。
-3. 测试环境：FP8/W8A16 profile 于 2026-09-19 验证，NVFP4/W4A16 profile 于 2026-09-23 验证，软件版本均为 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。测试拓扑使用物理 GPU 0、2、3、4，四张 Tesla T10（每张 16,384 MiB）；四卡位于同一 NUMA 节点，卡间为 PCIe PIX 连接，服务使用 TP4。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-def-cu130`（CUDA 13.0，torch 2.13.0+cu130）。
+2. 性能数据统一使用 launcher 的可复测参考口径：仅在测试期间关闭 Prefix Cache、单次只发送一个纯文本请求、预热不计入统计、4K/128 取三次中位数，并完整运行 32K/512。图文 Profile 同样使用纯文本性能口径，图像语义另行验证。`4K/128` 表示准确的 4,096 输入 token，`32K/512` 表示准确的 32,768 输入 token。原始日志和请求 JSON 已留存备查。
+3. 测试环境：FP8/W8A16 profile 于 2026-09-19 验证，NVFP4/W4A16 profile 于 2026-09-23 验证，软件版本均为 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。服务使用 TP4，运行在同一 NUMA 节点上通过 PCIe PIX 连接的四张 Tesla T10 上，每张卡有 16,384 MiB 显存。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-def-cu130`（CUDA 13.0，torch 2.13.0+cu130）。
 4. `4x220K` 路线固定使用 `GPU_UTIL=0.93`，为运行时临时显存预留空间。四路同时 32K 请求已通过；四路同时接近 220K 上限不属于最坏情况保证，DFlash 临时 buffer 可能导致 OOM。多并发 profile 不应同时接收多个超长请求。
 5. 所有 profile 均使用 launcher 默认的 `MAX_BATCHED_TOKENS=2048`；FP8KV 路线生产环境应启用 Prefix Cache。上表性能测试特意关闭了 Prefix Cache。W8A16 FP8KV DFlash2 2x220K 路线依据 `GPU_UTIL=0.96` 下实测 445,644 GPU KV tokens 进行容量定标；双路同时 32K/512 验证均准确生成 512 tokens 且服务保持健康，并发时两路解码速度分别约为 62.88 和 65.70 tok/s。

@@ -1,0 +1,216 @@
+--- a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+@@ -188,5 +188,7 @@
+     vllm_config: VllmConfig,
+ ) -> tuple[
+-    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"]
++    str,
++    Literal["triton", "flashinfer", "flashqla_legacy", "cutedsl",
++            "aiter_flydsl", "sycl", "hip"],
+ ]:
+     """Resolve GDN prefill backend.
+@@ -228,4 +230,19 @@
+     )
+     backend = str(backend_cfg).strip().lower()
++
++    if backend == "flashqla_legacy":
++        if not current_platform.is_cuda() or not current_platform.is_device_capability(75):
++            raise ValueError("FlashQLA legacy in this image requires CUDA SM75.")
++        if not vllm_config.model_config:
++            raise ValueError("FlashQLA legacy requires a model configuration.")
++        text_config = vllm_config.model_config.hf_text_config
++        key_dim = getattr(text_config, "linear_key_head_dim", None)
++        value_dim = getattr(text_config, "linear_value_head_dim", None)
++        if key_dim != value_dim or key_dim not in (16, 32, 64, 128):
++            raise ValueError("FlashQLA legacy requires matching GDN head dimensions.")
++        from vllm_sm75_flashqla import _load_ext
++
++        _load_ext()
++        return backend, "flashqla_legacy"
+
+     if backend == "sycl" and not current_platform.is_xpu():
+@@ -375,4 +392,5 @@
+         "hip": "HIP",
+         "triton": "Triton/FLA",
++        "flashqla_legacy": "FlashQLA legacy SM75",
+         "sycl": "SYCL",
+     }[active_backend]
+@@ -453,4 +471,81 @@
+
+
++def flashqla_legacy_chunk_gated_delta_rule(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    g: torch.Tensor,
++    beta: torch.Tensor,
++    initial_state: torch.Tensor,
++    output_final_state: bool,
++    use_qk_l2norm_in_kernel: bool = True,
++):
++    """Run the forward-only FlashQLA kernel used by SM70/SM75 builds."""
++    from vllm_sm75_flashqla import chunk_gated_delta_rule_fwd_legacy
++
++    if use_qk_l2norm_in_kernel:
++        q = l2norm_fwd(q)
++        k = l2norm_fwd(k)
++
++    output_dtype = v.dtype
++    state_dtype = initial_state.dtype
++    qkv_dtype = torch.float16
++    scale = q.shape[-1] ** -0.5
++    output, final_state = chunk_gated_delta_rule_fwd_legacy(
++        q.to(qkv_dtype).contiguous(),
++        k.to(qkv_dtype).contiguous(),
++        v.to(qkv_dtype).contiguous(),
++        g.to(torch.float32).contiguous(),
++        beta.to(torch.float32).contiguous(),
++        scale,
++        initial_state.to(torch.float32).contiguous(),
++    )
++    output = output.to(output_dtype)
++    if output_final_state:
++        final_state = final_state.to(state_dtype)
++    else:
++        final_state = None
++    return output, final_state
++
++
++def flashqla_legacy_varlen_chunk_gated_delta_rule(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    v: torch.Tensor,
++    g: torch.Tensor,
++    beta: torch.Tensor,
++    initial_state: torch.Tensor,
++    output_final_state: bool,
++    cu_seqlens: torch.Tensor,
++    use_qk_l2norm_in_kernel: bool = True,
++):
++    """Run a packed varlen prefill as one FlashQLA CUDA batch."""
++    from vllm_sm75_flashqla import chunk_gated_delta_rule_fwd_legacy_varlen
++    if use_qk_l2norm_in_kernel:
++        q = l2norm_fwd(q)
++        k = l2norm_fwd(k)
++
++    output_dtype = v.dtype
++    state_dtype = initial_state.dtype
++    qkv_dtype = torch.float16
++    scale = q.shape[-1] ** -0.5
++    output, final_state = chunk_gated_delta_rule_fwd_legacy_varlen(
++        q.to(qkv_dtype).contiguous(),
++        k.to(qkv_dtype).contiguous(),
++        v.to(qkv_dtype).contiguous(),
++        g.to(torch.float32).contiguous(),
++        beta.to(torch.float32).contiguous(),
++        cu_seqlens.contiguous(),
++        scale,
++        initial_state.to(torch.float32).contiguous(),
++    )
++    output = output.to(output_dtype)
++    if output_final_state:
++        final_state = final_state.to(state_dtype)
++    else:
++        final_state = None
++    return output, final_state
++
++
+ @CustomOp.register("chunk_gated_delta_rule")
+ class ChunkGatedDeltaRule(CustomOp):
+@@ -474,4 +569,6 @@
+         if active_backend == "flashinfer":
+             self._forward_method = self.forward_cuda
++        elif active_backend == "flashqla_legacy":
++            self._forward_method = self.forward_flashqla_legacy
+         elif active_backend == "cutedsl":
+             self._forward_method = self.forward_cutedsl
+@@ -548,4 +645,90 @@
+             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+             core_attn_out=core_attn_out,
++        )
++
++    def forward_flashqla_legacy(
++        self,
++        q: torch.Tensor,
++        k: torch.Tensor,
++        v: torch.Tensor,
++        g: torch.Tensor,
++        beta: torch.Tensor,
++        initial_state: torch.Tensor,
++        output_final_state: bool,
++        cu_seqlens: torch.Tensor | None = None,
++        chunk_indices: torch.Tensor | None = None,
++        chunk_offsets: torch.Tensor | None = None,
++        use_qk_l2norm_in_kernel: bool = True,
++        core_attn_out: torch.Tensor | None = None,
++        aiter_prefill_metadata: object | None = None,
++    ):
++        # The legacy extension handles one dense batch or a packed varlen
++        # batch. The latter maps each request onto the CUDA grid's batch axis,
++        # so multiple recurrent scans run concurrently in one launch.
++        if (
++            q.ndim == 4
++            and k.ndim == 4
++            and v.ndim == 4
++            and q.shape[0] == 1
++            and (cu_seqlens is None or int(cu_seqlens.numel()) == 2)
++        ):
++            output, final_state = flashqla_legacy_chunk_gated_delta_rule(
++                q=q,
++                k=k,
++                v=v,
++                g=g,
++                beta=beta,
++                initial_state=initial_state,
++                output_final_state=output_final_state,
++                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
++            )
++            if core_attn_out is not None:
++                out_flat = output.squeeze(0).reshape(-1)
++                core_flat = core_attn_out.reshape(-1)
++                core_flat[: out_flat.numel()].copy_(out_flat)
++            return output, final_state
++
++        if (
++            cu_seqlens is not None
++            and q.ndim == 4
++            and k.ndim == 4
++            and v.ndim == 4
++            and q.shape[0] == 1
++        ):
++            output, final_state = flashqla_legacy_varlen_chunk_gated_delta_rule(
++                q=q,
++                k=k,
++                v=v,
++                g=g,
++                beta=beta,
++                initial_state=initial_state,
++                output_final_state=output_final_state,
++                cu_seqlens=cu_seqlens,
++                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
++            )
++            if core_attn_out is not None:
++                core_attn_out.reshape(-1)[: output.numel()].copy_(
++                    output.reshape(-1)
++                )
++            return output, final_state
++
++        logger.warning_once(
++            "FlashQLA legacy GDN prefill received unsupported varlen/chunked "
++            "metadata; falling back to Triton/FLA for this call."
++        )
++        return self.forward_native(
++            q=q,
++            k=k,
++            v=v,
++            g=g,
++            beta=beta,
++            initial_state=initial_state,
++            output_final_state=output_final_state,
++            cu_seqlens=cu_seqlens,
++            chunk_indices=chunk_indices,
++            chunk_offsets=chunk_offsets,
++            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
++            core_attn_out=core_attn_out,
++            aiter_prefill_metadata=aiter_prefill_metadata,
+         )

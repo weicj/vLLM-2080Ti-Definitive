@@ -37,8 +37,8 @@
 ## 说明
 
 1. Profile 直接放在各模型/权重目录下，不再按 mode 分目录。Mode 由 launcher 选择，默认使用 `fast`。
-2. 性能数据统一使用 launcher 的可复测参考口径：仅在测试期间关闭 Prefix Cache、单次只发送一个纯文本请求、预热不计入统计、4K/128 取三次中位数，并完整运行 32K/512。图文 Profile 同样使用纯文本性能口径，图像语义另行验证。`4K/128` 表示准确的 4,096 输入 token，`32K/512` 表示准确的 32,768 输入 token；原始日志和请求 JSON 保存在仓库外部的内部审计目录。
+2. 性能数据统一使用 launcher 的可复测参考口径：仅在测试期间关闭 Prefix Cache、单次只发送一个纯文本请求、预热不计入统计、4K/128 取三次中位数，并完整运行 32K/512。图文 Profile 同样使用纯文本性能口径，图像语义另行验证。`4K/128` 表示准确的 4,096 输入 token，`32K/512` 表示准确的 32,768 输入 token。原始日志和请求 JSON 已留存备查。
 3. NVFP4 W4A16 的 FP16KV 存在显著质量塌陷问题，因此不列入推荐 KV 类型。
 4. NVFP4 DFlash2 图文路线已使用明确的自然语言图像问题验证，正确返回“蓝色方形/橙色圆形”。由于 DFlash draft 不支持外部多模态 embedding，draft 侧使用纯文本输入；图像理解仍由 target model 完成。
 
-5. 测试环境：2026-09-19，软件版本 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。测试拓扑使用物理 GPU 1 和 5，两张 NVIDIA GeForce RTX 2080 Ti（每张 22,528 MiB），两卡之间为 NV2 连接；服务使用 TP2。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-def-cu130`（CUDA 13.0，torch 2.13.0+cu130）。
+5. 测试环境：2026-09-19，软件版本 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。服务使用 TP2，运行在通过 NV2 连接的两张 NVIDIA GeForce RTX 2080 Ti 上，每张卡有 22,528 MiB 显存。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-def-cu130`（CUDA 13.0，torch 2.13.0+cu130）。

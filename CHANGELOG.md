@@ -2,6 +2,16 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.3.0.dev0
+
+- Adds an experimental Docker runtime based on the official vLLM v0.34.0
+  release image with the SM75 FlashQLA prefill extension, FlashInfer FP8 KV
+  compatibility, and a fixed KV cache default for local Qwen GDN on SM75 TP2.
+- Keeps the build, launcher, and update commands, plus the native 0.2.x
+  runtime via `VLLM_RUNTIME_BACKEND=native`.
+- Records Docker results for the existing 2xT10 Qwen3.8-27B-INT4 MTP/3 FP8 KV
+  profile alongside the original 0.2.x figures.
+
 ## v0.2.2-post3 - 2026-10-01
 
 Patch release following `v0.2.2-post2`.

@@ -1,6 +1,6 @@
 #include <torch/extension.h>
 
-#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -382,7 +382,7 @@ std::vector<torch::Tensor> gdn_forward_impl(
                          ? h0
                          : torch::empty({batch, v_heads, dim, dim}, q.options());
 
-  const auto stream = at::cuda::getCurrentCUDAStream(q.device().index()).stream();
+  const auto stream = c10::cuda::getCurrentCUDAStream(q.device().index()).stream();
   const int32_t* offsets_ptr = ragged ? offsets.data_ptr<int32_t>() : nullptr;
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "gdn_forward_data", [&] {
     using data_t = scalar_t;

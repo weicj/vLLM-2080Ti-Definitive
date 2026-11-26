@@ -19,11 +19,12 @@ For usage feedback, feature requests, and community discussion, join the
 
 ![Live single-request throughput demo](docs/assets/vllmspeed_dflash.gif)
 
-Current 0.2.x baseline: `v0.2.2-post3`
-Upstream baseline: `b23433088b` (`v0.29.1rc0-33`)
+Current development version is `v0.3.0.dev0` on `vllm-2080ti-definitive-0.3.x`.
+The Docker runtime uses the official [vLLM v0.34.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0).
+The native runtime and the benchmark evidence below come from
+[v0.2.2-post3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)
+and the earlier releases recorded in each hardware profile guide.
 
-Branch: [`main`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/main)
-Release reference: [v0.2.2-post3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## 💡 Why RTX 2080 Ti For LLM Inference?
@@ -52,7 +53,7 @@ marked as candidates.
 
 ## 🧩 Support Status
 
-The current target environment is Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. For CUDA 12.8, PyTorch 2.11, older kernels, or GCC 12/13/14, refer to the `0.1.x` line, which is no longer actively maintained.
+The native build targets Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. For CUDA 12.8, PyTorch 2.11, older kernels, or GCC 12/13/14, refer to the `0.1.x` line, which is no longer actively maintained.
 
 Supported model routes and their measurements are listed in the corresponding
 hardware profile guides.
@@ -83,24 +84,21 @@ Both rows are single-request tests using DFlash2 (default K=7) and synthetic tex
 
 ## 🚀 Build And Launch
 
-1. Build a new checkout:
+1. Run `./build.sh` in the 0.3.x checkout. The default build uses Docker
+   and takes the Torch and CUDA stack from the upstream release image. The
+   [image lock](PROJECT_RELEASE.env) pins the official linux/amd64 image by
+   digest. The build applies the SM75 GDN prefill patch and compiles FlashQLA
+   into the image.
 
-```bash
-git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
-cd vLLM-2080Ti-Definitive
-./build.sh
-```
+   The Docker runtime requires Docker with NVIDIA Container Toolkit and a
+   host driver compatible with CUDA 13.0. The existing native builder is
+   available with `VLLM_RUNTIME_BACKEND=native ./build.sh` and
+   `VLLM_RUNTIME_BACKEND=native ./launcher.sh`.
 
-2. Update an existing checkout to the latest GitHub Release:
-
-```bash
-./update.sh
-```
-
-The update helper preserves local environments, dependency caches, logs,
-results, and `profiles/local`. It compares `VERSION` with the latest release,
-downloads the matching source archive, and offers to run `build.sh` after the
-refresh.
+2. Run `./update.sh` to update. Git checkouts fast-forward their tracking
+   branch. Archive installs look for a stable 0.3.x release. The updater
+   preserves local caches, virtual environments, logs, and `profiles/local`,
+   and offers to run `build.sh` after updating.
 
 3. Start and manage the service:
 
@@ -126,6 +124,17 @@ NON_INTERACTIVE=1 ./launcher.sh
 
 Use `./launcher.sh --print-config` to preview a route. See the
 [non-interactive launch guide](docs/non-interactive-launch.md) for automation.
+
+The Docker launcher uses the same local checkpoint paths, profile files, GPU
+order, and service settings. It uses upstream scheduling and graph defaults
+for the fast mode and the piecewise graph policy for normal speculative
+decoding. The server-wide thinking budget and the 0.2.x prefill barrier are
+available through the native runtime.
+
+The Docker runtime is experimental on SM75. The first route tested on Docker
+uses two Tesla T10s with Qwen3.8-27B-INT4, MTP/3 and FP8 KV. See the hardware
+profile for Docker results and the separate 0.2.x measurements.
+[2xT10 profile results](profiles/2xT10/README.md#03x-docker-validation)
 
 ## 🧭 Profiles
 
@@ -156,7 +165,7 @@ port, target and draft model paths, chat template, and reasoning defaults.
 - Four 16 GiB Tesla T10 GPUs over PCIe (TP=4 profiles)
 - NVIDIA Turing / SM75, with validated tensor parallel sizes 2 and 4
 - `0.2.x` target: CUDA 13.0, PyTorch 2.13, Python 3.12
-- Target host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
+- Native build host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
 
 Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
 topology, model head dimensions, KV-cache dtype, and CUDA Graph behavior.

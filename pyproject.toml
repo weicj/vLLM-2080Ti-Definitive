@@ -49,7 +49,7 @@ lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_
 
 [tool.setuptools_scm]
 # Git tags remain the source of truth for published releases.
-fallback_version = "0.2.2.post3+2080ti"
+fallback_version = "0.3.0.dev0+2080ti"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,0 +1,27 @@
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -3250,9 +3250,22 @@
+             and not imex_channel_available()
+         )
+         if requested is None:
+-            enabled = unsupported is None and (exports_fd or not fabric_unavailable)
++            # On a pair of Turing cards, post-warmup reservations can leave
++            # Qwen GDN too little KV memory for the shipped 262K configuration.
++            use_static_kv = (
++                self.model_config is not None
++                and self.model_config.hf_text_config.model_type == "qwen3_5_text"
++                and self.parallel_config.tensor_parallel_size == 2
++                and current_platform.is_cuda()
++                and current_platform.is_device_capability(75)
++            )
++            enabled = unsupported is None and (
++                exports_fd or (not fabric_unavailable and not use_static_kv)
++            )
+             cache_config.enable_extensible_kv_cache = enabled
+-            if unsupported is None and not enabled:
++            if use_static_kv and not enabled and unsupported is None:
++                logger.info("Using a fixed KV cache for Qwen GDN on SM75 TP2.")
++            elif unsupported is None and not enabled:
+                 logger.info(
+                     "Extensible KV cache off: without an IMEX channel, KV transfers "
+                     "within a host (e.g. NIXL) would lose NVLink and fall back to "

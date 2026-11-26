@@ -20,6 +20,33 @@ fail() {
   exit 1
 }
 
+# shellcheck source=tools/docker_runtime.sh
+source "$ROOT/tools/docker_runtime.sh"
+
+case "$VLLM_RUNTIME_BACKEND" in
+  docker)
+    command -v "$VLLM_DOCKER_COMMAND" >/dev/null || fail "Docker is required for the container build."
+    "$VLLM_DOCKER_COMMAND" info >/dev/null || fail "Docker daemon is unavailable."
+    docker_base=${VLLM_DOCKER_BASE_IMAGE:-$DOCKER_BASE_IMAGE}
+    printf '%s\n' "$PROJECT_NAME v$FORK_RELEASE" "Official base: $docker_base" "Runtime image: $VLLM_DOCKER_IMAGE"
+    docker_context=$(mktemp -d)
+    trap 'rm -rf -- "$docker_context"' EXIT
+    mkdir -p "$docker_context/docker" "$docker_context/tools"
+    cp -a docker/sm75 "$docker_context/docker/"
+    cp -a tools/flashqla_sm75_patches "$docker_context/tools/"
+    cp LICENSE "$docker_context/"
+    "$VLLM_DOCKER_COMMAND" build \
+      --platform linux/amd64 --file docker/sm75/Dockerfile \
+      --build-arg "BASE_IMAGE=$docker_base" --build-arg "UPSTREAM_VERSION=$DOCKER_VLLM_VERSION" \
+      --build-arg "FORK_RELEASE=$FORK_RELEASE" --build-arg "MAX_JOBS=${MAX_JOBS:-2}" \
+      --tag "$VLLM_DOCKER_IMAGE" "$docker_context" || fail "Container build failed."
+    printf '%s\n' "Build complete. Start with ./launcher.sh"
+    exit 0
+    ;;
+  native) ;;
+  *) fail "VLLM_RUNTIME_BACKEND must be docker or native." ;;
+esac
+
 if [[ -z "${CUDA_HOME:-}" ]]; then
   for candidate in /usr/local/cuda-13.0 /usr/local/cuda-13; do
     if [[ -x "$candidate/bin/nvcc" ]]; then

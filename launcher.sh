@@ -11,6 +11,12 @@ PROJECT_ROOT="$MANAGER_ROOT"
 PROJECT_RELEASE_FILE=${PROJECT_RELEASE_FILE:-"$MANAGER_ROOT/PROJECT_RELEASE.env"}
 # shellcheck source=/dev/null
 source "$PROJECT_RELEASE_FILE"
+# shellcheck source=tools/docker_runtime.sh
+source "$MANAGER_ROOT/tools/docker_runtime.sh"
+if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+  RUNTIME_IDENTITY=$DOCKER_RUNTIME_IDENTITY
+  BASE_VLLM_VERSION=$DOCKER_VLLM_VERSION
+fi
 RUNTIME_ROOT=${RUNTIME_ROOT:-"$MANAGER_ROOT"}
 PROFILE_DIR=${PROFILE_DIR:-"$MANAGER_ROOT/profiles"}
 TEMPLATE_DIR=${TEMPLATE_DIR:-"$PROFILE_DIR/templates"}
@@ -488,11 +494,32 @@ current_cudagraph_capture_label() {
     return 0
   fi
 
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    printf 'upstream defaults\n'
+    return 0
+  fi
   speculative_tokens=$(effective_speculative_tokens)
   if [[ -n "${SPECULATIVE_CONFIG:-}" || "$speculative_tokens" -gt 0 ]]; then
     speculative_cudagraph_capture_sizes "$speculative_tokens" "${MAX_NUM_SEQS:-1}"
   else
     printf '1\n'
+  fi
+}
+
+spec_graph_policy_label() {
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
+      printf 'custom'
+    elif [[ "$MODE" == safe ]]; then
+      printf 'eager'
+    elif [[ "$MODE" == normal && ( "$(effective_speculative_tokens)" -gt 0 || -n "${SPECULATIVE_CONFIG:-}" ) ]]; then
+      printf 'PIECEWISE'
+    else
+      printf 'upstream defaults'
+    fi
+  else
+    printf 'VLLM_SM75_SPEC_SYNC_MODE=%s, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%s' \
+      "${VLLM_SM75_SPEC_SYNC_MODE:-auto}" "${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
   fi
 }
 
@@ -4017,6 +4044,10 @@ clear_last_service_state() {
 stop_pid_file() {
   local pid_file=$1
   local pid descendants
+  if [[ -f "${pid_file}.container" ]]; then
+    docker_stop_service "$pid_file"
+    return $?
+  fi
   if [[ -f "${pid_file}.token" ]]; then
     cleanup_cancelled_launch "$pid_file"
     return $?
@@ -4173,6 +4204,11 @@ cleanup_failed_launch() {
   local pid_file=${1:-}
   local pid
 
+  if [[ -f "${pid_file}.container" ]]; then
+    docker_stop_service "$pid_file"
+    return $?
+  fi
+  [[ "$VLLM_RUNTIME_BACKEND" != docker ]] || return 0
   if [[ -n "$pid_file" && -f "$pid_file" ]]; then
     pid=$(cat "$pid_file" 2>/dev/null || true)
     stop_pid_tree "$pid" || true
@@ -4212,6 +4248,10 @@ managed_pid_is_active() {
 
 cleanup_cancelled_launch() {
   local pid_file=$1 pid token descendants remaining attempts
+  if [[ -f "${pid_file}.container" ]]; then
+    docker_stop_service "$pid_file"
+    return $?
+  fi
   [[ -f "$pid_file" ]] || return 0
   pid=$(cat "$pid_file" 2>/dev/null || true)
   token=$(cat "${pid_file}.token" 2>/dev/null || true)
@@ -4787,6 +4827,15 @@ set_sm75_runtime_env() {
   local runtime_cuda_version runtime_parent
   HF_ACTIVE_ENDPOINT=""
   HF_ROUTE_MODE_ACTIVE=""
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
+    export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
+    export PYTHONUNBUFFERED=1
+    if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
+      export PYTHONHASHSEED=0
+    fi
+    return 0
+  fi
   export STABLE_ROOT="$RUNTIME_ROOT"
   export HOME=${RUN_HOME:-"$HOME"}
   if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
@@ -4933,7 +4982,7 @@ build_args() {
   if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
     VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
   fi
-  if [[ "${PREFILL_BATCH_BARRIER:-0}" == "1" ]]; then
+  if [[ "$VLLM_RUNTIME_BACKEND" == native && "${PREFILL_BATCH_BARRIER:-0}" == "1" ]]; then
     VLLM_ARGS+=(--prefill-batch-barrier)
   fi
 
@@ -4976,13 +5025,11 @@ build_args() {
 
   if [[ -n "${MM_LIMIT_JSON:-}" ]]; then
     VLLM_ARGS+=(--limit-mm-per-prompt "$MM_LIMIT_JSON")
-  elif [[ "$MODEL_FAMILY" == qwen* && -z "${ADDITIONAL_CONFIG_JSON:-}" ]]; then
-    VLLM_ARGS+=(--additional-config '{"gdn_prefill_backend":"flashqla_legacy"}')
   elif [[ "$MODEL_FAMILY" == gemma* ]]; then
     VLLM_ARGS+=(--limit-mm-per-prompt '{"image":0,"video":0,"audio":0}')
   fi
 
-  if [[ "$MODEL_FAMILY" == qwen* && -n "${MM_LIMIT_JSON:-}" && -z "${ADDITIONAL_CONFIG_JSON:-}" ]]; then
+  if [[ "$MODEL_FAMILY" == qwen* && -z "${ADDITIONAL_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--additional-config '{"gdn_prefill_backend":"flashqla_legacy"}')
   fi
 
@@ -5031,6 +5078,10 @@ build_args() {
 
   if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG_JSON")
+  elif [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    if [[ "$MODE" == normal && ( "$spec_tokens" -gt 0 || -n "${SPECULATIVE_CONFIG:-}" ) ]]; then
+      VLLM_ARGS+=(--compilation-config '{"cudagraph_mode":"PIECEWISE"}')
+    fi
   elif [[ -n "${SPECULATIVE_CONFIG:-}" || "$spec_tokens" -gt 0 ]]; then
     capture_sizes=$(speculative_cudagraph_capture_sizes "$spec_tokens" "$MAX_NUM_SEQS") || \
       die "Unable to derive speculative CUDA graph capture sizes."
@@ -5039,6 +5090,66 @@ build_args() {
   else
     VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[1],\"max_cudagraph_capture_size\":1}")
   fi
+}
+
+launcher_python() {
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    python3 "$@"
+  else
+    "$RUNTIME_ROOT/.venv/bin/python" "$@"
+  fi
+}
+
+run_performance_helper() {
+  if [[ "$VLLM_RUNTIME_BACKEND" == native ]]; then
+    launcher_python "$@"
+    return
+  fi
+  docker_runtime_options || return 1
+  docker_runtime_mount "$1" readonly || return 1
+  docker_runtime_mount "$MODEL_DIR" readonly || return 1
+  "$VLLM_DOCKER_COMMAND" run --rm "${DOCKER_RUNTIME_OPTIONS[@]}" \
+    --entrypoint python3 "$VLLM_DOCKER_IMAGE" "$@"
+}
+
+start_server_process() {
+  local pid_file=$1 log_file=$2 token=$3 container
+  shift 3
+  local -a detach=(nohup)
+  if command -v setsid >/dev/null 2>&1; then
+    detach+=(setsid)
+  fi
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    docker_server_options || return 1
+    if [[ -e "${pid_file}.container" ]]; then
+      docker_stop_service "$pid_file" || return 1
+    fi
+    container=$("$VLLM_DOCKER_COMMAND" create "${DOCKER_RUNTIME_OPTIONS[@]}" \
+      "$VLLM_DOCKER_IMAGE" "${VLLM_ARGS[@]}" 2>>"$log_file") || {
+      tail -n 20 "$log_file" >&2
+      return 1
+    }
+    printf '%s\n' "$container" >"${pid_file}.container" || {
+      "$VLLM_DOCKER_COMMAND" rm "$container" >/dev/null
+      return 1
+    }
+    "${detach[@]}" "$VLLM_DOCKER_COMMAND" start --attach "$container" >>"$log_file" 2>&1 &
+  else
+    "${detach[@]}" env "VLLM_LAUNCH_TOKEN=$token" "$@" "$RUNTIME_ROOT/.venv/bin/python" \
+      -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" >>"$log_file" 2>&1 &
+    printf '%s\n' "$token" >"${pid_file}.token"
+  fi
+  CURRENT_SERVER_PID=$!
+  printf '%s\n' "$CURRENT_SERVER_PID" >"$pid_file"
+}
+
+server_command_summary() {
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    printf '%q ' "$VLLM_DOCKER_COMMAND" run --network host "$VLLM_DOCKER_IMAGE"
+  else
+    printf '%q ' "$RUNTIME_ROOT/.venv/bin/python" -m vllm.entrypoints.openai.api_server
+  fi
+  printf '%q ' "${VLLM_ARGS[@]}"
 }
 
 startup_status_line() {
@@ -5265,7 +5376,7 @@ run_compile_prewarm() {
   local original_len=$MAX_MODEL_LEN
   local original_name=$SERVED_NAME
   local original_pid=${CURRENT_SERVER_PID:-}
-  local prewarm_name prewarm_safe prewarm_log prewarm_pid_file args_text ready_rc=0 cleanup_rc=0 launch_token
+  local prewarm_name prewarm_safe prewarm_log prewarm_pid_file ready_rc=0 cleanup_rc=0 launch_token
 
   prewarm_name="${SERVED_NAME}-compile-prewarm-${prewarm_len}"
   prewarm_safe=$(printf '%s' "$prewarm_name" | tr -c 'A-Za-z0-9_.-' '_' | sed 's/_*$//')
@@ -5276,7 +5387,6 @@ run_compile_prewarm() {
   MAX_MODEL_LEN=$prewarm_len
   SERVED_NAME=$prewarm_name
   build_args "$host_arg"
-  printf -v args_text '%q ' "${VLLM_ARGS[@]}"
 
   {
     echo "============================================================"
@@ -5290,7 +5400,7 @@ run_compile_prewarm() {
     echo "GPU devices: ${GPU_DEVICES:-}"
     echo "Parallel layout: TP${TP_SIZE:-1} x PP${PP_SIZE:-1}"
     echo "TP/PP rank layout: $(format_tp_rank_groups "${GPU_DEVICES:-}" "${TP_SIZE:-1}" || true)"
-    echo "Command: $RUNTIME_ROOT/.venv/bin/python -m vllm.entrypoints.openai.api_server $args_text"
+    echo "Command: $(server_command_summary)"
     echo "============================================================"
   } > "$prewarm_log"
 
@@ -5300,14 +5410,11 @@ run_compile_prewarm() {
   echo "  Prewarm log: $prewarm_log"
 
   launch_token="prewarm-$$-$STAMP-$RANDOM$RANDOM"
-  if command -v setsid >/dev/null 2>&1; then
-    nohup setsid env "VLLM_LAUNCH_TOKEN=$launch_token" "$RUNTIME_ROOT/.venv/bin/python" -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" >>"$prewarm_log" 2>&1 &
-  else
-    nohup env "VLLM_LAUNCH_TOKEN=$launch_token" "$RUNTIME_ROOT/.venv/bin/python" -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" >>"$prewarm_log" 2>&1 &
-  fi
-  CURRENT_SERVER_PID=$!
-  echo "$CURRENT_SERVER_PID" > "$prewarm_pid_file"
-  echo "$launch_token" > "${prewarm_pid_file}.token"
+  start_server_process "$prewarm_pid_file" "$prewarm_log" "$launch_token" || {
+    MAX_MODEL_LEN=$original_len
+    SERVED_NAME=$original_name
+    return 1
+  }
 
   wait_for_ready "$prewarm_log" "$url_host" || ready_rc=$?
   if [[ "$ready_rc" == "130" ]]; then
@@ -5337,7 +5444,7 @@ run_compile_prewarm() {
 smoke_test() {
   local url_host=$1
   local model_id model_output
-  model_output=$("$RUNTIME_ROOT/.venv/bin/python" - "$url_host" "$PORT" <<'PY'
+  model_output=$(launcher_python - "$url_host" "$PORT" <<'PY'
 import json
 import sys
 import urllib.request
@@ -5354,7 +5461,7 @@ PY
   # Runtime sitecustomize hooks may print diagnostic lines on Python startup.
   model_id=$(printf '%s\n' "$model_output" | tail -n 1)
 
-  "$RUNTIME_ROOT/.venv/bin/python" - "$url_host" "$PORT" "$model_id" <<'PY'
+  launcher_python - "$url_host" "$PORT" "$model_id" <<'PY'
 import json
 import sys
 import urllib.request
@@ -5421,7 +5528,7 @@ startup_performance_eligibility_reason() {
     printf '%s\n' "unavailable: MAX_MODEL_LEN must be at least 4224 for the fixed 4K/128 lane"
     return 1
   fi
-  if [[ ! -x "$RUNTIME_ROOT/.venv/bin/python" ]]; then
+  if [[ "$VLLM_RUNTIME_BACKEND" == native && ! -x "$RUNTIME_ROOT/.venv/bin/python" ]]; then
     printf '%s\n' "unavailable: runtime Python is missing: $RUNTIME_ROOT/.venv/bin/python"
     return 1
   fi
@@ -5444,7 +5551,7 @@ startup_performance_sample_values() {
   local expected_prompt=${2:-4096}
   local expected_completion=${3:-128}
 
-  printf '%s' "$result" | "$RUNTIME_ROOT/.venv/bin/python" -c '
+  printf '%s' "$result" | launcher_python -c '
 import json
 import math
 import sys
@@ -5487,7 +5594,7 @@ print(f"{prefill:.6f}\t{decode:.6f}")
 }
 
 startup_performance_statistics() {
-  "$RUNTIME_ROOT/.venv/bin/python" - "$@" <<'PY'
+  launcher_python - "$@" <<'PY'
 import statistics
 import sys
 
@@ -5521,7 +5628,7 @@ run_startup_performance_test() {
   echo "Running 4K/128 performance test (3 sequential requests; ${cache_label})..."
   for run in 1 2 3; do
     printf '  Sample %d/3... ' "$run"
-    if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
+    if ! result=$(run_performance_helper "$helper" \
       --model-dir "$MODEL_DIR" \
       --served-name "$SERVED_NAME" \
       --base-url "http://${url_host}:${PORT}/v1" \
@@ -5568,7 +5675,7 @@ run_startup_performance_test() {
   LAST_PERF_SAMPLES="${prefill_samples[0]},${decode_samples[0]};${prefill_samples[1]},${decode_samples[1]};${prefill_samples[2]},${decode_samples[2]}"
   echo
   echo "Running synthetic 32K/512 long-context performance test (${cache_label})..."
-  if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
+  if ! result=$(run_performance_helper "$helper" \
       --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
       --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
       --prompt-tokens 32768 --gen-tokens 512 \
@@ -5593,7 +5700,7 @@ run_startup_performance_warmup() {
   local url_host=$1
   local helper result
   helper=$(startup_performance_helper_path) || return 0
-  if ! result=$("$RUNTIME_ROOT/.venv/bin/python" "$helper" \
+  if ! result=$(run_performance_helper "$helper" \
       --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
       --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
       --prompt-tokens 4096 --gen-tokens 128 \
@@ -5648,8 +5755,8 @@ maybe_run_startup_performance_test() {
 
 launch_server() {
   mkdir -p "$LOG_DIR"
-  local safe_name log_file pid_file host_arg url_host args_text launch_token
-  local -a server_env=(env)
+  local safe_name log_file pid_file host_arg url_host launch_token
+  local -a server_env=()
   if [[ -z "${SERVED_NAME:-}" ]]; then
     SERVED_NAME=$(basename "$MODEL_DIR")
   fi
@@ -5673,7 +5780,6 @@ launch_server() {
   fi
 
   build_args "$host_arg"
-  printf -v args_text '%q ' "${VLLM_ARGS[@]}"
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo
@@ -5681,13 +5787,12 @@ launch_server() {
     echo "Environment:"
     echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
     echo "  DFlash draft fetch=$(current_dflash_download_route_label)"
-    echo "  VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}"
+    echo "  MTP graph policy: $(spec_graph_policy_label)"
     echo "  VLLM_DISABLE_TILELANG=${VLLM_DISABLE_TILELANG:-0}"
-    echo "  VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
     echo "  VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}"
     echo "  VLLM_DEFAULT_THINKING_TOKEN_BUDGET=${VLLM_DEFAULT_THINKING_TOKEN_BUDGET:-}"
     echo "Command:"
-    echo "  $RUNTIME_ROOT/.venv/bin/python -m vllm.entrypoints.openai.api_server $args_text"
+    echo "  $(server_command_summary)"
     return 0
   fi
 
@@ -5701,7 +5806,14 @@ launch_server() {
 
   configure_dflash_download_route || return 1
   [[ -n "${HF_ACTIVE_ENDPOINT:-}" ]] && server_env+=("HF_ENDPOINT=$HF_ACTIVE_ENDPOINT")
-  check_checkpoint_mmap_policy || return 1
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    "$VLLM_DOCKER_COMMAND" image inspect "$VLLM_DOCKER_IMAGE" >/dev/null || {
+      echo "ERROR: Docker runtime image unavailable. Run ./build.sh first." >&2
+      return 1
+    }
+  else
+    check_checkpoint_mmap_policy || return 1
+  fi
   warn_display_gpu_occupancy || true
 
   {
@@ -5709,8 +5821,12 @@ launch_server() {
     echo "$PROJECT_NAME v$VERSION"
     echo "Runtime identity: $RUNTIME_IDENTITY"
     echo "Base vLLM: $BASE_VLLM_VERSION"
-    echo "Validated CUDA/Torch: CUDA $VALIDATED_CUDA_VERSION / torch $VALIDATED_TORCH_VERSION"
-    echo "Reference NVIDIA driver: $VALIDATED_NVIDIA_DRIVER_VERSION"
+    if [[ "$VLLM_RUNTIME_BACKEND" == native ]]; then
+      echo "Validated CUDA/Torch: CUDA $VALIDATED_CUDA_VERSION / torch $VALIDATED_TORCH_VERSION"
+      echo "Reference NVIDIA driver: $VALIDATED_NVIDIA_DRIVER_VERSION"
+    else
+      echo "Image: $VLLM_DOCKER_IMAGE"
+    fi
     echo "Launch time: $(date '+%F %T %Z')"
     echo "Served name: $SERVED_NAME"
     echo "Model: $MODEL_DIR"
@@ -5721,12 +5837,12 @@ launch_server() {
     echo "TP/PP rank layout: $(format_tp_rank_groups "${GPU_DEVICES:-}" "${TP_SIZE:-1}" || true)"
     echo "Port: $PORT"
     echo "Scope: $SERVICE_SCOPE"
-    echo "MTP graph policy: VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
+    echo "MTP graph policy: $(spec_graph_policy_label)"
     echo "TileLang disabled: ${VLLM_DISABLE_TILELANG:-0}"
     echo "DFlash draft fetch: $(current_dflash_download_route_label)"
     echo "TQ diagnostics: $(current_tq_diagnostics_label)"
     echo "Strict tool calling: VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}"
-    echo "Command: $RUNTIME_ROOT/.venv/bin/python -m vllm.entrypoints.openai.api_server $args_text"
+    echo "Command: $(server_command_summary)"
     echo "============================================================"
   } > "$log_file"
 
@@ -5734,7 +5850,7 @@ launch_server() {
   echo "Starting server..."
   echo "  Log: $log_file"
   echo "  Mode: $MODE"
-  echo "  MTP graph policy: VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
+  echo "  MTP graph policy: $(spec_graph_policy_label)"
   echo "  TileLang disabled: ${VLLM_DISABLE_TILELANG:-0}"
   echo "  DFlash draft fetch: $(current_dflash_download_route_label)"
   echo "  TQ diagnostics: $(current_tq_diagnostics_label)"
@@ -5744,15 +5860,10 @@ launch_server() {
   echo "  Bind: $host_arg:$PORT"
 
   launch_token="launch-$$-$STAMP-$RANDOM$RANDOM"
-  server_env+=("VLLM_LAUNCH_TOKEN=$launch_token")
-  if command -v setsid >/dev/null 2>&1; then
-    nohup setsid "${server_env[@]}" "$RUNTIME_ROOT/.venv/bin/python" -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" >>"$log_file" 2>&1 &
-  else
-    nohup "${server_env[@]}" "$RUNTIME_ROOT/.venv/bin/python" -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" >>"$log_file" 2>&1 &
-  fi
-  CURRENT_SERVER_PID=$!
-  echo "$CURRENT_SERVER_PID" > "$pid_file"
-  echo "$launch_token" > "${pid_file}.token"
+  start_server_process "$pid_file" "$log_file" "$launch_token" "${server_env[@]}" || {
+    restore_overcommit_memory || true
+    return 1
+  }
 
   local ready_rc=0
   wait_for_ready "$log_file" "$url_host" || ready_rc=$?
@@ -6064,6 +6175,18 @@ prepare_runtime_defaults() {
     fi
   fi
   PORT=${PORT:-8000}
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    PREFILL_BATCH_BARRIER=0
+    if [[ -n "${REASONING_BUDGET:-}" ]]; then
+      echo "ERROR: a server-wide thinking budget requires the native runtime. The Docker API accepts thinking_token_budget per request." >&2
+      return 1
+    fi
+    if [[ "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" == 1 ]] || \
+      [[ "$(json_config_field "${SPECULATIVE_CONFIG:-}" disable_padded_drafter_batch 2>/dev/null || true)" == true ]]; then
+      echo "ERROR: vLLM $DOCKER_VLLM_VERSION removed disable_padded_drafter_batch." >&2
+      return 1
+    fi
+  fi
   MODE=${MODE:-fast}
   normalize_mode
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
@@ -6107,6 +6230,7 @@ print_review() {
 Launch summary:
   Fork release:         v$VERSION
   Runtime identity:     $RUNTIME_IDENTITY
+  Base vLLM:            $BASE_VLLM_VERSION
   Model directory:      $MODEL_DIR
   Draft model:          ${SPECULATIVE_MODEL:-not selected}
   Served name:          $SERVED_NAME
@@ -6130,7 +6254,7 @@ Launch summary:
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
   Prefill threshold:    ${LONG_PREFILL_TOKEN_THRESHOLD:-auto}
-  Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0} (automatic for max sequences > 1)
+  Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0}
   CUDA graph captures:  $(current_cudagraph_capture_label)
   Spec decode:          $(current_speculative_label)
   Spec metrics:         ${PER_REQUEST_SPEC_DECODE_METRICS:-none}
@@ -6141,7 +6265,7 @@ Launch summary:
   Tool calling:         $(current_tool_calling_label)
   Prompt details:       ${ENABLE_PROMPT_TOKENS_DETAILS:-1}
   Mode:                 $MODE
-  Spec graph policy:    VLLM_SM75_SPEC_SYNC_MODE=${VLLM_SM75_SPEC_SYNC_MODE:-auto}, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}
+  Spec graph policy:    $(spec_graph_policy_label)
   Strict tool calling:  VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}
   Port:                 $PORT
   Scope:                $SERVICE_SCOPE
@@ -6544,7 +6668,12 @@ main() {
   NON_INTERACTIVE=$(normalize_bool "${NON_INTERACTIVE:-0}")
   PRINT_CONFIG=$(normalize_bool "${PRINT_CONFIG:-0}")
 
-  if [[ ! -x "$RUNTIME_ROOT/.venv/bin/python" ]]; then
+  case "$VLLM_RUNTIME_BACKEND" in
+    docker) ;;
+    native) ;;
+    *) die "VLLM_RUNTIME_BACKEND must be docker or native." ;;
+  esac
+  if [[ "$VLLM_RUNTIME_BACKEND" == native && ! -x "$RUNTIME_ROOT/.venv/bin/python" && "$PRINT_CONFIG" != 1 ]]; then
     banner
     die ".venv is missing under RUNTIME_ROOT=$RUNTIME_ROOT. Run ./build.sh first or set RUNTIME_ROOT."
   fi

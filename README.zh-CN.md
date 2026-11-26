@@ -17,11 +17,11 @@ profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须�
 
 ![单请求实时测速演示](docs/assets/vllmspeed_dflash.gif)
 
-当前 0.2.x 基线：`v0.2.2-post3`
-上游基线：`b23433088b`（`v0.29.1rc0-33`）
+当前开发版本为 `v0.3.0.dev0`，分支为 `vllm-2080ti-definitive-0.3.x`。
+Docker 运行时使用官方 [vLLM v0.34.0](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)。
+原生运行时来自 [v0.2.2-post3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)，
+下文的 benchmark 版本以各硬件 profile 文档中的记录为准。
 
-分支：[`main`](https://github.com/weicj/vLLM-2080Ti-Definitive/tree/main)
-版本参考：[v0.2.2-post3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)
 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
 ## 💡 为什么用 RTX 2080 Ti 做 LLM 推理？
@@ -48,7 +48,7 @@ Qwen 27B 路线。四卡 Tesla T10 Profile 面向 TP=4 服务；存在图像语�
 
 ## 🧩 支持状态
 
-当前目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。如果使用 CUDA 12.8、PyTorch 2.11、较早 kernel 或 GCC 12/13/14，可参考已不再持续维护的 `0.1.x` 版本线。
+原生构建的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。如果使用 CUDA 12.8、PyTorch 2.11、较早 kernel 或 GCC 12/13/14，可参考已不再持续维护的 `0.1.x` 版本线。
 
 支持的模型路线和实测数据以对应硬件组的 profile 说明为准。
 
@@ -76,23 +76,17 @@ Launcher 支持 TP、PP 及 TP/PP 混合推理；已验证布局包括双 RTX 20
 
 ## 🚀 构建与启动
 
-1. 首次构建：
+1. 在 0.3.x 工作树中运行 `./build.sh`。默认构建使用官方镜像提供的 Torch 和 CUDA，
+   [镜像配置](PROJECT_RELEASE.env) 用 digest 锁定官方 linux/amd64 镜像。
+   构建时应用 SM75 GDN prefill 补丁，并将编译好的 FlashQLA 扩展装入镜像。
 
-```bash
-git clone https://github.com/weicj/vLLM-2080Ti-Definitive.git
-cd vLLM-2080Ti-Definitive
-./build.sh
-```
+   宿主机需要 Docker、NVIDIA Container Toolkit 和兼容 CUDA 13.0 的 NVIDIA 驱动。
+   原生构建和启动仍可分别通过 `VLLM_RUNTIME_BACKEND=native ./build.sh` 和
+   `VLLM_RUNTIME_BACKEND=native ./launcher.sh` 使用。
 
-2. 将已有仓库更新到最新 GitHub Release：
-
-```bash
-./update.sh
-```
-
-更新脚本会保留本地虚拟环境、依赖缓存、日志、结果以及 `profiles/local`，比较本地
-`VERSION` 与最新 Release，下载对应源码归档，并在更新完成后询问是否立即运行
-`build.sh`。
+2. 运行 `./update.sh` 更新。Git 工作树对跟踪分支执行快进更新，归档安装查找稳定的
+   0.3.x Release。脚本保留本地缓存、虚拟环境、日志和 `profiles/local`，
+   更新后询问是否运行 `build.sh`。
 
 3. 启动和管理服务：
 
@@ -117,6 +111,14 @@ NON_INTERACTIVE=1 ./launcher.sh
 
 使用 `./launcher.sh --print-config` 预览路线。自动化部署见
 [非交互启动说明](docs/non-interactive-launch.zh-CN.md)。
+
+Docker launcher 继续使用本地权重路径、profile、GPU 顺序和服务配置。
+`fast` 模式采用上游调度与 CUDA Graph 默认配置，`normal` 模式的投机解码使用
+PIECEWISE。服务级思考预算和 0.2.x 的 prefill barrier 可通过原生运行时使用。
+
+Docker 运行时在 SM75 上处于实验阶段。首条实测路线为双 Tesla T10 上的
+Qwen3.8-27B-INT4、MTP/3 和 FP8 KV。Docker 实测与 0.2.x 数据见硬件 profile。
+[2xT10 实测结果](profiles/2xT10/README.zh-CN.md#03x-docker-验证)
 
 ## 🧭 Profile 与推荐路线
 
@@ -145,7 +147,7 @@ reasoning 默认值由 launcher 统一管理。
 - 四张通过 PCIe 连接的 16 GiB Tesla T10（TP=4 Profile）
 - NVIDIA Turing / SM75，已验证的 tensor parallel size 为 2 和 4
 - `0.2.x` 目标：CUDA 13.0、PyTorch 2.13、Python 3.12
-- 目标主机：Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15
+- 原生构建主机：Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15
 
 其它 Turing 显卡仍需针对显存容量、PCIe/NVLink 拓扑、模型 head dimension、
 KV cache dtype 和 CUDA Graph 行为独立验证。

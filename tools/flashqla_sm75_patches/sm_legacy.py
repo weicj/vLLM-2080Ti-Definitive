@@ -85,6 +85,16 @@ def _load_ext():
     if not torch.cuda.is_available():
         raise RuntimeError("SM70/SM75 legacy GDN backend requires CUDA")
 
+    # The Docker runtime ships the extension built against its Torch/CUDA ABI.
+    try:
+        import flash_qla_legacy_gdn
+    except ModuleNotFoundError as exc:
+        if exc.name != "flash_qla_legacy_gdn":
+            raise
+    else:
+        _EXT = _validate_extension(flash_qla_legacy_gdn)
+        return _EXT
+
     os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "7.5")
     _clear_stale_extension_lock()
     src = Path(__file__).with_name("csrc") / "gdn_forward.cu"
