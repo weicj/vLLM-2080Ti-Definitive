@@ -24,6 +24,25 @@ Tested weight: [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.
 | `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 262K | FP16 | MTP/4 | text+image | 436,388 | 1526.32 / 125.70 | 1517.31 / 123.13 |
 | `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 2 x 262K | FP8 | MTP/4 | text+image | 823,249 | 1507.94 / 116.86 | 1477.49 / 118.77 |
 
+## 0.3.x Docker validation
+
+These tests use the official vLLM 0.34.0 image with the project's
+SM75 patches, four PCIe P2P-capable T10s, FP16 activations and 2,048 batched
+tokens. Throughput uses the same text request protocol as the tables above.
+
+| Profile | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
+|---|---:|---:|---:|
+| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 268,344 | 1366.68 / 198.11 | 1424.51 / 193.17 |
+| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 240,963 | 1583.47 / 191.70 | 1464.82 / 189.57 |
+| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 445,609 | 1582.13 / 197.22 | 1443.78 / 196.13 |
+| `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
+
+These runs use fixed KV allocation, the LBNHC layout, FlashInfer PCIe IPC
+all-reduce and launcher mode `fast`. GPU utilization was 0.96 for the 240K
+route and 0.94 for the other runs. The 240K and 2×220K DFlash2 routes capture
+CUDA graphs only for decode. Both multimodal routes identified the blue square
+and orange circle in the image smoke test.
+
 ## Notes
 
 1. Profiles are flat under each model/weight directory. Mode is selected by the launcher and defaults to `fast`.

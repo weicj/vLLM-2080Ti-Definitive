@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Shared by build.sh and the host-side launcher.
 VLLM_DOCKER_COMMAND=${VLLM_DOCKER_COMMAND:-docker}
-VLLM_DOCKER_IMAGE=${VLLM_DOCKER_IMAGE:-vllm-2080ti:${FORK_RELEASE}-vllm${DOCKER_VLLM_VERSION}}
+VLLM_DOCKER_VARIANT=${VLLM_DOCKER_VARIANT:-default}
 VLLM_RUNTIME_BACKEND=${VLLM_RUNTIME_BACKEND:-docker}
+case "$VLLM_DOCKER_VARIANT" in
+  default) docker_image_suffix='' ;;
+  inkling) docker_image_suffix='-inkling' ;;
+  *) printf 'VLLM_DOCKER_VARIANT must be default or inkling.\n' >&2; exit 1 ;;
+esac
+VLLM_DOCKER_IMAGE=${VLLM_DOCKER_IMAGE:-vllm-2080ti:${FORK_RELEASE}-vllm${DOCKER_VLLM_VERSION}${docker_image_suffix}}
 
 docker_runtime_options() {
   local hf_dir hf_hub_dir var
@@ -32,6 +38,8 @@ docker_runtime_options() {
   while IFS= read -r var; do
     case "$var" in
       VLLM_USE_V2_MODEL_RUNNER|VLLM_SM75_SPEC_SYNC_MODE|VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_DOCKER_*|VLLM_RUNTIME_BACKEND) ;;
+      VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC|VLLM_USE_BREAKABLE_CUDAGRAPH|VLLM_KV_CACHE_LAYOUT)
+        DOCKER_RUNTIME_OPTIONS+=(--env "$var=${!var}") ;;
       VLLM_*) DOCKER_RUNTIME_OPTIONS+=(--env "$var") ;;
     esac
   done < <(compgen -e)
@@ -73,7 +81,7 @@ docker_server_options() {
     --env "TORCHINDUCTOR_CACHE_DIR=$cache_dir/torchinductor"
     --env "TRITON_CACHE_DIR=$cache_dir/triton")
   local nccl_var
-  for nccl_var in NCCL_P2P_DISABLE NCCL_P2P_LEVEL NCCL_DEBUG NCCL_DEBUG_SUBSYS; do
+  for nccl_var in NCCL_P2P_DISABLE NCCL_P2P_LEVEL NCCL_DEBUG NCCL_DEBUG_SUBSYS PYTORCH_ALLOC_CONF PYTORCH_CUDA_ALLOC_CONF; do
     if [[ -v "$nccl_var" ]]; then
       DOCKER_RUNTIME_OPTIONS+=(--env "$nccl_var=${!nccl_var}")
     fi

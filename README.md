@@ -21,9 +21,9 @@ For usage feedback, feature requests, and community discussion, join the
 
 Current development version is `v0.3.0.dev0` on `vllm-2080ti-definitive-0.3.x`.
 The Docker runtime uses the official [vLLM v0.34.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0).
-The native runtime and the benchmark evidence below come from
-[v0.2.2-post3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)
-and the earlier releases recorded in each hardware profile guide.
+The native runtime comes from v0.2.2-post3. Each hardware profile guide
+records the runtime version used for its benchmark.
+[v0.2.2-post3 release](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)
 
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
@@ -126,15 +126,54 @@ Use `./launcher.sh --print-config` to preview a route. See the
 [non-interactive launch guide](docs/non-interactive-launch.md) for automation.
 
 The Docker launcher uses the same local checkpoint paths, profile files, GPU
-order, and service settings. It uses upstream scheduling and graph defaults
-for the fast mode and the piecewise graph policy for normal speculative
-decoding. The server-wide thinking budget and the 0.2.x prefill barrier are
+order, and service settings. It uses upstream scheduling and fast-mode graph
+defaults, with PIECEWISE graphs for speculative decoding in normal mode and
+for the dual T10 Qwen TurboQuant MTP text-image route. The server-wide
+thinking budget and the 0.2.x prefill barrier are
 available through the native runtime.
 
-The Docker runtime is experimental on SM75. The first route tested on Docker
-uses two Tesla T10s with Qwen3.8-27B-INT4, MTP/3 and FP8 KV. See the hardware
-profile for Docker results and the separate 0.2.x measurements.
-[2xT10 profile results](profiles/2xT10/README.md#03x-docker-validation)
+The Docker runtime is experimental on SM75. The T10 profile guides record
+Docker results alongside the 0.2.x measurements.
+[2xT10 profile results](profiles/2xT10/README.md#03x-docker-validation) ·
+[4xT10 profile results](profiles/4xT10/README.md#03x-docker-validation)
+
+### Inkling 2 Mini on SM75
+
+Build the Inkling image and select it when launching the official checkpoint.
+Set the GPU indices and tensor parallel size for your host. This example uses
+two PCIe P2P-capable T10s and serves text with an 8,192-token context.
+
+```bash
+VLLM_DOCKER_VARIANT=inkling ./build.sh
+
+VLLM_DOCKER_VARIANT=inkling MODEL_DIR=/path/to/Inkling-2-Mini \
+GPU_DEVICES=0,1 TP_SIZE=2 MAX_MODEL_LEN=8192 GPU_UTIL=0.94 \
+KV_CACHE_DTYPE=fp8 MESSAGE_TYPE=text-only NCCL_P2P_DISABLE=0 \
+DISABLE_PREFIX_CACHING=1 DISABLE_LOG_STATS=0 NON_INTERACTIVE=1 ./launcher.sh
+```
+
+Set `SPECULATIVE_CONFIG='{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'`
+on the launcher command to load `mtp.safetensors` from the official model
+directory.
+
+The 2×T10 and 4×T10 tests used NCCL PCIe P2P and FP8 KV at
+an 8,192-token context limit. Each row reports single-request medians from
+three samples of exactly 4,096 input and 128 output tokens with prefix
+caching disabled. DSpark uses seven draft tokens.
+
+| GPUs | Prompt | AR prefill / decode (tok/s) | DSpark prefill / decode (tok/s) | Draft acceptance |
+| --- | --- | ---: | ---: | ---: |
+| 2×T10 | Prose | 3604.56 / 63.42 | 3041.60 / 191.44 | 73.5–82.7% |
+| 2×T10 | Code | 3586.87 / 63.19 | 3538.16 / 191.98 | 86.5–88.9% |
+| 2×T10 | Repetitive | 3639.81 / 62.72 | 3474.90 / 276.12 | 100% |
+| 4×T10 | Prose | 4307.50 / 76.62 | 4228.26 / 240.42 | 76.4–81.2% |
+| 4×T10 | Code | 4303.70 / 76.52 | 4210.75 / 251.36 | 86.5% |
+| 4×T10 | Repetitive | 4208.69 / 76.06 | 4127.62 / 355.44 | 100% |
+
+The experimental image uses the upstream model implementation and
+the SM75 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
+[Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
+[Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
 
 ## 🧭 Profiles
 

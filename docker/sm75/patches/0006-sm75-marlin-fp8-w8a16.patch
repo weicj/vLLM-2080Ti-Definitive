@@ -1,0 +1,19 @@
+--- a/vllm/model_executor/kernels/linear/scaled_mm/humming.py
++++ b/vllm/model_executor/kernels/linear/scaled_mm/humming.py
+@@ -35,12 +35,14 @@
+             return False, "Humming only supported on CUDA"
+
+         if not has_humming():
+             return False, "Humming is not installed"
+
+-        if not current_platform.has_device_capability(75):
+-            return False, "Humming only supported on SM75+"
++        # Use Marlin for FP8 weight-only layers on Turing. Mixed FP8/NVFP4
++        # checkpoints also go through this selection for their FP8 layers.
++        if not current_platform.has_device_capability(80):
++            return False, "Humming FP8 W8A16 requires SM80+"
+
+         return True, None
+
+     @classmethod
+     def can_implement(

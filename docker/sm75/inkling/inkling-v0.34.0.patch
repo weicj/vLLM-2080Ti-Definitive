@@ -1,0 +1,1302 @@
+--- a/vllm/config/lora.py
++++ b/vllm/config/lora.py
+@@ -153,7 +153,10 @@
+             self.lora_dtype = getattr(torch, self.lora_dtype)
+
+         architectures = getattr(model_config, "architectures", None) or []
+-        is_inkling = any("Inkling" in arch for arch in architectures)
++        # Inkling2 has no Lamport fused-collective path.
++        is_inkling = any(
++            "Inkling" in arch and "Inkling2" not in arch for arch in architectures
++        )
+         if is_inkling and os.environ.get("INKLING_MULTIMEM_AR", "1") != "0":
+             raise ValueError(
+                 "Inkling LoRA requires INKLING_MULTIMEM_AR=0: the Lamport "
+--- a/vllm/config/model.py
++++ b/vllm/config/model.py
+@@ -782,7 +782,12 @@
+                 self.tokenizer_mode = "deepseek_v4"
+             elif arch == "DeepseekV41ForCausalLM":
+                 self.tokenizer_mode = "deepseek_v41"
+-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
++            elif arch in (
++                "InklingForCausalLM",
++                "InklingForConditionalGeneration",
++                "Inkling2ForConditionalGeneration",
++                "Inkling2LoopForConditionalGeneration",
++            ):
+                 self.tokenizer_mode = "inkling"
+
+             if self.tokenizer_mode != "auto":
+@@ -1414,6 +1419,7 @@
+             # `override_quantization_method` method) must be checked in order
+             # of preference (this is particularly important for GPTQ).
+             overrides = [
++                "inkling2",
+                 "auto_gptq",
+                 "gptq",
+                 "gptq_marlin",
+--- a/vllm/config/speculative.py
++++ b/vllm/config/speculative.py
+@@ -1220,6 +1220,11 @@
+                 }
+             )
+
++        if hf_config.model_type in ("inkling2", "inkling2_loop"):
++            from vllm.models.inkling2.configs import Inkling2DSparkConfig
++
++            hf_config = Inkling2DSparkConfig.from_target(hf_config)
++
+         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
+             hf_config.model_type = "gemma4_mtp"
+             text_config = getattr(hf_config, "text_config", hf_config)
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -116,6 +116,8 @@
+         "HYV4MTPModel",
+         "InklingForCausalLM",
+         "InklingForConditionalGeneration",
++        "Inkling2ForConditionalGeneration",
++        "Inkling2LoopForConditionalGeneration",
+         "KimiK3ForConditionalGeneration",
+         "KimiK3MTPModel",
+         "KimiK31ForConditionalGeneration",
+@@ -1436,6 +1438,19 @@
+         model_dtype = str(self.model_config.dtype).removeprefix("torch.")
+         if model_dtype == cache_dtype:
+             return
++        if (
++            cache_dtype == "float16"
++            and model_dtype == "bfloat16"
++            and current_platform.is_device_capability_family(120)
++            and getattr(self.model_config, "architecture", None)
++            in (
++                "Inkling2ForConditionalGeneration",
++                "Inkling2LoopForConditionalGeneration",
++            )
++            and self.speculative_config is None
++        ):
++            # Inkling2's SM12 kernel converts stored KV to the query dtype.
++            return
+         allowed = (
+             f"`auto` or `{model_dtype}`"
+             if model_dtype in ("float16", "bfloat16")
+--- a/vllm/distributed/device_communicators/custom_all_reduce.py
++++ b/vllm/distributed/device_communicators/custom_all_reduce.py
+@@ -502,6 +502,9 @@
+             return False
+         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+             return False
++        # The CUDA custom kernel is compiled without BF16 support on SM75.
++        if inp.dtype == torch.bfloat16 and current_platform.is_device_capability(75):
++            return False
+         inp_size = inp.numel() * inp.element_size()
+         # custom allreduce requires input byte size to be multiples of 16
+         if inp_size % 16 != 0:
+--- a/vllm/entrypoints/openai/chat_completion/protocol.py
++++ b/vllm/entrypoints/openai/chat_completion/protocol.py
+@@ -680,6 +680,7 @@
+             # model-visible tool-choice instruction only for requests with a
+             # tools block.
+             tool_choice=self.tool_choice if self.tools else None,
++            parallel_tool_calls=self.parallel_tool_calls is not False,
+             response_format=self.response_format,
+         )
+
+--- a/vllm/entrypoints/openai/responses/protocol.py
++++ b/vllm/entrypoints/openai/responses/protocol.py
+@@ -522,6 +522,7 @@
+             ),
+             media_io_kwargs=self.media_io_kwargs,
+             tool_choice=self.tool_choice if self.tools else None,
++            parallel_tool_calls=self.parallel_tool_calls is not False,
+         )
+
+     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+--- a/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
++++ b/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
+@@ -45,7 +45,12 @@
+
+ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
+     model_config = vllm_config.model_config
+-    num_layers = model_config.get_total_num_hidden_layers()
++    # One row per layer visit for models that run some decoder layers several
++    # times per token (Inkling2 loop checkpoints).
++    num_layers = (
++        getattr(model_config.hf_text_config, "num_layer_visits", None)
++        or model_config.get_total_num_hidden_layers()
++    )
+     num_experts = model_config.get_num_experts()
+     num_experts_per_tok = model_config.get_num_experts_per_tok()
+     if num_layers <= 0 or num_experts <= 0 or num_experts_per_tok <= 0:
+--- a/vllm/model_executor/layers/quantization/__init__.py
++++ b/vllm/model_executor/layers/quantization/__init__.py
+@@ -36,6 +36,7 @@
+     "mxfp4",
+     "gpt_oss_mxfp4",
+     "deepseek_v4_fp8",
++    "inkling2",
+     "online",
+     # Below are online quant shorthand names (see vllm.config.quantization).
+     # Listed here as strings to avoid a circular import; kept in sync with
+@@ -131,6 +132,8 @@
+         from vllm.models.deepseek_v4 import DeepseekV4FP8Config
+
+         deepseek_config = DeepseekV4FP8Config
++
++    from vllm.models.inkling2.quant_config import Inkling2QuantConfig
+
+     from .auto_awq import AutoAWQConfig
+     from .auto_gptq import AutoGPTQConfig
+@@ -177,6 +180,7 @@
+         "mxfp4": Mxfp4Config,
+         "gpt_oss_mxfp4": GptOssMxfp4Config,
+         "deepseek_v4_fp8": deepseek_config,
++        "inkling2": Inkling2QuantConfig,
+         "humming": HummingConfig,
+         "online": OnlineQuantizationConfig,
+         # MiniMax-style checkpoints tag `quant_method: "mxfp8"`; load with the
+--- a/vllm/model_executor/model_loader/weight_utils.py
++++ b/vllm/model_executor/model_loader/weight_utils.py
+@@ -289,6 +289,9 @@
+         if (
+             model_config.quantization == "modelopt_mixed"
+             and "quantized_layers" not in hf_quant_config
++        ) or (
++            # Inkling2's per-tensor precisions are only in hf_quant_config.json.
++            model_config.quantization == "inkling2" and "model" not in hf_quant_config
+         ):
+             pass  # fall through to file-based loading below
+         else:
+--- a/vllm/model_executor/models/registry.py
++++ b/vllm/model_executor/models/registry.py
+@@ -490,6 +490,14 @@
+         "vllm.models.kimi_k3",
+         "KimiK3ForConditionalGeneration",
+     ),
++    "Inkling2LoopForConditionalGeneration": (
++        "vllm.models.inkling2",
++        "Inkling2LoopForConditionalGeneration",
++    ),
++    "Inkling2ForConditionalGeneration": (
++        "vllm.models.inkling2",
++        "Inkling2ForConditionalGeneration",
++    ),
+     "KimiK31ForConditionalGeneration": (
+         "vllm.models.kimi_k3",
+         "KimiK3ForConditionalGeneration",
+@@ -719,6 +727,7 @@
+         "vllm.models.kimi_k3.nvidia.dspark_mla",
+         "K3DSparkForCausalLM",
+     ),
++    "Inkling2DSparkModel": ("vllm.models.inkling2", "Inkling2DSparkModel"),
+     "MuseSparkDSparkModel": (
+         "vllm.models.muse_spark.common.dspark",
+         "MuseSparkDSparkForCausalLM",
+--- a/vllm/models/inkling/nvidia/sconv_swa_attn.py
++++ b/vllm/models/inkling/nvidia/sconv_swa_attn.py
+@@ -129,6 +129,7 @@
+         hidden_size: int,
+         kernel_size: int,
+         prefix: str,
++        replicate_hidden: bool = False,
+     ) -> None:
+         super().__init__()
+         self.prefix = prefix
+@@ -148,7 +149,9 @@
+         # are hidden-sharded: each rank owns its H/tp chunk (the sublayer
+         # outputs are reduce-scattered / all-gathered around the conv).
+         self.num_kv_heads = num_kv_heads // tp_size
+-        hidden_per_head = hidden_size // num_kv_heads
++        hidden_per_head = hidden_size // (
++            self.num_kv_heads if replicate_hidden else num_kv_heads
++        )
+         # Packed per-head width: K + V + attn-output chunk + mlp-output chunk,
+         # padded to a power of two so every layer's conv page is the same size
+         # and an exact multiple of the attention page (the page unifier then
+--- a/vllm/models/inkling2/nvidia/dspark.py
++++ b/vllm/models/inkling2/nvidia/dspark.py
+@@ -30,6 +30,7 @@
+ from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+ from ..configs import Inkling2DSparkConfig
++from ..speculator_config import Inkling2DSparkSpeculatorConfig
+ from .ops.dspark import (
+     add_softcap,
+     markov_gate,
+@@ -420,8 +421,7 @@
+ class Inkling2DSparkModel(nn.Module):
+     """DSpark draft for Inkling2; plugged in by `Inkling2DSparkSpeculator`."""
+
+-    # Selected by init_speculator from the draft model_type, not this attribute.
+-    speculator_config_class = None
++    speculator_config_class = Inkling2DSparkSpeculatorConfig
+     allow_patterns_overrides = ["mtp.safetensors"]
+     has_own_embed_tokens = False
+     has_own_lm_head = False
+--- a/vllm/models/inkling2/nvidia/model.py
++++ b/vllm/models/inkling2/nvidia/model.py
+@@ -830,30 +830,7 @@
+         if missing := params.keys() - loaded:
+             raise ValueError(f"Missing checkpoint tensors: {sorted(missing)}")
+         to_turing_gemm_dtype(self.lm_head.weight)
+-        _run_post_load_hooks(self)
+         return loaded
+
+
+-def _run_post_load_hooks(model: nn.Module) -> None:
+-    """Upstream `finalize_model_weights`: each module's own no-argument
+-    `process_weights_after_loading`, after all of its submodules. The fork's
+-    loader runs only the attention-layer hooks (with a dtype), so those are
+-    left to it."""
+-    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+-
+-    seen: set[nn.Module] = set()
+-
+-    def children_first(module: nn.Module) -> Iterable[nn.Module]:
+-        for child in module.children():
+-            if child not in seen:
+-                seen.add(child)
+-                yield from children_first(child)
+-        yield module
+-
+-    for module in children_first(model):
+-        hook = getattr(module, "process_weights_after_loading", None)
+-        if callable(hook) and not is_deferred_attention_layer(module):
+-            hook()
+-
+-
+ __all__ = ["Inkling2ForConditionalGeneration"]
+--- /dev/null
++++ b/vllm/models/inkling2/nvidia/ops/gemv.py
+@@ -0,0 +1,113 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Low-M BF16 tensor-core projections for SM120/SM121."""
++
++import torch
++
++from vllm.platforms import current_platform
++from vllm.triton_utils import tl, triton
++
++MAX_M = 16
++_BN, _BK = 32, 256
++
++
++@triton.jit
++def _gemv_kernel(
++    X,
++    W,
++    B,
++    Y,
++    M,
++    N,
++    K,
++    SX,
++    SW,
++    SY,
++    HAS_BIAS: tl.constexpr,
++    BN: tl.constexpr,
++    BK: tl.constexpr,
++    MP: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    cols = pid * BN + tl.arange(0, BN)
++    rows = tl.arange(0, MP)
++    acc = tl.zeros((MP, BN), tl.float32)
++    for k0 in range(0, K, BK):
++        ks = k0 + tl.arange(0, BK)
++        w = tl.load(
++            W + cols[None, :].to(tl.int64) * SW + ks[:, None],
++            (cols[None, :] < N) & (ks[:, None] < K),
++            other=0,
++        )
++        x = tl.load(
++            X + rows[:, None] * SX + ks[None, :],
++            (rows[:, None] < M) & (ks[None, :] < K),
++            other=0,
++        )
++        acc += tl.dot(x, w)
++    if HAS_BIAS:
++        acc += tl.load(B + cols, cols < N, other=0).to(tl.float32)[None, :]
++    tl.store(
++        Y + rows[:, None] * SY + cols[None, :],
++        acc.to(Y.dtype.element_ty),
++        (rows[:, None] < M) & (cols[None, :] < N),
++    )
++
++
++def sm12x_bf16_gemv(
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None = None,
++    out_dtype: torch.dtype | None = None,
++    out: torch.Tensor | None = None,
++) -> torch.Tensor:
++    lead = x.shape[:-1]
++    x2 = x.reshape(-1, x.shape[-1])
++    m, k = x2.shape
++    assert m <= MAX_M
++    n = weight.shape[0]
++    if out is None:
++        out = torch.empty((m, n), device=x.device, dtype=out_dtype or x.dtype)
++    if m:
++        _gemv_kernel[(triton.cdiv(n, _BN),)](
++            x2,
++            weight,
++            bias,
++            out,
++            m,
++            n,
++            k,
++            x2.stride(0),
++            weight.stride(0),
++            out.stride(0),
++            HAS_BIAS=bias is not None,
++            BN=_BN,
++            BK=_BK,
++            MP=16,
++            num_warps=4,
++        )
++    return out.view(*lead, n)
++
++
++def use_sm12x_bf16_gemv(
++    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
++) -> bool:
++    return (
++        x.is_cuda
++        and weight.device == x.device
++        and x.dtype == weight.dtype == torch.bfloat16
++        and x.ndim >= 2
++        and weight.ndim == 2
++        and x.shape[-1] == weight.shape[1]
++        and x.stride(-1) == weight.stride(-1) == 1
++        and 0 < x.numel() // x.shape[-1] <= MAX_M
++        and (
++            bias is None
++            or (
++                bias.dtype == torch.bfloat16
++                and bias.device == x.device
++                and bias.stride(0) == 1
++            )
++        )
++        and current_platform.is_device_capability_family(120)
++    )
+--- a/vllm/models/inkling2/processing.py
++++ b/vllm/models/inkling2/processing.py
+@@ -21,7 +21,7 @@
+ from PIL import Image
+ from transformers.feature_extraction_utils import BatchFeature
+
+-from vllm.config.multimodal import MMDummyOptions as MultiModalDummyOptions
++from vllm.config.multimodal import MultiModalDummyOptions
+ from vllm.inputs import MultiModalDataDict
+ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+ from vllm.multimodal.media import MediaWithBytes
+--- a/vllm/parser/inkling.py
++++ b/vllm/parser/inkling.py
+@@ -29,7 +29,18 @@
+ from collections.abc import Sequence
+ from typing import TYPE_CHECKING
+
++from xgrammar import StructuralTag
++from xgrammar.structural_tag import (
++    AnyTextFormat,
++    Format,
++    SequenceFormat,
++    StarFormat,
++    TokenFormat,
++)
++
+ from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
++from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
++from vllm.parser.abstract_parser import structured_outputs_to_format
+ from vllm.parser.engine.events import EventType
+ from vllm.parser.engine.parser_engine import ParserEngine
+ from vllm.parser.engine.parser_engine_config import (
+@@ -38,20 +49,32 @@
+     Transition,
+ )
+ from vllm.parser.utils import extract_json_member_object
++from vllm.renderers.inkling_encoding import (
++    AUDIO_END,
++    CONTENT_AUDIO_INPUT,
++    CONTENT_IMAGE,
++    CONTENT_INVOKE_TOOL_JSON,
++    CONTENT_INVOKE_TOOL_TEXT,
++    CONTENT_MODEL_END_SAMPLING,
++    CONTENT_TEXT,
++    CONTENT_THINKING,
++    CONTENT_TOOL_ERROR,
++    CONTENT_XML,
++    END_MESSAGE,
++    END_OF_TEXT,
++    MESSAGE_MODEL,
++    MESSAGE_SYSTEM,
++    MESSAGE_TOOL,
++    MESSAGE_USER,
++    continuation_prefix,
++)
++from vllm.sampling_params import StructuredOutputsParams
+ from vllm.v1.token_buffer import rfind_tokens
+
+ if TYPE_CHECKING:
++    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+     from vllm.tokenizers import TokenizerLike
+     from vllm.tool_parsers.abstract_tool_parser import Tool
+-
+-MESSAGE_MODEL = "<|message_model|>"
+-CONTENT_TEXT = "<|content_text|>"
+-CONTENT_THINKING = "<|content_thinking|>"
+-CONTENT_INVOKE_TOOL_JSON = "<|content_invoke_tool_json|>"
+-CONTENT_INVOKE_TOOL_TEXT = "<|content_invoke_tool_text|>"
+-CONTENT_TOOL_ERROR = "<|content_tool_error|>"
+-CONTENT_MODEL_END_SAMPLING = "<|content_model_end_sampling|>"
+-END_MESSAGE = "<|end_message|>"
+
+ INKLING_SPECIAL_TOKENS = (
+     MESSAGE_MODEL,
+@@ -62,6 +85,19 @@
+     CONTENT_TOOL_ERROR,
+     CONTENT_MODEL_END_SAMPLING,
+     END_MESSAGE,
++)
++
++
++INKLING_CONTROL_TOKENS = (
++    END_OF_TEXT,
++    MESSAGE_USER,
++    MESSAGE_SYSTEM,
++    MESSAGE_TOOL,
++    CONTENT_IMAGE,
++    CONTENT_XML,
++    CONTENT_AUDIO_INPUT,
++    AUDIO_END,
++    *INKLING_SPECIAL_TOKENS,
+ )
+
+
+@@ -228,6 +264,74 @@
+     ) -> None:
+         kwargs.setdefault("parser_engine_config", inkling_config())
+         super().__init__(tokenizer, tools, **kwargs)
++        # Inkling2 spells <|content_xml|> natively and has no audio tokens.
++        # Its prompts end between messages: the model opens its own turn.
++        vocab = self.vocab
++        self._is_inkling2 = CONTENT_XML in vocab and CONTENT_AUDIO_INPUT not in vocab
++
++    def adjust_request(
++        self, request: ChatCompletionRequest | ResponsesRequest
++    ) -> ChatCompletionRequest | ResponsesRequest:
++        """Frame an Inkling2 JSON response format with the block grammar.
++
++        As in the reference, any number of free thinking blocks precede the
++        final text block, whose payload alone must match the JSON constraint;
++        the API then returns that payload as the content.
++        """
++        request = super().adjust_request(request)
++        if not self._is_inkling2:
++            return request
++        structured_outputs = request.extract_structured_outputs()
++        if structured_outputs is None or (
++            structured_outputs.json is None and not structured_outputs.json_object
++        ):
++            return request
++        if request.tools and request.tool_choice not in ("auto", "none", None):
++            # TODO: constrain required and named tool choices to tool calls.
++            return request
++        json_format = structured_outputs_to_format(structured_outputs)
++
++        vocab = self.vocab
++        model, text, thinking, end = (
++            TokenFormat(token=vocab[token])
++            for token in (MESSAGE_MODEL, CONTENT_TEXT, CONTENT_THINKING, END_MESSAGE)
++        )
++        prefix = None
++        if isinstance(request, ChatCompletionRequest) and (
++            request.continue_final_message and request.messages
++        ):
++            prefix = continuation_prefix(request.messages[-1])
++        if prefix:
++            raise ValueError(
++                "Inkling JSON response formats cannot continue a nonempty "
++                "assistant message."
++            )
++        output_format: Format
++        if prefix is None:
++            excludes = [token for token in INKLING_CONTROL_TOKENS if token in vocab]
++            thinking_block = SequenceFormat(
++                elements=[model, thinking, AnyTextFormat(excludes=excludes), end]
++            )
++            output_format = SequenceFormat(
++                elements=[
++                    StarFormat(content=thinking_block),
++                    model,
++                    text,
++                    json_format,
++                    end,
++                ]
++            )
++        else:
++            output_format = SequenceFormat(elements=[json_format, end])
++        tag = StructuralTag(format=output_format)
++        grammar = StructuredOutputsParams(structural_tag=json.dumps(tag.model_dump()))
++        if isinstance(request, ChatCompletionRequest):
++            request.structured_outputs = grammar
++            request.response_format = None
++        else:
++            request._parser_structured_outputs = grammar
++        request._grammar_from_parser = True
++        return request
+
+     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+         """Seed the initial parsing state from the prompt tail.
+@@ -259,11 +363,38 @@
+                 break
+
+     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
++        if self._is_inkling2:
++            return self._inkling2_is_reasoning_end(input_ids)
+         vocab = self.vocab
+         reasoning_ids = {vocab.get(CONTENT_THINKING), vocab.get(MESSAGE_MODEL)}
+         ended_ids = {vocab.get(CONTENT_TEXT), vocab.get(CONTENT_MODEL_END_SAMPLING)}
+         i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
+         return i >= 0 and input_ids[i] in ended_ids
++
++    def _inkling2_is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
++        """Whether the latest block is a text block of a model message.
++
++        A prompt that ends between messages has not ended reasoning: the
++        model may open a thinking block.
++        """
++        vocab = self.vocab
++        text_id = vocab[CONTENT_TEXT]
++        block_ids = {
++            text_id,
++            vocab[CONTENT_THINKING],
++            vocab[CONTENT_MODEL_END_SAMPLING],
++        }
++        role_ids = {
++            vocab[token]
++            for token in (MESSAGE_MODEL, MESSAGE_USER, MESSAGE_SYSTEM, MESSAGE_TOOL)
++        }
++        latest_block = None
++        for token_id in reversed(input_ids):
++            if token_id in role_ids:
++                return latest_block == text_id and token_id == vocab[MESSAGE_MODEL]
++            if latest_block is None and token_id in block_ids:
++                latest_block = token_id
++        return latest_block == text_id
+
+     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+         vocab = self.vocab
+--- a/vllm/renderers/inkling.py
++++ b/vllm/renderers/inkling.py
+@@ -12,6 +12,8 @@
+ in :meth:`InklingRenderer._render` for adopting a standalone Inkling
+ input-processing library (mistral-common style) later.
+ """
++
++import contextlib
+
+ from vllm.config import VllmConfig
+ from vllm.logger import init_logger
+@@ -25,7 +27,14 @@
+ from vllm.utils.async_utils import make_async
+
+ from .base import BaseRenderer
+-from .inkling_encoding import SPECIAL_TOKEN_SPELLINGS, render_inkling_messages
++from .inkling_encoding import (
++    CONTENT_MODEL_END_SAMPLING,
++    DEFAULT_REASONING_EFFORT,
++    OPTIONAL_SPECIAL_TOKENS,
++    SPECIAL_TOKEN_SPELLINGS,
++    render_inkling2_messages,
++    render_inkling_messages,
++)
+ from .inputs import DictPrompt
+ from .inputs.preprocess import parse_dec_only_prompt
+ from .params import ChatParams
+@@ -42,12 +51,10 @@
+     "max": 0.99,
+ }
+
+-_DEFAULT_REASONING_EFFORT = 0.9
+-
+
+ def _resolve_reasoning_effort(value: object) -> float | int | None:
+     if value is None:
+-        return _DEFAULT_REASONING_EFFORT
++        return DEFAULT_REASONING_EFFORT
+     if isinstance(value, str):
+         return _NAMED_REASONING_EFFORT.get(value)
+     if isinstance(value, bool) or not isinstance(value, (int, float)):
+@@ -55,6 +62,17 @@
+     return value
+
+
++def _resolve_inkling2_reasoning_effort(value: object) -> float:
++    """Like the reference, also accept numeric strings and reject the rest."""
++    if isinstance(value, str) and value not in _NAMED_REASONING_EFFORT:
++        with contextlib.suppress(ValueError):
++            value = float(value)
++    effort = _resolve_reasoning_effort(value)
++    if effort is None:
++        raise ValueError(f"invalid Inkling reasoning_effort: {value!r}")
++    return float(effort)
++
++
+ class _HfBackedTmlTokenizer:
+     """Adapts an HF tokenizer to the encoding core's tokenizer protocol.
+
+@@ -63,8 +81,13 @@
+     HF vocab exposes some semantic slots as ``<|unused_NNNNNN|>`` tokens.
+     """
+
+-    def __init__(self, tokenizer: HfTokenizer) -> None:
++    def __init__(
++        self, tokenizer: HfTokenizer, split_special_tokens: bool = False
++    ) -> None:
+         self._tokenizer = tokenizer
++        self._encode_kwargs = (
++            {"split_special_tokens": True} if split_special_tokens else {}
++        )
+
+         vocab = tokenizer.get_vocab()
+         special_ids: dict[str, int] = {}
+@@ -76,16 +99,22 @@
+                     special_ids[token] = token_id
+                     break
+             else:
+-                missing.append(token)
++                if token not in OPTIONAL_SPECIAL_TOKENS:
++                    missing.append(token)
+         if missing:
+             raise ValueError(f"Inkling tokenizer is missing special tokens: {missing}")
+         self._special_ids = special_ids
+
+     def encode_text(self, text: str) -> list[int]:
+-        return self._tokenizer.encode(text, add_special_tokens=False)
++        return self._tokenizer.encode(
++            text, add_special_tokens=False, **self._encode_kwargs
++        )
+
+     def encode_special(self, token: str) -> int:
+-        return self._special_ids[token]
++        try:
++            return self._special_ids[token]
++        except KeyError:
++            raise ValueError(f"Inkling tokenizer does not define {token}") from None
+
+
+ class InklingRenderer(BaseRenderer[HfTokenizer]):
+@@ -96,7 +125,14 @@
+     ) -> None:
+         super().__init__(config, tokenizer)
+
+-        self._inkling_tokenizer = _HfBackedTmlTokenizer(self.get_tokenizer())
++        # Inkling2 shares the format but has its own reference rendering, and
++        # payload text never encodes to framing tokens.
++        self._is_inkling2 = getattr(
++            self.model_config.hf_config, "model_type", None
++        ) in ("inkling2", "inkling2_loop")
++        self._inkling_tokenizer = _HfBackedTmlTokenizer(
++            self.get_tokenizer(), split_special_tokens=self._is_inkling2
++        )
+         self._render_async = make_async(self._render, executor=self._executor)
+
+     def _render(
+@@ -106,21 +142,33 @@
+     ) -> list[int]:
+         kwargs = params.chat_template_kwargs or {}
+
+-        if kwargs.get("continue_final_message"):
++        if not self._is_inkling2 and kwargs.get("continue_final_message"):
+             raise ValueError("Inkling renderer does not support continue_final_message")
+-
+-        reasoning_effort = _resolve_reasoning_effort(kwargs.get("reasoning_effort"))
+
+         try:
+             # Swap point: to adopt a standalone Inkling input-processing
+-            # library, replace this call (and the _HfBackedTmlTokenizer
++            # library, replace these calls (and the _HfBackedTmlTokenizer
+             # adapter above) with the library's renderer.
++            if self._is_inkling2:
++                return render_inkling2_messages(
++                    messages,
++                    self._inkling_tokenizer,
++                    tools=kwargs.get("tools"),
++                    tool_choice=params.tool_choice,
++                    parallel_tool_calls=params.parallel_tool_calls,
++                    reasoning_effort=_resolve_inkling2_reasoning_effort(
++                        kwargs.get("reasoning_effort")
++                    ),
++                    continue_final_message=bool(kwargs.get("continue_final_message")),
++                )
+             return render_inkling_messages(
+                 messages,
+                 self._inkling_tokenizer,
+                 add_generation_prompt=kwargs.get("add_generation_prompt", True),
+                 tools=kwargs.get("tools"),
+-                reasoning_effort=reasoning_effort,
++                reasoning_effort=_resolve_reasoning_effort(
++                    kwargs.get("reasoning_effort")
++                ),
+             )
+         except ValueError:
+             raise
+@@ -131,6 +179,12 @@
+             logger.exception("Error while rendering Inkling chat messages")
+             raise ValueError(str(e)) from e
+
++    def get_eos_token_id(self) -> int | None:
++        eos_token_id = super().get_eos_token_id()
++        if eos_token_id is None:
++            return self._inkling_tokenizer.encode_special(CONTENT_MODEL_END_SAMPLING)
++        return eos_token_id
++
+     def render_messages(
+         self,
+         messages: list[ChatCompletionMessageParam],
+--- a/vllm/renderers/inkling_encoding.py
++++ b/vllm/renderers/inkling_encoding.py
+@@ -24,7 +24,9 @@
+ from __future__ import annotations
+
+ import json
++import math
+ from collections.abc import Iterator, Mapping, Sequence
++from dataclasses import dataclass
+ from typing import Any, Protocol
+
+ END_OF_TEXT = "<|endoftext|>"
+@@ -69,8 +71,22 @@
+     CONTENT_AUDIO_INPUT: (CONTENT_AUDIO_INPUT,),
+     CONTENT_XML: (CONTENT_XML, "<|unused_200024|>"),
+     CONTENT_INVOKE_TOOL_JSON: (CONTENT_INVOKE_TOOL_JSON,),
++    CONTENT_TOOL_ERROR: (CONTENT_TOOL_ERROR,),
+     END_MESSAGE: (END_MESSAGE,),
+     AUDIO_END: (AUDIO_END,),
++}
++
++# Tokens only some Inkling vocabularies define (Inkling2 has no audio).
++OPTIONAL_SPECIAL_TOKENS = frozenset(
++    {CONTENT_AUDIO_INPUT, AUDIO_END, CONTENT_TOOL_ERROR}
++)
++
++_CONTENT_KIND_TOKENS: dict[str, str] = {
++    "text": CONTENT_TEXT,
++    "thinking": CONTENT_THINKING,
++    "tool_error": CONTENT_TOOL_ERROR,
++    "xml": CONTENT_XML,
++    "invoke_tool_json": CONTENT_INVOKE_TOOL_JSON,
+ }
+
+
+@@ -87,6 +103,7 @@
+ _IMAGE_PART_TYPES = frozenset({"image", "input_image", "image_url"})
+ _AUDIO_PART_TYPES = frozenset({"audio", "input_audio", "audio_url"})
+
++DEFAULT_REASONING_EFFORT = 0.9
+ _MAX_REASONING_EFFORT = 0.99
+
+
+@@ -108,13 +125,7 @@
+     input_ids: list[int] = []
+     tool_call_id_to_name: dict[str, str] = {}
+
+-    # Request-level tools plus per-developer-message tools (Rust renderer
+-    # semantics) are declared in a single leading system block.
+-    all_tools = list(tools or [])
+-    for message in messages:
+-        if message.get("role") == "developer":
+-            all_tools.extend(message.get("tools") or [])
+-
++    all_tools = _collect_tools(messages, tools)
+     if all_tools:
+         _append_message(
+             input_ids,
+@@ -191,6 +202,19 @@
+     return input_ids
+
+
++def _collect_tools(
++    messages: Sequence[Mapping[str, Any]],
++    tools: Sequence[Mapping[str, Any]] | None,
++) -> list[Mapping[str, Any]]:
++    """Request-level plus per-developer-message tools (Rust renderer
++    semantics), declared in a single leading system block."""
++    all_tools = list(tools or [])
++    for message in messages:
++        if message.get("role") == "developer":
++            all_tools.extend(message.get("tools") or [])
++    return all_tools
++
++
+ def _append_reasoning_effort(
+     input_ids: list[int],
+     tokenizer: InklingTextTokenizer,
+@@ -238,24 +262,15 @@
+     if author_name:
+         input_ids.extend(tokenizer.encode_text(author_name))
+
+-    if kind == "text":
+-        input_ids.append(tokenizer.encode_special(CONTENT_TEXT))
+-        input_ids.extend(tokenizer.encode_text(text))
+-    elif kind == "image":
++    if kind == "image":
+         # Bare marker only: the MM processor replaces the marker with
+         # `marker + placeholder * num_patches` (see mm_preprocess.py).
+         input_ids.append(tokenizer.encode_special(CONTENT_IMAGE))
+     elif kind == "audio":
+         input_ids.append(tokenizer.encode_special(CONTENT_AUDIO_INPUT))
+         input_ids.append(tokenizer.encode_special(AUDIO_END))
+-    elif kind == "thinking":
+-        input_ids.append(tokenizer.encode_special(CONTENT_THINKING))
+-        input_ids.extend(tokenizer.encode_text(text))
+-    elif kind == "xml":
+-        input_ids.append(tokenizer.encode_special(CONTENT_XML))
+-        input_ids.extend(tokenizer.encode_text(text))
+-    elif kind == "invoke_tool_json":
+-        input_ids.append(tokenizer.encode_special(CONTENT_INVOKE_TOOL_JSON))
++    elif kind in _CONTENT_KIND_TOKENS:
++        input_ids.append(tokenizer.encode_special(_CONTENT_KIND_TOKENS[kind]))
+         input_ids.extend(tokenizer.encode_text(text))
+     else:
+         raise ValueError(f"unsupported Inkling render part kind: {kind!r}")
+@@ -381,3 +396,350 @@
+ def _tool_call_json(name: str, args: Mapping[str, Any]) -> str:
+     name_json = json.dumps(name, ensure_ascii=False, allow_nan=False)
+     return f'{{"name":{name_json},"args":{_canonical_json(args)}}}'
++
++
++# ── Inkling2 ──────────────────────────────────────────────────────────────
++#
++# Inkling2 keeps Inkling's block format but its reference renderer differs:
++# no generation prefix (the model emits its own ``<|message_model|>``), empty
++# string contents kept as empty blocks, effort quantized to integer
++# milli-effort, and its own canonical JSON spelling for floats.
++
++
++def render_inkling2_messages(
++    messages: Sequence[Mapping[str, Any]],
++    tokenizer: InklingTextTokenizer,
++    *,
++    tools: Sequence[Mapping[str, Any]] | None = None,
++    tool_choice: Any = None,
++    parallel_tool_calls: bool = True,
++    reasoning_effort: float = DEFAULT_REASONING_EFFORT,
++    continue_final_message: bool = False,
++) -> list[int]:
++    """Render chat messages to Inkling2 input ids.
++
++    With `continue_final_message`, a final assistant message holding only
++    a text string is left open so generation continues its text.
++    """
++    messages = list(messages)
++    assistant_prefix = None
++    if continue_final_message and messages:
++        assistant_prefix = continuation_prefix(messages[-1])
++        if assistant_prefix is not None:
++            messages.pop()
++
++    input_ids: list[int] = []
++    choice = _inkling2_tool_choice(tool_choice)
++    declared_tools = _collect_tools(messages, None if choice == "none" else tools)
++    if isinstance(choice, _NamedToolChoice):
++        declared_tools = [
++            tool
++            for tool in declared_tools
++            if _as_mapping(_as_mapping(tool).get("function", {})).get("name")
++            == choice.name
++        ]
++    if declared_tools:
++        _append_message(
++            input_ids,
++            tokenizer,
++            "system",
++            "xml",
++            _inkling2_tool_declare_json(declared_tools),
++            author_name="tool_declare",
++        )
++
++    effort_text: str | None = _inkling2_effort_text(reasoning_effort)
++    instruction = (
++        _inkling2_tool_choice_instruction(choice, parallel_tool_calls)
++        if declared_tools
++        else None
++    )
++    if instruction is not None:
++        if messages and messages[0].get("role") in {"system", "developer"}:
++            messages[0] = _with_appended_text(messages[0], instruction)
++        else:
++            effort_text = f"{effort_text}\n\n{instruction}"
++
++    tool_call_id_to_name: dict[str, str] = {}
++    for message in messages:
++        role = _expect_role(message)
++        if effort_text is not None and role not in {"system", "developer"}:
++            _append_message(input_ids, tokenizer, "system", "text", effort_text)
++            effort_text = None
++
++        author_name = None
++        if role == "tool":
++            name = message.get("name")
++            author_name = (
++                str(name)
++                if name
++                else tool_call_id_to_name.get(str(message.get("tool_call_id") or ""))
++            )
++        blocks = _inkling2_blocks(message, role, tool_call_id_to_name)
++        for kind, text, block_author in blocks:
++            _append_message(
++                input_ids,
++                tokenizer,
++                role,
++                kind,
++                text,
++                author_name=block_author or author_name,
++            )
++        if role == "assistant" and blocks:
++            input_ids.append(tokenizer.encode_special(CONTENT_MODEL_END_SAMPLING))
++
++    if effort_text is not None:
++        _append_message(input_ids, tokenizer, "system", "text", effort_text)
++
++    if assistant_prefix is not None:
++        input_ids.append(tokenizer.encode_special(MESSAGE_MODEL))
++        input_ids.append(tokenizer.encode_special(CONTENT_TEXT))
++        input_ids.extend(tokenizer.encode_text(assistant_prefix))
++    return input_ids
++
++
++def _assistant_reasoning(message: Mapping[str, Any]) -> Any:
++    reasoning = message.get("reasoning")
++    return message.get("reasoning_content") if reasoning is None else reasoning
++
++
++def continuation_prefix(message: Mapping[str, Any]) -> str | None:
++    """Return the text an Inkling2 `continue_final_message` request extends.
++
++    Only a plain-string assistant message with no tool calls or reasoning is
++    continued; `None` means the message renders as a closed turn.
++    """
++    content = message.get("content")
++    if (
++        message.get("role") != "assistant"
++        or not isinstance(content, str)
++        or message.get("tool_calls")
++        or _assistant_reasoning(message)
++    ):
++        return None
++    return content
++
++
++def _inkling2_blocks(
++    message: Mapping[str, Any],
++    role: str,
++    tool_call_id_to_name: dict[str, str],
++) -> list[tuple[str, str, str | None]]:
++    content = message.get("content")
++    if role != "assistant":
++        return [(kind, text, None) for kind, text in _iter_inkling2_parts(content)]
++
++    reasoning = _assistant_reasoning(message)
++    if reasoning is not None and not isinstance(reasoning, str):
++        raise TypeError("assistant reasoning_content must be a string")
++    tool_calls = message.get("tool_calls") or []
++    if content == "" and (tool_calls or reasoning):
++        content = None
++
++    blocks: list[tuple[str, str, str | None]] = (
++        [("thinking", reasoning, None)] if reasoning else []
++    )
++    blocks.extend((kind, text, None) for kind, text in _iter_inkling2_parts(content))
++    for tool_call in tool_calls:
++        name, args = _tool_call_name_and_args(tool_call)
++        tool_call_id = _as_mapping(tool_call).get("id")
++        if tool_call_id:
++            tool_call_id_to_name[str(tool_call_id)] = name
++        args = _tml_json_loads(json.dumps(args, allow_nan=False))
++        args_json = _tml_json_dumps(
++            {key: args[key] for key in sorted(args)}, sort_keys=False
++        )
++        blocks.append(
++            (
++                "invoke_tool_json",
++                f'{{"name":{_tml_json_dumps(name)},"args":{args_json}}}',
++                name,
++            )
++        )
++    return blocks
++
++
++@dataclass(frozen=True)
++class _NamedToolChoice:
++    name: str
++
++
++def _inkling2_tool_choice(tool_choice: Any) -> str | _NamedToolChoice:
++    if tool_choice is None:
++        return "auto"
++    if isinstance(tool_choice, str):
++        return tool_choice
++    choice = _as_mapping(tool_choice)
++    if choice.get("type") != "function":
++        raise ValueError(f"unsupported tool_choice: {tool_choice!r}")
++    function = choice.get("function")
++    return _NamedToolChoice(
++        _as_mapping(function)["name"] if function else choice["name"]
++    )
++
++
++def _inkling2_tool_choice_instruction(
++    choice: str | _NamedToolChoice, parallel_tool_calls: bool
++) -> str | None:
++    if isinstance(choice, _NamedToolChoice):
++        once = "" if parallel_tool_calls else " exactly once"
++        return (
++            f"Call the function named {json.dumps(choice.name)}{once} "
++            "in your next response."
++        )
++    if choice == "required":
++        quantity = "at least one" if parallel_tool_calls else "exactly one"
++        return f"Call {quantity} of the provided functions in your next response."
++    if choice == "auto" and not parallel_tool_calls:
++        return (
++            "If you call a function, call at most one function in your next response."
++        )
++    return None
++
++
++def _with_appended_text(message: Mapping[str, Any], text: str) -> dict[str, Any]:
++    content = message.get("content")
++    if isinstance(content, str) and content:
++        content = f"{content}\n\n{text}"
++    elif not content:
++        content = text
++    else:
++        content = [*content, {"type": "text", "text": text}]
++    return {**message, "content": content}
++
++
++def _iter_inkling2_parts(content: Any) -> Iterator[tuple[str, str]]:
++    if content is None:
++        return
++    if isinstance(content, str):
++        yield ("text", content)
++        return
++    if not isinstance(content, Sequence) or isinstance(content, (bytes, bytearray)):
++        raise TypeError("message content must be a string or a sequence of parts")
++    for part in content:
++        if isinstance(part, str):
++            yield ("text", part)
++            continue
++        if not isinstance(part, Mapping):
++            raise TypeError(f"content part must be mapping, got {type(part).__name__}")
++        ptype = part.get("type")
++        if ptype in (None, "text", "input_text"):
++            yield ("text", part.get("text") or "")
++        elif ptype == "thinking":
++            yield ("thinking", part.get("thinking") or "")
++        elif ptype == "tool_error":
++            yield ("tool_error", part.get("text") or "")
++        elif ptype in _IMAGE_PART_TYPES:
++            yield ("image", "")
++        else:
++            raise ValueError(f"unsupported Inkling2 content part type: {ptype!r}")
++
++
++def _inkling2_effort_text(reasoning_effort: float) -> str:
++    if not 0.0 <= reasoning_effort <= _MAX_REASONING_EFFORT:
++        raise ValueError(
++            f"Inkling reasoning_effort must be in [0.0, 0.99], got {reasoning_effort!r}"
++        )
++    millieffort = round(reasoning_effort * 1000)
++    effort = round((millieffort / 1000) * 100) / 100
++    return f"Thinking effort level: {effort:g}"
++
++
++def _inkling2_tool_declare_json(tools: Sequence[Mapping[str, Any]]) -> str:
++    tool_specs = []
++    for tool_value in tools:
++        tool = _as_mapping(tool_value)
++        function = {
++            key: value
++            for key, value in _as_mapping(tool.get("function", {})).items()
++            if value is not None
++        }
++        parameters = function.get("parameters", {})
++        if not isinstance(parameters, Mapping):
++            raise TypeError("tool parameters must be a JSON object")
++        tool_specs.append(
++            {
++                "description": function.get("description", ""),
++                "name": function["name"],
++                "parameters": _tml_json_loads(
++                    json.dumps(parameters, ensure_ascii=False, allow_nan=False)
++                ),
++                "type": tool.get("type") or "function",
++            }
++        )
++    return _tml_json_dumps(tool_specs, legacy_floats=False)
++
++
++def _tml_json_loads(text: str) -> Any:
++    """Parse JSON as the Inkling2 reference does (64-bit ints, finite floats)."""
++
++    def invalid_constant(value: str) -> Any:
++        raise ValueError(f"Invalid JSON constant: {value}")
++
++    def finite_float(value: str) -> float:
++        number = float(value)
++        if not math.isfinite(number):
++            raise ValueError("JSON number out of range")
++        return number
++
++    def bounded_int(value: str) -> int | float:
++        number = int(value)
++        if value == "-0" or not -(1 << 63) <= number < 1 << 64:
++            return finite_float(value)
++        return number
++
++    return json.loads(
++        text,
++        parse_constant=invalid_constant,
++        parse_float=finite_float,
++        parse_int=bounded_int,
++    )
++
++
++def _tml_json_dumps(
++    value: Any, *, legacy_floats: bool = True, sort_keys: bool = True
++) -> str:
++    """Compact JSON with the Inkling2 reference float spelling."""
++    if isinstance(value, Mapping):
++        if not all(isinstance(key, str) for key in value):
++            raise TypeError("JSON object keys must be strings")
++        return (
++            "{"
++            + ",".join(
++                _tml_json_dumps(key)
++                + ":"
++                + _tml_json_dumps(
++                    value[key], legacy_floats=legacy_floats, sort_keys=sort_keys
++                )
++                for key in (sorted(value) if sort_keys else value)
++            )
++            + "}"
++        )
++    if isinstance(value, (list, tuple)):
++        items = (
++            _tml_json_dumps(item, legacy_floats=legacy_floats, sort_keys=sort_keys)
++            for item in value
++        )
++        return "[" + ",".join(items) + "]"
++    if isinstance(value, float):
++        if not math.isfinite(value):
++            raise ValueError("JSON numbers must be finite")
++        result = repr(value)
++        if "e" not in result:
++            return result
++        mantissa, exponent_text = result.split("e")
++        exponent = int(exponent_text)
++        if -5 <= exponent < 16:
++            negative = mantissa.startswith("-")
++            digits = mantissa.lstrip("-").replace(".", "")
++            decimal = exponent + 1
++            if decimal <= 0:
++                result = "0." + "0" * -decimal + digits
++            elif decimal >= len(digits):
++                result = digits + "0" * (decimal - len(digits)) + ".0"
++            else:
++                result = digits[:decimal] + "." + digits[decimal:]
++            return ("-" if negative else "") + result
++        sign = "+" if exponent >= 0 and not legacy_floats else ""
++        return mantissa + "e" + sign + str(exponent)
++    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+--- a/vllm/renderers/params.py
++++ b/vllm/renderers/params.py
+@@ -110,6 +110,9 @@
+
+     tool_choice: Any | None = None
+     """Request-level tool choice for renderers that need API metadata."""
++
++    parallel_tool_calls: bool = True
++    """Request-level `parallel_tool_calls` for renderers that need API metadata."""
+
+     response_format: Any | None = None
+     """Request-level response format for renderers that need API metadata."""
+@@ -143,6 +146,7 @@
+                 self.mm_processor_kwargs,
+             ),
+             tool_choice=self.tool_choice,
++            parallel_tool_calls=self.parallel_tool_calls,
+             response_format=self.response_format,
+         )
+
+--- a/vllm/transformers_utils/config.py
++++ b/vllm/transformers_utils/config.py
+@@ -178,6 +178,9 @@
+     flint="FlintConfig",
+     inkling_mm_model="InklingMMConfig",
+     inkling_model="InklingModelConfig",
++    inkling2="Inkling2MMConfig",
++    inkling2_loop="Inkling2LoopMMConfig",
++    inkling2_model="Inkling2ModelConfig",
+ )
+
+ _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
+--- a/vllm/transformers_utils/configs/__init__.py
++++ b/vllm/transformers_utils/configs/__init__.py
+@@ -82,6 +82,9 @@
+     "InklingAudioConfig": "vllm.models.inkling.configs",
+     "InklingVisionConfig": "vllm.models.inkling.configs",
+     "InklingMMConfig": "vllm.models.inkling.configs",
++    "Inkling2ModelConfig": "vllm.models.inkling2.configs",
++    "Inkling2MMConfig": "vllm.models.inkling2.configs",
++    "Inkling2LoopMMConfig": "vllm.models.inkling2.configs",
+     # Upstream Transformers classes registered in _CONFIG_REGISTRY
+     "DeepseekV3Config": "transformers",
+     "HyperCLOVAXConfig": "transformers",
+@@ -158,6 +161,9 @@
+     "InklingAudioConfig",
+     "InklingVisionConfig",
+     "InklingMMConfig",
++    "Inkling2ModelConfig",
++    "Inkling2MMConfig",
++    "Inkling2LoopMMConfig",
+ ]
+
+
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -603,6 +603,11 @@
+         if draft_model is not None:
+             with set_current_vllm_config(self.vllm_config):
+                 refresh_quantized_lm_heads(draft_model)
++                # Drafts that precompute weights from the target's (e.g. a
++                # folded LM head) re-derive them in place.
++                refresh = getattr(draft_model, "refresh_derived_weights", None)
++                if refresh is not None:
++                    refresh()
+
+     def reload_weights(
+         self,
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -497,7 +497,12 @@
+             self.device = torch.device(f"cuda:{visible_device_index}")
+             torch.accelerator.set_device_index(self.device)
+
+-            current_platform.check_if_supports_dtype(self.model_config.dtype)
++            inkling_on_sm75 = (
++                current_platform.is_device_capability(75)
++                and self.model_config.hf_config.model_type in ("inkling2", "inkling2_loop")
++            )
++            if not inkling_on_sm75:
++                current_platform.check_if_supports_dtype(self.model_config.dtype)
+
+             # Initialize the distributed environment BEFORE taking
+             # memory snapshot

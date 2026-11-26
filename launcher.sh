@@ -506,16 +506,39 @@ current_cudagraph_capture_label() {
   fi
 }
 
+docker_default_cudagraph_mode() {
+  local tokens=${1:-$(effective_speculative_tokens)}
+  local method=${2:-$(effective_speculative_method)}
+
+  if [[ "$MODE" == normal ]]; then
+    if [[ "$tokens" -gt 0 || -n "${SPECULATIVE_CONFIG:-}" ]]; then
+      printf 'PIECEWISE'
+    fi
+  elif [[ "$MODE" != safe ]]; then
+    # FULL replay on this route can corrupt generation after an image prompt.
+    if [[ "${MODEL_FAMILY:-}" == qwen35 && "${TP_SIZE:-}" == 2 &&
+          "${MESSAGE_TYPE:-}" == text+image && "${KV_CACHE_DTYPE:-}" == turboquant_* &&
+          "$method" == mtp ]]; then
+      printf 'PIECEWISE'
+    elif [[ "$method" == dflash && "${MODEL_VARIANT:-}" == fp8 &&
+            ( "${KV_CACHE_DTYPE:-}" == fp8 || "${MESSAGE_TYPE:-}" == text+image ) ]] &&
+         is_docker_tp4_t10_qwen_profile; then
+      # Reserve KV space for the 2x220K and 240K routes and capture decode.
+      printf 'FULL_DECODE_ONLY'
+    fi
+  fi
+}
+
 spec_graph_policy_label() {
   if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+    local graph_mode
     if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
       printf 'custom'
     elif [[ "$MODE" == safe ]]; then
       printf 'eager'
-    elif [[ "$MODE" == normal && ( "$(effective_speculative_tokens)" -gt 0 || -n "${SPECULATIVE_CONFIG:-}" ) ]]; then
-      printf 'PIECEWISE'
     else
-      printf 'upstream defaults'
+      graph_mode=$(docker_default_cudagraph_mode)
+      printf '%s' "${graph_mode:-upstream defaults}"
     fi
   else
     printf 'VLLM_SM75_SPEC_SYNC_MODE=%s, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%s' \
@@ -1353,6 +1376,12 @@ apply_profile_overrides() {
     [[ -n "$key" ]] || continue
     config_key_has_override "$key" && continue
     value=$(read_profile_value "$file" "$key")
+    if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$file" == "$PROFILE_DIR"/4xT10/qwen27b/* &&
+          "$key" == GPU_UTIL && "$value" == 0.96 &&
+          "$file" != "$PROFILE_DIR"/4xT10/qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env ]]; then
+      # Leave room for runtime prefill workspaces after allocating the fixed KV cache.
+      value=0.94
+    fi
     printf -v "$key" '%s' "$value"
     export "$key"
     if [[ "$key" == MODE ]]; then
@@ -1378,6 +1407,14 @@ resolve_profile_file() {
     return 0
   fi
   return 1
+}
+
+is_docker_tp4_t10_qwen_profile() {
+  [[ "$VLLM_RUNTIME_BACKEND" == docker && "${TP_SIZE:-}" == 4 &&
+     "${MODEL_FAMILY:-}" == qwen35 ]] || return 1
+  local profile_file
+  profile_file=$(resolve_profile_file) || return 1
+  [[ "$profile_file" == "$PROFILE_DIR"/4xT10/qwen27b/* ]]
 }
 
 load_manager_state() {
@@ -1659,7 +1696,9 @@ apply_family_reasoning_defaults() {
   fi
   if default_qwen_reasoning_parser_applies; then
     REASONING_PARSER=${REASONING_PARSER:-qwen3}
-  elif [[ "${REASONING_PARSER:-}" == "qwen3" ]]; then
+  elif [[ "$MODEL_FAMILY" == inkling2 ]]; then
+    REASONING_PARSER=inkling
+  elif [[ "${REASONING_PARSER:-}" == qwen3 || "${REASONING_PARSER:-}" == inkling ]]; then
     REASONING_PARSER=""
   fi
 }
@@ -4479,6 +4518,8 @@ elif "qwen3_5" in normalized or "qwen3.5" in normalized:
     print("qwen35")
 elif "gemma4" in normalized:
     print("gemma4")
+elif "inkling2" in normalized or "inkling_2" in normalized:
+    print("inkling2")
 elif "qwen" in normalized:
     print("qwen")
 else:
@@ -4502,6 +4543,7 @@ guess_model_family() {
     *qwen*moe*|*moe*qwen*) echo qwen35moe ;;
     *qwen3.5*|*qwen3_5*|*qwen35*|*qwen3.6*|*qwen36*) echo qwen35 ;;
     *gemma*) echo gemma4 ;;
+    *inkling-2*|*inkling2*) echo inkling2 ;;
     *) echo qwen ;;
   esac
 }
@@ -4831,6 +4873,18 @@ set_sm75_runtime_env() {
     export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
     export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
     export PYTHONUNBUFFERED=1
+    if is_docker_tp4_t10_qwen_profile; then
+      if [[ -z "${PYTORCH_ALLOC_CONF:-}" ]]; then
+        export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      fi
+      if [[ ! -v VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC &&
+            "${NCCL_P2P_DISABLE:-0}" != 1 &&
+            "${CUSTOM_ALL_REDUCE_MODE:-}" != off &&
+            "${DISABLE_CUSTOM_ALL_REDUCE:-0}" != 1 ]] &&
+         recommend_gpu_rank_order "$GPU_DEVICES" "$TP_SIZE" "${PP_SIZE:-1}" >/dev/null 2>&1; then
+        export VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1
+      fi
+    fi
     if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
       export PYTHONHASHSEED=0
     fi
@@ -4962,14 +5016,17 @@ set_sm75_runtime_env() {
 
 build_args() {
   local host_arg=$1
-  local custom_all_reduce_mode
+  local custom_all_reduce_mode dtype=half
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$MODEL_FAMILY" == inkling2 ]]; then
+    dtype=bfloat16
+  fi
 
   VLLM_ARGS=(
     --host "$host_arg"
     --port "$PORT"
     --model "$MODEL_DIR"
     --served-model-name "$SERVED_NAME"
-    --dtype half
+    --dtype "$dtype"
     --tensor-parallel-size "${TP_SIZE:-2}"
     --generation-config "${GENERATION_CONFIG:-auto}"
     --gpu-memory-utilization "$GPU_UTIL"
@@ -4978,6 +5035,11 @@ build_args() {
     --max-num-seqs "$MAX_NUM_SEQS"
     --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
   )
+
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "${MODEL_FAMILY:-}" == inkling2 ]] ||
+     { [[ -z "${KV_DISK_CACHE_DIR:-}" ]] && is_docker_tp4_t10_qwen_profile; }; then
+    VLLM_ARGS+=(--no-enable-extensible-kv-cache)
+  fi
 
   if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
     VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
@@ -5079,8 +5141,9 @@ build_args() {
   if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG_JSON")
   elif [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    if [[ "$MODE" == normal && ( "$spec_tokens" -gt 0 || -n "${SPECULATIVE_CONFIG:-}" ) ]]; then
-      VLLM_ARGS+=(--compilation-config '{"cudagraph_mode":"PIECEWISE"}')
+    cudagraph_mode=$(docker_default_cudagraph_mode "$spec_tokens" "$spec_method")
+    if [[ -n "$cudagraph_mode" ]]; then
+      VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"$cudagraph_mode\"}")
     fi
   elif [[ -n "${SPECULATIVE_CONFIG:-}" || "$spec_tokens" -gt 0 ]]; then
     capture_sizes=$(speculative_cudagraph_capture_sizes "$spec_tokens" "$MAX_NUM_SEQS") || \
@@ -6192,6 +6255,10 @@ prepare_runtime_defaults() {
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
   normalize_message_type_defaults || return 1
   derive_yarn_overrides || return 1
+  if is_docker_tp4_t10_qwen_profile; then
+    # FlashInfer needs layer-contiguous pages to split the hybrid KV blocks.
+    set_derived_default VLLM_KV_CACHE_LAYOUT LBNHC
+  fi
   apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
   validate_disk_kv_cache_config || return 1

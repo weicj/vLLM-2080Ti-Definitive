@@ -15,6 +15,7 @@ connected by PCIe PIX on the same NUMA node and NVIDIA driver 610.43.03.
 | `mtp3-fp8kv-1x262K-text-only.env` | 262,144 | 293,422 | 1176.34 / 87.28 | 1107.18 / 81.90 |
 | `mtp3-tqk8v4-2x155K-text-only.env` | 2 × 155,648 | 351,112 | 1059.92 / 95.09 | 1069.71 / 107.12 |
 | `mtp3-tq4nc-2x220K-text-only.env` | 2 × 220,000 | 511,566 | 1164.18 / 85.29 | 1122.17 / 73.27 |
+| `mtp3-tqk8v4-1x196K-text-image.env` | 196,000 | 253,866 | 1191.44 / 82.76 | 1124.64 / 60.87 |
 
 Throughput tests used the reference method below with MTP/3 and prefix
 caching disabled. The FP8 KV capacity request completed 262,143 input tokens
@@ -22,7 +23,10 @@ and one output token in 476.5 seconds. The TQK8V4 capacity request completed
 155,647 input tokens and one output token in 205.4 seconds. With prefix caching
 enabled on the FP8 KV profile, the launcher
 passed its smoke test, reported 288,504 GPU KV tokens, and a repeated request
-hit 3,200 of 4,096 prompt tokens with identical output token IDs.
+hit 3,200 of 4,096 prompt tokens with identical output token IDs. The
+text-image profile uses PIECEWISE CUDA graphs by default on Docker. With
+MTP/3 enabled, it identified the blue square and orange circle in the
+image smoke test.
 
 ### 0.2.x native validation
 

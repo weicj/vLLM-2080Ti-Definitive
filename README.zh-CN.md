@@ -113,12 +113,49 @@ NON_INTERACTIVE=1 ./launcher.sh
 [非交互启动说明](docs/non-interactive-launch.zh-CN.md)。
 
 Docker launcher 继续使用本地权重路径、profile、GPU 顺序和服务配置。
-`fast` 模式采用上游调度与 CUDA Graph 默认配置，`normal` 模式的投机解码使用
-PIECEWISE。服务级思考预算和 0.2.x 的 prefill barrier 可通过原生运行时使用。
+`fast` 模式采用上游调度与 CUDA Graph 默认配置。`normal` 模式的投机解码和双卡
+T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。服务级思考预算和 0.2.x 的
+prefill barrier 可通过原生运行时使用。
 
-Docker 运行时在 SM75 上处于实验阶段。首条实测路线为双 Tesla T10 上的
-Qwen3.8-27B-INT4、MTP/3 和 FP8 KV。Docker 实测与 0.2.x 数据见硬件 profile。
-[2xT10 实测结果](profiles/2xT10/README.zh-CN.md#03x-docker-验证)
+Docker 运行时在 SM75 上处于实验阶段。T10 profile 文档并列记录 Docker 实测与 0.2.x 数据。
+[2xT10 实测结果](profiles/2xT10/README.zh-CN.md#03x-docker-验证) ·
+[4xT10 实测结果](profiles/4xT10/README.zh-CN.md#03x-docker-实测)
+
+### 在 SM75 上运行 Inkling 2 Mini
+
+先构建 Inkling 镜像，再通过 launcher 选择该镜像并加载官方权重。将 GPU 编号和
+张量并行度设为宿主机的实际配置。以下示例使用支持 PCIe P2P 的两张 T10，
+以 8,192 token 上下文提供纯文本服务。
+
+```bash
+VLLM_DOCKER_VARIANT=inkling ./build.sh
+
+VLLM_DOCKER_VARIANT=inkling MODEL_DIR=/path/to/Inkling-2-Mini \
+GPU_DEVICES=0,1 TP_SIZE=2 MAX_MODEL_LEN=8192 GPU_UTIL=0.94 \
+KV_CACHE_DTYPE=fp8 MESSAGE_TYPE=text-only NCCL_P2P_DISABLE=0 \
+DISABLE_PREFIX_CACHING=1 DISABLE_LOG_STATS=0 NON_INTERACTIVE=1 ./launcher.sh
+```
+
+启动时设置 `SPECULATIVE_CONFIG='{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'`，
+即可从官方模型目录加载 `mtp.safetensors`。
+
+2×T10 和 4×T10 的测试均使用 NCCL PCIe P2P、FP8 KV 和 8,192 token
+上下文上限。下表每行取三次单请求的吞吐中位数，关闭 Prefix Cache，精确输入
+4,096 token、输出 128 token。DSpark 每步最多提出七个草稿 token。
+
+| 显卡 | 提示词 | 纯 AR prefill / decode（tok/s） | DSpark prefill / decode（tok/s） | 草稿接受率 |
+| --- | --- | ---: | ---: | ---: |
+| 2×T10 | 自然语言 | 3604.56 / 63.42 | 3041.60 / 191.44 | 73.5–82.7% |
+| 2×T10 | 代码 | 3586.87 / 63.19 | 3538.16 / 191.98 | 86.5–88.9% |
+| 2×T10 | 重复文本 | 3639.81 / 62.72 | 3474.90 / 276.12 | 100% |
+| 4×T10 | 自然语言 | 4307.50 / 76.62 | 4228.26 / 240.42 | 76.4–81.2% |
+| 4×T10 | 代码 | 4303.70 / 76.52 | 4210.75 / 251.36 | 86.5% |
+| 4×T10 | 重复文本 | 4208.69 / 76.06 | 4127.62 / 355.44 | 100% |
+
+实验镜像使用 vLLM 上游模型实现和 lvb-s 的 SM75 移植。
+[官方权重](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
+[上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
+[社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)
 
 ## 🧭 Profile 与推荐路线
 

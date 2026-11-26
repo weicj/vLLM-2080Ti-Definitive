@@ -24,6 +24,24 @@
 | `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 262K | FP16 | MTP/4 | text+image | 436,388 | 1526.32 / 125.70 | 1517.31 / 123.13 |
 | `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 2 x 262K | FP8 | MTP/4 | text+image | 823,249 | 1507.94 / 116.86 | 1477.49 / 118.77 |
 
+## 0.3.x Docker 实测
+
+测试使用官方 vLLM 0.34.0 镜像叠加本项目 SM75 补丁，
+使用四张支持 PCIe P2P 的 T10、FP16 activation 和 2,048 的批处理 token 上限。
+吞吐沿用上方表格的纯文本请求口径。
+
+| Profile | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
+|---|---:|---:|---:|
+| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 268,344 | 1366.68 / 198.11 | 1424.51 / 193.17 |
+| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 240,963 | 1583.47 / 191.70 | 1464.82 / 189.57 |
+| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 445,609 | 1582.13 / 197.22 | 1443.78 / 196.13 |
+| `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
+
+以上路线使用固定 KV 分配、LBNHC 布局、FlashInfer PCIe IPC all-reduce 和 launcher
+的 `fast` 模式。240K 路线采用 0.96 的 GPU 显存利用率，其余路线采用 0.94。
+240K 和 2×220K DFlash2 路线仅为解码捕获 CUDA Graph。两条图文路线均通过图卡测试，
+识别出蓝色方块和橙色圆形。
+
 ## 说明
 
 1. Profile 直接放在各模型/权重目录下，不再按 mode 分目录。Mode 由 launcher 选择，默认使用 `fast`。

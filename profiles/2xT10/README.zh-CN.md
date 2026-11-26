@@ -16,12 +16,15 @@ NVIDIA 驱动版本为 610.43.03。
 | `mtp3-fp8kv-1x262K-text-only.env` | 262,144 | 293,422 | 1176.34 / 87.28 | 1107.18 / 81.90 |
 | `mtp3-tqk8v4-2x155K-text-only.env` | 2 × 155,648 | 351,112 | 1059.92 / 95.09 | 1069.71 / 107.12 |
 | `mtp3-tq4nc-2x220K-text-only.env` | 2 × 220,000 | 511,566 | 1164.18 / 85.29 | 1122.17 / 73.27 |
+| `mtp3-tqk8v4-1x196K-text-image.env` | 196,000 | 253,866 | 1191.44 / 82.76 | 1124.64 / 60.87 |
 
 测速沿用下方参考口径，使用 MTP/3，关闭 Prefix Cache，逐个发送纯文本请求。
 FP8 KV 路线完成了 262,143 个输入 token 加 1 个输出 token 的容量请求，耗时 476.5 秒。
 TQK8V4 路线完成了 155,647 个输入 token 加 1 个输出 token 的容量请求，耗时 205.4 秒。
 FP8 KV 路线启用 Prefix Cache 后，launcher 通过 smoke test，报告 288,504 个 GPU KV tokens。
 重复请求命中了 4,096 个输入 token 中的 3,200 个，两次生成 token ID 一致。
+Docker 上的图文路线默认使用 PIECEWISE CUDA Graph，保留 MTP/3 后仍准确识别了
+测试图卡上的蓝色方块与橙色圆形。
 
 ### 0.2.x 原生验证
 
