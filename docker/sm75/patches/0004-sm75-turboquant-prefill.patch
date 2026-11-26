@@ -1,0 +1,75 @@
+--- a/vllm/v1/attention/backends/turboquant_attn.py
++++ b/vllm/v1/attention/backends/turboquant_attn.py
+@@ -28,6 +28,7 @@
+ from vllm.config import get_current_vllm_config
+ from vllm.config.cache import CacheDType
+ from vllm.logger import init_logger
++from vllm.platforms import current_platform
+ from vllm.model_executor.layers.quantization.turboquant.centroids import (
+     get_centroids,
+ )
+@@ -348,7 +349,12 @@
+         self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
+
+         # Detect flash-attn version (FA2/3/4) for prefill paths.
+-        self.fa_version = get_flash_attn_version(head_size=head_size)
++        self.use_flashinfer_prefill = (
++            current_platform.is_cuda() and current_platform.is_device_capability(75)
++        )
++        self.fa_version = (
++            None if self.use_flashinfer_prefill else get_flash_attn_version(head_size=head_size)
++        )
+
+         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
+         # and benchmarks show no regression vs dynamic in eager mode).
+@@ -367,6 +373,17 @@
+         # tracks FlyDSL availability (single switch for the whole pipeline).
+         self._use_flydsl = is_flydsl_available()
+         self._soa_store = self._use_flydsl
++
++    def _flashinfer_prefill(
++        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
++    ) -> torch.Tensor:
++        # The FlashAttention extension in the upstream wheel requires SM80.
++        from flashinfer import single_prefill_with_kv_cache
++
++        return single_prefill_with_kv_cache(
++            query.contiguous(), key.contiguous(), value.contiguous(),
++            causal=True, sm_scale=self.scale, backend="fa2",
++        )
+
+     def _flash_attn_varlen(
+         self,
+@@ -736,7 +753,11 @@
+         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
+         # max_query_len == max_seq_len means no request has prior cached KV.
+         # Both are Python ints — no GPU sync.
+-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
++        if (
++            _HAS_FLASH_ATTN
++            and not self.use_flashinfer_prefill
++            and attn_metadata.max_query_len == attn_metadata.max_seq_len
++        ):
+             return self._flash_attn_varlen(
+                 q=query,
+                 k=key,
+@@ -797,7 +818,9 @@
+
+             if q_len == seq_len:
+                 # First-chunk prefill: all K/V are in the current batch.
+-                if _HAS_FLASH_ATTN:
++                if self.use_flashinfer_prefill:
++                    out = self._flashinfer_prefill(q_seq, k_seq, v_seq)
++                elif _HAS_FLASH_ATTN:
+                     # Assign to slice to avoid gpu/cpu sync.
+                     self._cu_2[1:2] = q_len
+                     cu = self._cu_2
+@@ -1055,6 +1078,8 @@
+         v_full[cached_len:] = val_chunk
+
+         # Attention: q_len queries attending to seq_len K/V with causal mask
++        if self.use_flashinfer_prefill:
++            return self._flashinfer_prefill(query, k_full, v_full)
+         if _HAS_FLASH_ATTN:
+             # Reuse pre-allocated cu_seqlens (avoid host→device transfer)
+             if not hasattr(self, "_cu_2_q"):

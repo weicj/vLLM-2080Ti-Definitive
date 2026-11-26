@@ -9,8 +9,9 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
   compatibility, and a fixed KV cache default for local Qwen GDN on SM75 TP2.
 - Keeps the build, launcher, and update commands, plus the native 0.2.x
   runtime via `VLLM_RUNTIME_BACKEND=native`.
-- Records Docker results for the existing 2xT10 Qwen3.8-27B-INT4 MTP/3 FP8 KV
-  profile alongside the original 0.2.x figures.
+- Uses FlashInfer for TurboQuant prefill on SM75. Records Docker results for
+  the existing 2xT10 Qwen3.8-27B-INT4 MTP/3 FP8 KV, TQK8V4 and TQ4NC text
+  profiles alongside the original 0.2.x figures.
 
 ## v0.2.2-post3 - 2026-10-01
 
