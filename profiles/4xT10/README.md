@@ -34,7 +34,7 @@ DFlash2 draft checkpoint [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/inc
 
 Official checkpoint [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 
-These profiles use the Inkling Docker image. DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabilistic draft sampling.
+DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabilistic draft sampling.
 
 | Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens |
 | --- | ---: | --- | --- | --- | ---: |

@@ -41,7 +41,7 @@ ADD --checksum=sha256:a80232fce11e29c643f8e26604bb8740db40861ef193fb1ea2e94bb57a
 ADD --checksum=sha256:d4747cae223f81bb8d18bee766a5f41e67484a65bd665534fdbc8dc7adabd7c1 \
     https://files.pythonhosted.org/packages/53/b5/19eaeed76d26248b8fe9276d2f9a4346e250fd7d2cfb0784ae4929d7efcc/humming_kernels-0.1.20-cp310-abi3-manylinux_2_28_x86_64.whl /
 
-FROM runtime AS inkling
+FROM runtime
 LABEL io.github.weicj.vllm.inkling-source="https://github.com/vllm-project/vllm/tree/a289c722dd59a0e74bf77e005a7077676c320f5c" \
       io.github.weicj.vllm.inkling-sm75-source="https://github.com/lvb-s/vllm-inkling-sm75/tree/811e9b7f40fd9c6990a6b7ed2a1016ef050f0c36"
 
@@ -62,5 +62,3 @@ RUN --mount=type=bind,from=inkling-sources,source=/,target=/inkling-sources \
     patch --directory="$site" --strip=1 --batch --forward --fuzz=0 < /inkling-patches/inkling-v0.34.0.patch; \
     python3 -m pip install --no-deps --no-index --no-cache-dir /inkling-sources/humming_kernels-*.whl; \
     python3 -m compileall -q "$site/vllm/models/inkling2"
-
-FROM runtime AS default

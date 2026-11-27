@@ -15,7 +15,7 @@ selects the startup mode, defaulting to `fast`.
 - [4xT10](4xT10/README.md) has `qwen38-27b/w8a16`, `qwen38-27b/w4a16`, and `inkling-2-mini/official`.
 - [2x2080Ti](2x2080Ti/README.md) lists profiles pending Docker validation.
 
-Build and launch Inkling profiles with `VLLM_DOCKER_VARIANT=inkling`.
+Inkling profiles use the same Docker image as Qwen.
 The DSpark/7 profile sets `SPECULATIVE_METHOD=dspark` and `SPECULATIVE_TOKENS=7`
 to use draft weights from the official checkpoint.
 

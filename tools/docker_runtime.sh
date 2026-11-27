@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
 # Shared by build.sh and the host-side launcher.
 VLLM_DOCKER_COMMAND=${VLLM_DOCKER_COMMAND:-docker}
-VLLM_DOCKER_VARIANT=${VLLM_DOCKER_VARIANT:-default}
 if [[ "${VLLM_RUNTIME_BACKEND:-docker}" != docker ]]; then
   printf 'This branch uses Docker. Use the 0.2.x release line for native builds.\n' >&2
   exit 1
 fi
-case "$VLLM_DOCKER_VARIANT" in
-  default) docker_image_suffix='' ;;
-  inkling) docker_image_suffix='-inkling' ;;
-  *) printf 'VLLM_DOCKER_VARIANT must be default or inkling.\n' >&2; exit 1 ;;
-esac
-VLLM_DOCKER_IMAGE=${VLLM_DOCKER_IMAGE:-vllm-2080ti:${FORK_RELEASE}-vllm${DOCKER_VLLM_VERSION}${docker_image_suffix}}
+VLLM_DOCKER_IMAGE=${VLLM_DOCKER_IMAGE:-vllm-2080ti:${FORK_RELEASE}-vllm${DOCKER_VLLM_VERSION}}
 
 docker_runtime_options() {
   local hf_dir hf_hub_dir var

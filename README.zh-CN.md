@@ -59,7 +59,7 @@ Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10�
 
 1. 在 0.3.x 工作树中运行 `./build.sh`。Docker 构建使用官方镜像提供的 Torch 和 CUDA，
    [镜像配置](PROJECT_RELEASE.env) 用 digest 锁定官方 linux/amd64 镜像。
-   构建时应用 SM75 GDN prefill 补丁，并将编译好的 FlashQLA 扩展装入镜像。
+   构建时应用 SM75 补丁、编译 FlashQLA，并在同一镜像中加入 Inkling 2 Mini 支持。
 
    宿主机需要 Docker、NVIDIA Container Toolkit 和兼容 CUDA 13.0 的 NVIDIA 驱动。
    Python、PyTorch 和 CUDA 用户态依赖由镜像提供。
@@ -96,13 +96,11 @@ T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。
 
 ### 在 SM75 上运行 Inkling 2 Mini
 
-Inkling 镜像把 v0.34.0 发布后合入主线的模型支持移植到固定底座。先构建镜像，
-再通过 `PROFILE` 选择路线。下面的示例使用支持 PCIe P2P 的两张 T10。
+更新后运行 `./build.sh`，将 Inkling 2 Mini 支持装入本地镜像。启动时选择权重和
+profile。下面的示例使用支持 PCIe P2P 的两张 T10。
 
 ```bash
-VLLM_DOCKER_VARIANT=inkling ./build.sh
-
-VLLM_DOCKER_VARIANT=inkling MODEL_DIR=/path/to/Inkling-2-Mini \
+MODEL_DIR=/path/to/Inkling-2-Mini \
 PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env \
 GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
 NON_INTERACTIVE=1 ./launcher.sh
@@ -111,7 +109,7 @@ NON_INTERACTIVE=1 ./launcher.sh
 纯 AR 请选择 `nomtp-fp8kv-1x8K-text-only.env`。四卡使用 `4xT10` 下的同名
 profile，将 `TP_SIZE` 设为 `4`，并选择四张支持 PCIe P2P 的 GPU。
 
-该实验镜像使用 vLLM 上游模型实现和 lvb-s 的 SM75 移植。
+Inkling 支持将上游模型实现移植到 vLLM v0.34.0，并采用 lvb-s 的 SM75 适配。
 [官方权重](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
 [上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
 [社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)

@@ -34,7 +34,7 @@ DFlash2 草稿权重 [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/
 
 官方权重 [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 
-此路线使用 Inkling 镜像。DSpark/7 从官方权重目录自动加载 `mtp.safetensors`，草稿采用概率采样。
+DSpark/7 从官方权重目录自动加载 `mtp.safetensors`，草稿采用概率采样。
 
 | Profile | 上下文 | KV | 投机解码 | 消息 | GPU KV tokens |
 | --- | ---: | --- | --- | --- | ---: |

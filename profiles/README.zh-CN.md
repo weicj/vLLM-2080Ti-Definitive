@@ -13,7 +13,7 @@ Profile 按硬件、模型和权重格式分组。每个硬件/模型/权重目�
 - [4xT10](4xT10/README.zh-CN.md) 包含 `qwen38-27b/w8a16`、`qwen38-27b/w4a16` 和 `inkling-2-mini/official`。
 - [2x2080Ti](2x2080Ti/README.zh-CN.md) 列出待验证的 Docker profile。
 
-Inkling profile 使用 `VLLM_DOCKER_VARIANT=inkling` 构建和启动。
+Inkling 和 Qwen profiles 使用同一套 Docker 镜像。
 DSpark/7 路线使用 `SPECULATIVE_METHOD=dspark` 和 `SPECULATIVE_TOKENS=7`，
 从官方权重目录加载草稿权重。
 

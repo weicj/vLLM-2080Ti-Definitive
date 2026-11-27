@@ -66,8 +66,8 @@ T10s (TP=4).
 1. Run `./build.sh` in the 0.3.x checkout. The Docker build takes the Torch
    and CUDA stack from the upstream release image. The
    [image lock](PROJECT_RELEASE.env) pins the official linux/amd64 image by
-   digest. The build applies the SM75 GDN prefill patch and compiles FlashQLA
-   into the image.
+   digest. The build applies the SM75 patches, compiles FlashQLA, and includes
+   Inkling 2 Mini support in the same image used for Qwen.
 
    The Docker runtime requires Docker with NVIDIA Container Toolkit and a
    host driver compatible with CUDA 13.0. The image provides the Python,
@@ -108,14 +108,12 @@ for the dual T10 Qwen TurboQuant MTP text-image route.
 
 ### Inkling 2 Mini on SM75
 
-The Inkling image backports model support that landed on vLLM main after the
-v0.34.0 release. Build the image, then select the route with `PROFILE`. This
-example uses two T10s with PCIe P2P.
+Run `./build.sh` after updating to include Inkling 2 Mini support in the local
+image. Then select the model checkpoint and profile. This example uses two
+T10s with PCIe P2P.
 
 ```bash
-VLLM_DOCKER_VARIANT=inkling ./build.sh
-
-VLLM_DOCKER_VARIANT=inkling MODEL_DIR=/path/to/Inkling-2-Mini \
+MODEL_DIR=/path/to/Inkling-2-Mini \
 PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env \
 GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
 NON_INTERACTIVE=1 ./launcher.sh
@@ -125,8 +123,8 @@ For pure AR, select `nomtp-fp8kv-1x8K-text-only.env`. For four cards, select
 the corresponding `4xT10` profile, set `TP_SIZE=4`, and select four GPUs with
 PCIe P2P.
 
-The experimental image uses the upstream model implementation and the SM75
-port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
+Inkling support backports the upstream model implementation to vLLM v0.34.0
+and uses the SM75 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
 [Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
 [Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
 

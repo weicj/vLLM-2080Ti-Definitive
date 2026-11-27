@@ -34,7 +34,7 @@ cp -a docker/sm75 "$docker_context/docker/"
 cp -a tools/flashqla_sm75_patches "$docker_context/tools/"
 cp LICENSE "$docker_context/"
 "$VLLM_DOCKER_COMMAND" build \
-  --platform linux/amd64 --file docker/sm75/Dockerfile --target "$VLLM_DOCKER_VARIANT" \
+  --platform linux/amd64 --file docker/sm75/Dockerfile \
   --build-arg "BASE_IMAGE=$docker_base" --build-arg "UPSTREAM_VERSION=$DOCKER_VLLM_VERSION" \
   --build-arg "FORK_RELEASE=$FORK_RELEASE" --build-arg "MAX_JOBS=${MAX_JOBS:-2}" \
   --tag "$VLLM_DOCKER_IMAGE" "$docker_context" || fail "Container build failed."

@@ -17,7 +17,7 @@ Checkpoint [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-2
 
 Official checkpoint [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 
-These profiles use the Inkling Docker image. DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabilistic draft sampling.
+DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabilistic draft sampling.
 
 | Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens |
 | --- | ---: | --- | --- | --- | ---: |
