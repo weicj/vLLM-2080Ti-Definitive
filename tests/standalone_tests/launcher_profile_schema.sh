@@ -187,7 +187,7 @@ reset_spec_test_state
 SPECULATIVE_METHOD=dflash
 MAX_NUM_SEQS=1
 TP_SIZE=2
-apply_speculative_runtime_defaults
+VLLM_RUNTIME_BACKEND=native apply_speculative_runtime_defaults
 assert_eq dflash "$(effective_speculative_method)" "dflash method"
 assert_eq 7 "$(effective_speculative_tokens)" "dflash default tokens"
 assert_eq BLHNC "$VLLM_KV_CACHE_LAYOUT" "dflash target KV layout"

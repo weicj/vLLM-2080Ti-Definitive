@@ -139,6 +139,9 @@ Docker results alongside the 0.2.x measurements.
 
 ### Inkling 2 Mini on SM75
 
+Inkling 2 Mini support landed on vLLM main after the v0.34.0 release. The
+Inkling image backports it to the pinned base.
+
 Build the Inkling image and select it when launching the official checkpoint.
 Set the GPU indices and tensor parallel size for your host. This example uses
 two PCIe P2P-capable T10s and serves text with an 8,192-token context.
@@ -163,12 +166,12 @@ caching disabled. DSpark uses seven draft tokens.
 
 | GPUs | Prompt | AR prefill / decode (tok/s) | DSpark prefill / decode (tok/s) | Draft acceptance |
 | --- | --- | ---: | ---: | ---: |
-| 2×T10 | Prose | 3604.56 / 63.42 | 3041.60 / 191.44 | 73.5–82.7% |
-| 2×T10 | Code | 3586.87 / 63.19 | 3538.16 / 191.98 | 86.5–88.9% |
-| 2×T10 | Repetitive | 3639.81 / 62.72 | 3474.90 / 276.12 | 100% |
-| 4×T10 | Prose | 4307.50 / 76.62 | 4228.26 / 240.42 | 76.4–81.2% |
-| 4×T10 | Code | 4303.70 / 76.52 | 4210.75 / 251.36 | 86.5% |
-| 4×T10 | Repetitive | 4208.69 / 76.06 | 4127.62 / 355.44 | 100% |
+| 2×T10 | Prose | 3644.31 / 63.67 | 3556.14 / 175.24 | 76.4–81.2% |
+| 2×T10 | Code | 3615.24 / 63.40 | 3540.27 / 183.17 | 86.5% |
+| 2×T10 | Repetitive | 3673.90 / 62.98 | 3594.91 / 278.34 | 100% |
+| 4×T10 | Prose | 4314.14 / 77.71 | 4172.03 / 255.02 | 81.2–86.5% |
+| 4×T10 | Code | 4312.15 / 77.37 | 4184.09 / 251.59 | 86.5% |
+| 4×T10 | Repetitive | 4192.41 / 76.68 | 4089.48 / 353.55 | 78.6–100% |
 
 The experimental image uses the upstream model implementation and
 the SM75 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·

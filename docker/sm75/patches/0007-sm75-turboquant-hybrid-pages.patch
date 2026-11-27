@@ -1,0 +1,18 @@
+--- a/vllm/v1/attention/backends/turboquant_attn.py
++++ b/vllm/v1/attention/backends/turboquant_attn.py
+@@ -157,9 +157,15 @@
+     @classmethod
+     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
++        if current_platform.is_cuda() and current_platform.is_device_capability(75):
++            return (KVCacheLayout.LBNHC, KVCacheLayout.BLHNC)
+         return (KVCacheLayout.LBNHC,)
+
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
++        if current_platform.is_cuda() and current_platform.is_device_capability(75):
++            # The Triton kernels address tokens with the actual page strides.
++            # Keep padded GDN/TurboQuant pages intact instead of splitting them.
++            return [MultipleOf(16)]
+         return [16, 32, 64, 128]
+
+     @classmethod

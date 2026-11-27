@@ -56,9 +56,31 @@ docker_runtime_mount() {
 }
 
 docker_server_options() {
-  local draft file cache_dir gpu_uuids gpu uuid
+  local draft file cache_dir gpu_uuids gpu uuid layout spec_method
   local -a indices=() uuids=()
   docker_runtime_options || return 1
+  if [[ -z "${VLLM_KV_CACHE_LAYOUT:-}" ]]; then
+    spec_method=$(effective_speculative_method)
+    if is_docker_tp4_t10_qwen_profile &&
+       [[ "${KV_CACHE_DTYPE:-}" != turboquant_* || "$spec_method" != dflash ]]; then
+      # FlashInfer can split layer-contiguous hybrid KV pages.
+      layout=LBNHC
+    elif [[ "$spec_method" == dflash ]]; then
+      # Keep the target and draft page sizes independent.
+      layout=BLHNC
+    fi
+    if [[ -n "${layout:-}" ]]; then
+      DOCKER_RUNTIME_OPTIONS+=(--env "VLLM_KV_CACHE_LAYOUT=$layout")
+    fi
+  fi
+  if [[ ! -v VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC &&
+        "${NCCL_P2P_DISABLE:-0}" != 1 &&
+        "${CUSTOM_ALL_REDUCE_MODE:-}" != off &&
+        "${DISABLE_CUSTOM_ALL_REDUCE:-0}" != 1 ]] &&
+     is_docker_tp4_t10_qwen_profile && ! docker_t10_220k_prefix_cache &&
+     recommend_gpu_rank_order "$GPU_DEVICES" "$TP_SIZE" "${PP_SIZE:-1}" >/dev/null 2>&1; then
+    DOCKER_RUNTIME_OPTIONS+=(--env VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1)
+  fi
   IFS=, read -r -a indices <<<"$GPU_DEVICES"
   for gpu in "${indices[@]}"; do
     uuid=$(nvidia-smi --query-gpu=uuid --format=csv,noheader --id "$gpu") || return 1

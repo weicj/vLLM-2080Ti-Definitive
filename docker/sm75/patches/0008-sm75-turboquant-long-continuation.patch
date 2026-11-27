@@ -1,0 +1,34 @@
+--- a/vllm/v1/attention/backends/turboquant_attn.py
++++ b/vllm/v1/attention/backends/turboquant_attn.py
+@@ -353,6 +353,15 @@
+         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
+         # and benchmarks show no regression vs dynamic in eager mode).
+         vllm_config = get_current_vllm_config()
++        spec_config = vllm_config.speculative_config
++        scheduler_config = vllm_config.scheduler_config
++        self.use_flashinfer_dflash_verification = (
++            self.use_flashinfer_prefill
++            and spec_config is not None
++            and spec_config.use_dflash()
++            and scheduler_config.enable_chunked_prefill
++            and scheduler_config.max_num_batched_tokens > _CONTINUATION_DECODE_THRESHOLD
++        )
+         self.max_num_kv_splits = (
+             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+         )
+@@ -829,7 +838,14 @@
+                 # avoid O(cached_len) full-dequant per continuation.
+                 # For large continuations, fall back to _continuation_prefill.
+                 cached_len = seq_len - q_len
+-                if q_len <= _CONTINUATION_DECODE_THRESHOLD:
++                # For long DFlash verification, dequantize the prefix once and
++                # share it across all query tokens in FlashInfer.
++                use_decode_kernel = q_len <= _CONTINUATION_DECODE_THRESHOLD and not (
++                    self.use_flashinfer_dflash_verification
++                    and q_len > 1
++                    and cached_len >= 16_384
++                )
++                if use_decode_kernel:
+                     # Fast path: treat each query as a decode request
+                     # with incremental seq_lens for causal masking.
+                     # Slice from pre-built arange (no kernel launch)

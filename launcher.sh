@@ -1029,6 +1029,11 @@ normalize_custom_all_reduce_mode() {
 current_custom_all_reduce_label() {
   local mode
 
+  if docker_t10_220k_prefers_nccl; then
+    printf 'NCCL (2x220K prefix cache)\n'
+    return 0
+  fi
+
   if [[ -n "${CUSTOM_ALL_REDUCE_MODE:-}" ]]; then
     mode=$(normalize_custom_all_reduce_mode "$CUSTOM_ALL_REDUCE_MODE") || {
       printf 'invalid (%s)\n' "$CUSTOM_ALL_REDUCE_MODE"
@@ -1376,11 +1381,8 @@ apply_profile_overrides() {
     [[ -n "$key" ]] || continue
     config_key_has_override "$key" && continue
     value=$(read_profile_value "$file" "$key")
-    if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$file" == "$PROFILE_DIR"/4xT10/qwen27b/* &&
-          "$key" == GPU_UTIL && "$value" == 0.96 &&
-          "$file" != "$PROFILE_DIR"/4xT10/qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env ]]; then
-      # Leave room for runtime prefill workspaces after allocating the fixed KV cache.
-      value=0.94
+    if [[ "$key" == GPU_UTIL ]]; then
+      value=$(docker_profile_gpu_util "$file" "$value")
     fi
     printf -v "$key" '%s' "$value"
     export "$key"
@@ -1415,6 +1417,43 @@ is_docker_tp4_t10_qwen_profile() {
   local profile_file
   profile_file=$(resolve_profile_file) || return 1
   [[ "$profile_file" == "$PROFILE_DIR"/4xT10/qwen27b/* ]]
+}
+
+docker_t10_220k_prefix_cache() {
+  local profile_file=${1:-}
+  [[ "$VLLM_RUNTIME_BACKEND" == docker ]] || return 1
+  if [[ -z "$profile_file" ]]; then
+    profile_file=$(resolve_profile_file) || return 1
+  fi
+  [[ "$profile_file" == "$PROFILE_DIR"/4xT10/qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env &&
+     "$(current_prefix_cache_label)" == enabled ]]
+}
+
+docker_t10_220k_prefers_nccl() {
+  local mode=${CUSTOM_ALL_REDUCE_MODE:-}
+  [[ ! -v VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC &&
+     "${mode,,}" != off &&
+     "${DISABLE_CUSTOM_ALL_REDUCE:-0}" != 1 ]] &&
+    is_docker_tp4_t10_qwen_profile && docker_t10_220k_prefix_cache
+}
+
+docker_profile_gpu_util() {
+  local file=$1 value=$2
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$file" == "$PROFILE_DIR"/4xT10/qwen27b/* ]]; then
+    case "${file#"$PROFILE_DIR"/4xT10/qwen27b/}:$value" in
+      w8a16/dflash2-fp16kv-1x240K-text-image.env:0.96|w8a16/dflash2-fp16kv-1x240K-text-image.env:0.965)
+        value=0.96
+        [[ "$(current_prefix_cache_label)" == enabled ]] && value=0.965
+        ;;
+      w8a16/dflash2-fp8kv-2x220K-text-only.env:0.9[46]|w8a16/dflash2-fp8kv-2x220K-text-only.env:0.948)
+        value=0.94
+        docker_t10_220k_prefix_cache "$file" && value=0.948
+        ;;
+      # Leave space for prefill workspaces beside the fixed KV cache.
+      *:0.96) value=0.94 ;;
+    esac
+  fi
+  printf '%s\n' "$value"
 }
 
 load_manager_state() {
@@ -1802,9 +1841,9 @@ current_tool_calling_label() {
 }
 
 current_prefix_cache_label() {
-  if [[ "${DISABLE_PREFIX_CACHING:-0}" == "1" ]]; then
+  if [[ "$(normalize_bool "${DISABLE_PREFIX_CACHING:-0}")" == "1" ]]; then
     printf 'disabled'
-  elif [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]]; then
+  elif [[ "$(normalize_bool "${ENABLE_PREFIX_CACHING:-1}")" == "1" ]]; then
     printf 'enabled'
   else
     printf 'auto'
@@ -4827,7 +4866,9 @@ apply_speculative_runtime_defaults() {
         MTP_K=0
         export MTP_K
       fi
-      set_derived_default VLLM_KV_CACHE_LAYOUT BLHNC
+      if [[ "$VLLM_RUNTIME_BACKEND" == native ]]; then
+        set_derived_default VLLM_KV_CACHE_LAYOUT BLHNC
+      fi
       set_derived_default SPECULATIVE_ATTENTION_BACKEND TRITON_ATTN
       set_derived_default SPECULATIVE_KV_CACHE_DTYPE float16
       set_derived_default PER_REQUEST_SPEC_DECODE_METRICS detailed
@@ -4873,17 +4914,8 @@ set_sm75_runtime_env() {
     export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
     export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
     export PYTHONUNBUFFERED=1
-    if is_docker_tp4_t10_qwen_profile; then
-      if [[ -z "${PYTORCH_ALLOC_CONF:-}" ]]; then
-        export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-      fi
-      if [[ ! -v VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC &&
-            "${NCCL_P2P_DISABLE:-0}" != 1 &&
-            "${CUSTOM_ALL_REDUCE_MODE:-}" != off &&
-            "${DISABLE_CUSTOM_ALL_REDUCE:-0}" != 1 ]] &&
-         recommend_gpu_rank_order "$GPU_DEVICES" "$TP_SIZE" "${PP_SIZE:-1}" >/dev/null 2>&1; then
-        export VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1
-      fi
+    if is_docker_tp4_t10_qwen_profile && [[ -z "${PYTORCH_ALLOC_CONF:-}" ]]; then
+      export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     fi
     if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
       export PYTHONHASHSEED=0
@@ -5071,6 +5103,10 @@ build_args() {
     custom_all_reduce_mode=$(normalize_custom_all_reduce_mode "$CUSTOM_ALL_REDUCE_MODE") || return 1
     [[ "$custom_all_reduce_mode" == "off" ]] && VLLM_ARGS+=(--disable-custom-all-reduce)
   elif [[ "${DISABLE_CUSTOM_ALL_REDUCE:-0}" == "1" ]]; then
+    VLLM_ARGS+=(--disable-custom-all-reduce)
+  fi
+  if docker_t10_220k_prefers_nccl; then
+    # Keep enough memory for prefill with the 2x220K prefix cache active.
     VLLM_ARGS+=(--disable-custom-all-reduce)
   fi
   [[ "${DISABLE_LOG_STATS:-0}" == "1" ]] && VLLM_ARGS+=(--disable-log-stats)
@@ -6255,12 +6291,12 @@ prepare_runtime_defaults() {
   SERVICE_SCOPE=${SERVICE_SCOPE:-local}
   normalize_message_type_defaults || return 1
   derive_yarn_overrides || return 1
-  if is_docker_tp4_t10_qwen_profile; then
-    # FlashInfer needs layer-contiguous pages to split the hybrid KV blocks.
-    set_derived_default VLLM_KV_CACHE_LAYOUT LBNHC
-  fi
   apply_speculative_runtime_defaults
   apply_prefix_cache_defaults
+  if is_docker_tp4_t10_qwen_profile && ! config_key_has_override GPU_UTIL; then
+    # Refresh saved defaults when Prefix Cache was changed in the menu.
+    GPU_UTIL=$(docker_profile_gpu_util "$(resolve_profile_file)" "$GPU_UTIL")
+  fi
   validate_disk_kv_cache_config || return 1
   ENABLE_AUTO_TOOL_CHOICE=$(normalize_bool "${ENABLE_AUTO_TOOL_CHOICE:-0}")
   apply_family_reasoning_defaults

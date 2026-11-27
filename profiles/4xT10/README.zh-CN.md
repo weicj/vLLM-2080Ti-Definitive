@@ -34,13 +34,34 @@
 |---|---:|---:|---:|
 | `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 268,344 | 1366.68 / 198.11 | 1424.51 / 193.17 |
 | `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 240,963 | 1583.47 / 191.70 | 1464.82 / 189.57 |
-| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 445,609 | 1582.13 / 197.22 | 1443.78 / 196.13 |
+| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 445,609 | 1578.86 / 195.56 | 1447.58 / 195.52 |
+| `qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env` | 345,301 | 1578.10 / 121.59 | 1454.63 / 120.15 |
 | `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
+| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 360,762 | 1555.97 / 226.31 | 1447.28 / 223.09 |
+| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 594,890 | 1552.57 / 228.18 | 1417.49 / 227.04 |
+| `qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env` | 956,153 | 1517.36 / 304.25 | 1424.45 / 275.50 |
+| `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 451,426 | 1557.56 / 143.11 | 1437.54 / 137.96 |
+| `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 853,104 | 1547.72 / 141.89 | 1412.98 / 124.51 |
 
-以上路线使用固定 KV 分配、LBNHC 布局、FlashInfer PCIe IPC all-reduce 和 launcher
-的 `fast` 模式。240K 路线采用 0.96 的 GPU 显存利用率，其余路线采用 0.94。
-240K 和 2×220K DFlash2 路线仅为解码捕获 CUDA Graph。两条图文路线均通过图卡测试，
-识别出蓝色方块和橙色圆形。
+吞吐测试使用固定 KV 分配、LBNHC 布局（4×220K 除外）、FlashInfer PCIe IPC
+all-reduce 和 launcher 的 `fast` 模式。测试期间关闭 Prefix Cache，240K 路线采用
+0.96 的 GPU 显存利用率，其余 LBNHC 路线采用 0.94。240K 和 2×220K DFlash2
+路线仅为解码捕获 CUDA Graph。五条图文路线均在图卡测试中识别出蓝色方块和橙色圆形。
+
+三条使用 FP16 或 FP8 KV 的 262K DFlash2 路线，GPU KV token 数比原生运行时
+实测少 10.6%–22.1%。分配的 KV 缓存仍可容纳各路线配置的上下文长度与并发数。
+
+开启 Prefix Cache 时，launcher 为 240K 路线使用 `GPU_UTIL=0.965`，为 2×220K
+路线使用 `GPU_UTIL=0.948` 和基于 PCIe P2P 的 NCCL。实测分别报告 242,682 和
+442,424 个 GPU KV tokens。重复请求命中 4,096 个输入 token 中的 3,328 个，两次
+生成 token ID 一致。2×220K 路线在开启缓存时还跑完两路并发 32K/512。
+
+4×220K 路线使用 BLHNC 页布局与 `GPU_UTIL=0.93`。在 SM75 上，
+FlashInfer 会在 DFlash 验证 token 之间复用解量化后的前缀。
+四路同时发送的 32K/512 请求均完整生成，输入与输出 token 数符合测试口径。
+
+NVFP4 权重的部分层采用 FP8 权重。镜像在 Turing 上对这些层和 NVFP4 投影均使用
+Marlin。FP16 KV 路径使用单位缩放因子。
 
 ## 说明
 

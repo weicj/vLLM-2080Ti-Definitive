@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+VLLM_RUNTIME_BACKEND=native
 # shellcheck source=../../launcher.sh
 source "$ROOT/launcher.sh"
 
