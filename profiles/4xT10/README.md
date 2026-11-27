@@ -32,13 +32,13 @@ tokens. Throughput uses the same text request protocol as the tables above.
 
 | Profile | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
 |---|---:|---:|---:|
-| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 268,344 | 1366.68 / 198.11 | 1424.51 / 193.17 |
-| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 240,963 | 1583.47 / 191.70 | 1464.82 / 189.57 |
-| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 445,609 | 1578.86 / 195.56 | 1447.58 / 195.52 |
+| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 331,998 | 1583.68 / 211.09 | 1466.17 / 210.14 |
+| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 293,387 | 1584.73 / 209.94 | 1443.93 / 218.32 |
+| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 515,625 | 1585.14 / 211.10 | 1344.57 / 209.08 |
 | `qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env` | 345,301 | 1578.10 / 121.59 | 1454.63 / 120.15 |
 | `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
-| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 360,762 | 1555.97 / 226.31 | 1447.28 / 223.09 |
-| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 594,890 | 1552.57 / 228.18 | 1417.49 / 227.04 |
+| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 443,917 | 1559.39 / 249.82 | 1443.68 / 246.30 |
+| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 703,905 | 1561.66 / 247.63 | 1428.82 / 243.43 |
 | `qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env` | 956,153 | 1517.36 / 304.25 | 1424.45 / 275.50 |
 | `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 451,426 | 1557.56 / 143.11 | 1437.54 / 137.96 |
 | `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 853,104 | 1547.72 / 141.89 | 1412.98 / 124.51 |
@@ -50,13 +50,12 @@ and 0.94 for the other LBNHC routes. The 240K and 2×220K DFlash2 routes
 capture CUDA graphs only for decode. All five multimodal routes identified
 the blue square and orange circle in the image smoke test.
 
-The three 262K DFlash2 routes with FP16 or FP8 KV report 10.6–22.1% fewer
-GPU KV tokens than the native measurements. Their allocated pools cover the
-configured context and concurrency.
+For DFlash2 with LBNHC pages, the image groups Qwen's target attention and
+recurrent layers without padding them to the draft layer count.
 
 With Prefix Cache enabled, the launcher uses `GPU_UTIL=0.965` for 240K and
 `GPU_UTIL=0.948` with NCCL over PCIe P2P for 2×220K. Those runs reported
-242,682 and 442,424 GPU KV tokens, respectively. Repeated requests hit 3,328 of
+295,117 and 508,888 GPU KV tokens, respectively. Repeated requests hit 3,328 of
 4,096 prompt tokens and generated identical token IDs. The 2×220K route
 also completed two simultaneous 32K/512 requests with the cache enabled.
 

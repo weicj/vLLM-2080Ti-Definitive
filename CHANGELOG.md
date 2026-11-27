@@ -15,6 +15,8 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Validates the shipped 4xT10 throughput profiles on the Docker runtime.
   Uses BLHNC pages and batched DFlash verification for TurboQuant and unit
   cache scales for unquantized compressed-tensors KV.
+- Groups TP4 Qwen DFlash2 target layers independently of the draft layer
+  count to recover usable KV capacity on SM75.
 - Adds an experimental Inkling 2 Mini Docker variant with the upstream model
   implementation and lvb-s's SM75 port. Tests the official checkpoint with
   autoregressive decoding and DSpark/7 on 2xT10 and 4xT10 over PCIe P2P.
