@@ -385,6 +385,15 @@
 +    )
 --- a/vllm/models/inkling2/processing.py
 +++ b/vllm/models/inkling2/processing.py
+@@ -2,7 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Inkling2 image preprocessing and vLLM multimodal processing.
+
+-The checkpoint's chat template emits `<|content_image|><|unused_200054|>` per
++The vLLM Inkling renderer emits `<|content_image|>` per
+ image. The processor replaces that pair with `<|content_image|>` followed by
+ `rows * cols` copies of `IMAGE_PAD_ID`; only the pad positions receive vision
+ embeddings.
 @@ -21,7 +21,7 @@
  from PIL import Image
  from transformers.feature_extraction_utils import BatchFeature
@@ -394,6 +403,65 @@
  from vllm.inputs import MultiModalDataDict
  from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
  from vllm.multimodal.media import MediaWithBytes
+@@ -45,8 +45,8 @@
+ IMAGE_PLACEHOLDER = "<|content_image|>"
+ # <|unused_200054|>: one per decoder image token, overwritten by embeddings.
+ IMAGE_PAD_ID = 200054
+-# What the chat template emits per image.
+-IMAGE_TARGET = [IMAGE_MARKER_ID, IMAGE_PAD_ID]
++# What the vLLM Inkling renderer emits per image.
++IMAGE_TARGET = [IMAGE_MARKER_ID]
+
+ PATCH_SIZE = 40
+ # Dummy (profiling) images are at most this many pixels per side.
+@@ -167,19 +167,6 @@
+     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+         return IMAGE_PLACEHOLDER * mm_counts.get("image", 0)
+
+-    def get_dummy_processor_inputs(
+-        self,
+-        seq_len: int,
+-        mm_counts: Mapping[str, int],
+-        mm_options: Mapping[str, MultiModalDummyOptions],
+-    ) -> ProcessorInputs:
+-        # Build marker ids directly: the tokenizer may not parse special text.
+-        mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+-        return ProcessorInputs(
+-            prompt=IMAGE_TARGET * mm_counts.get("image", 0),
+-            mm_data_items=self.info.parse_mm_data(mm_data, validate=False),
+-        )
+-
+     def get_dummy_mm_data(
+         self,
+         seq_len: int,
+@@ -202,12 +189,25 @@
+     # Prompts arrive as token ids and the update target is a single token id.
+     requires_tokenizer = False
+
++    def get_dummy_inputs(
++        self,
++        seq_len: int,
++        mm_counts: Mapping[str, int],
++        mm_options: Mapping[str, MultiModalDummyOptions],
++    ) -> ProcessorInputs:
++        # Build marker ids directly: the tokenizer may not parse special text.
++        mm_data = self.dummy_inputs.get_dummy_mm_data(seq_len, mm_counts, mm_options)
++        return ProcessorInputs(
++            prompt=IMAGE_TARGET * mm_counts.get("image", 0),
++            mm_data_items=self.info.parse_mm_data(mm_data, validate=False),
++        )
++
+     def _apply_hf_processor_main(
+         self,
+         mm_items: MultiModalDataItems,
+-        hf_processor_mm_kwargs: Mapping[str, object],
++        hf_kwargs: Mapping[str, object],
+     ) -> BatchFeature:
+-        _, passthrough_data = self._get_hf_mm_data(mm_items)
++        _, _, passthrough_data = self._get_hf_mm_inputs(mm_items, hf_kwargs)
+         processed = BatchFeature(dict(passthrough_data))
+         images = mm_items.get("image")
+         if isinstance(images, ImageProcessorItems) and images.get_count():
 --- a/vllm/parser/inkling.py
 +++ b/vllm/parser/inkling.py
 @@ -29,7 +29,18 @@

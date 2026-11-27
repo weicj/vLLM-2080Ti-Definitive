@@ -114,14 +114,16 @@ T10s with PCIe P2P.
 
 ```bash
 MODEL_DIR=/path/to/Inkling-2-Mini \
-PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env \
+PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env \
 GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-For pure AR, select `nomtp-fp8kv-1x8K-text-only.env`. For four cards, select
-the corresponding `4xT10` profile, set `TP_SIZE=4`, and select four GPUs with
-PCIe P2P.
+The example supports two concurrent multimodal requests of 12,000 tokens each.
+The four-card profile supports two requests of 34,000 tokens each. Set
+`TP_SIZE=4` and select four GPUs with PCIe P2P for that profile. The guides also
+list the text-only AR and DSpark/7 profiles. [2×T10](profiles/2xT10/README.md#inkling-2-mini) ·
+[4×T10](profiles/4xT10/README.md#inkling-2-mini)
 
 Inkling support backports the upstream model implementation to vLLM v0.34.0
 and uses the SM75 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·

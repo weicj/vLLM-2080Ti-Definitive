@@ -54,6 +54,7 @@ errors=0
 
 expected_profiles=(
   2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
+  2xT10/inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env
   2xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
   2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env
   2xT10/qwen38-27b/w4a16/mtp3-tq4nc-2x220K-text-only.env
@@ -73,6 +74,7 @@ expected_profiles=(
   2x2080Ti/qwen36-35b/w8a16/nomtp-fp16kv-1x262K-text-only.env
   2x2080Ti/qwen36-35b/w8a16/nomtp-fp8kv-1x221K-text-image.env
   4xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
+  4xT10/inkling-2-mini/official/dspark7-fp8kv-2x34K-text-image.env
   4xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
   4xT10/qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env
   4xT10/qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env

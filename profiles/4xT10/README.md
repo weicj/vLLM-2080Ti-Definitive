@@ -47,6 +47,18 @@ DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabili
 | Code | 4312.15 / 77.37 | 4184.09 / 251.59 | 86.5% |
 | Repetitive | 4192.41 / 76.68 | 4089.48 / 353.55 | 78.6–100% |
 
+### DSpark/7 with text and images
+
+| Profile | Concurrent context | GPU KV tokens | KV memory per GPU | 4K/128 prefill / decode | 32K/512 prefill / decode |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [inkling-2-mini/official/dspark7-fp8kv-2x34K-text-image.env](inkling-2-mini/official/dspark7-fp8kv-2x34K-text-image.env) | 2 × 34,000 | 85,298 | 8.22 GiB | 3706.03 / 108.07 | 3745.18 / 117.89 |
+
+The capacity test sent two simultaneous requests, each with one 480 × 480 image, 33,872 input tokens including the image and chat framing, and 128 output tokens. Server metrics showed both requests running simultaneously with zero preemptions. A separate two-image request identified the blue square, orange circle, green square, and purple circle.
+
+The image runs used the default Docker build, FP8 KV, fast mode, and NCCL over PCIe P2P. Vision memory profiling was enabled and Prefix Cache was disabled. GPU memory utilization was 0.94, with a 2,048-token batch limit. Throughput is in tok/s for one streamed multimodal request at a time. The 4K/128 figures are medians of three requests and 32K/512 used one request. vLLM calculates equivalent KV capacity at the configured context and reported 2.51 full-context requests at startup.
+
+With a 1,024-token batch limit, four 34,000-token requests completed. Server metrics showed at most three running simultaneously, with the last request waiting for scheduling.
+
 ## Capacity and feature checks
 
 The Qwen throughput runs use fixed KV allocation, the LBNHC layout except for
@@ -78,5 +90,5 @@ The 2×262K NVFP4 DFlash2 FP8 KV route completed two concurrent 32K/512 requests
 ## Test version and environment
 
 - 2026-11-27, vLLM 2080 Ti Definitive Edition `v0.3.0.dev0`. The image uses official vLLM `v0.34.0`, CUDA 13.0, PyTorch `2.14.0+cu130`, and NVIDIA driver 610.43.03.
-- 4 Tesla T10 GPUs with 16 GiB each, TP4, and PCIe P2P within one NUMA node. Tests used `fast` mode and a 2,048-token batch limit. Inkling used NCCL PCIe P2P.
-- Throughput is in tok/s. After warmup, the tests sent one text-only request at a time with Prefix Cache disabled. 4K/128 is the median of three requests. The Qwen 32K/512 lane ran one request to completion. The two lanes used exactly 4,096 input and 128 output tokens, or 32,768 input and 512 output tokens. Image understanding was checked separately for multimodal profiles.
+- 4 Tesla T10 GPUs with 16 GiB each, TP4, and PCIe P2P within one NUMA node. Tests used `fast` mode. Text-only throughput runs used a 2,048-token batch limit. Inkling used NCCL PCIe P2P.
+- Throughput is in tok/s. For the text-only throughput tables, Prefix Cache was disabled and requests ran one at a time after warmup. 4K/128 is the median of three requests. The Qwen 32K/512 lane ran one request to completion. The two lanes used exactly 4,096 input and 128 output tokens, or 32,768 input and 512 output tokens. Image understanding was checked separately for multimodal profiles.

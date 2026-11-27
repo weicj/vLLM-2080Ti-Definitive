@@ -101,13 +101,15 @@ profile。下面的示例使用支持 PCIe P2P 的两张 T10。
 
 ```bash
 MODEL_DIR=/path/to/Inkling-2-Mini \
-PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env \
+PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env \
 GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-纯 AR 请选择 `nomtp-fp8kv-1x8K-text-only.env`。四卡使用 `4xT10` 下的同名
-profile，将 `TP_SIZE` 设为 `4`，并选择四张支持 PCIe P2P 的 GPU。
+上述图文 profile 支持两路各 12,000 token。四卡图文 profile 支持两路各 34,000 token，
+将 `TP_SIZE` 设为 `4` 并选择四张支持 PCIe P2P 的 GPU。纯文本 AR 和 DSpark/7
+配置见各硬件的 profile 指南。[2×T10](profiles/2xT10/README.zh-CN.md#inkling-2-mini) ·
+[4×T10](profiles/4xT10/README.zh-CN.md#inkling-2-mini)
 
 Inkling 支持将上游模型实现移植到 vLLM v0.34.0，并采用 lvb-s 的 SM75 适配。
 [官方权重](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·

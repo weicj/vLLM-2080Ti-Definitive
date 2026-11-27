@@ -21,6 +21,9 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
   upstream model implementation and lvb-s's SM75 port. Adds pure AR and
   DSpark/7 profiles validated with the official checkpoint on 2xT10 and 4xT10
   over PCIe P2P.
+- Adapts Inkling 2 Mini image preprocessing and vision profiling to vLLM
+  v0.34.0. Validates DSpark/7 with FP8 KV and two concurrent image requests
+  at 12,000 tokens per request on 2xT10 and 34,000 on 4xT10.
 - Renames the Qwen3.8-27B and Qwen3.6-35B profile directories to `qwen38-27b`
   and `qwen36-35b`. The launcher resolves the previous paths. The hardware
   guides report the current Docker measurements and test environment.
