@@ -53,33 +53,37 @@ total=0
 errors=0
 
 expected_profiles=(
-  2xT10/qwen27b/w4a16/mtp3-fp8kv-1x262K-text-only.env
-  2xT10/qwen27b/w4a16/mtp3-tq4nc-2x220K-text-only.env
-  2xT10/qwen27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env
-  2xT10/qwen27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env
-  2x2080Ti/qwen27b/w8a16/nomtp-fp16kv-1x121K-text-image.env
-  2x2080Ti/qwen27b/w8a16/nomtp-fp16kv-1x176K-text-only.env
-  2x2080Ti/qwen27b/w8a16/mtp4-fp16kv-1x148K-text-only.env
-  2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x186K-text-image.env
-  2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env
-  2x2080Ti/qwen27b/w8a16/yarn-fp8kv-1x338K-text-only.env
-  2x2080Ti/qwen27b/w4a16/dflash2-fp8kv-1x262K-text-image.env
-  2x2080Ti/qwen27b/w4a16/yarn-fp8kv-1x524K-text-only.env
-  2x2080Ti/qwen27b/w4a16/mtp4-fp8kv-2x229K-text-only.env
-  2x2080Ti/qwen27b/w4a16/dflash-fp8kv-2x176K-text-only.env
-  2x2080Ti/qwen27b/w4a16/mtp4-tq4nc-3x262K-text-only.env
+  2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
+  2xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
+  2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env
+  2xT10/qwen38-27b/w4a16/mtp3-tq4nc-2x220K-text-only.env
+  2xT10/qwen38-27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env
+  2xT10/qwen38-27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env
+  2x2080Ti/qwen38-27b/w8a16/nomtp-fp16kv-1x121K-text-image.env
+  2x2080Ti/qwen38-27b/w8a16/nomtp-fp16kv-1x176K-text-only.env
+  2x2080Ti/qwen38-27b/w8a16/mtp4-fp16kv-1x148K-text-only.env
+  2x2080Ti/qwen38-27b/w8a16/mtp4-fp8kv-1x186K-text-image.env
+  2x2080Ti/qwen38-27b/w8a16/mtp4-fp8kv-1x262K-text-only.env
+  2x2080Ti/qwen38-27b/w8a16/yarn-fp8kv-1x338K-text-only.env
+  2x2080Ti/qwen38-27b/w4a16/dflash2-fp8kv-1x262K-text-image.env
+  2x2080Ti/qwen38-27b/w4a16/yarn-fp8kv-1x524K-text-only.env
+  2x2080Ti/qwen38-27b/w4a16/mtp4-fp8kv-2x229K-text-only.env
+  2x2080Ti/qwen38-27b/w4a16/dflash-fp8kv-2x176K-text-only.env
+  2x2080Ti/qwen38-27b/w4a16/mtp4-tq4nc-3x262K-text-only.env
   2x2080Ti/qwen35b/w8a16/nomtp-fp16kv-1x262K-text-only.env
   2x2080Ti/qwen35b/w8a16/nomtp-fp8kv-1x221K-text-image.env
-  4xT10/qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env
-  4xT10/qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env
-  4xT10/qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env
-  4xT10/qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env
-  4xT10/qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env
-  4xT10/qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env
-  4xT10/qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env
-  4xT10/qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env
-  4xT10/qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env
-  4xT10/qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env
+  4xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
+  4xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
+  4xT10/qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env
+  4xT10/qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env
+  4xT10/qwen38-27b/w4a16/dflash2-fp8kv-2x262K-text-only.env
+  4xT10/qwen38-27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env
+  4xT10/qwen38-27b/w4a16/mtp4-fp8kv-2x262K-text-image.env
+  4xT10/qwen38-27b/w8a16/dflash2-fp16kv-1x240K-text-image.env
+  4xT10/qwen38-27b/w8a16/dflash2-fp16kv-1x262K-text-only.env
+  4xT10/qwen38-27b/w8a16/dflash2-fp8kv-2x220K-text-only.env
+  4xT10/qwen38-27b/w8a16/mtp4-fp8kv-2x262K-text-image.env
+  4xT10/qwen38-27b/w8a16/mtp4-fp16kv-1x262K-text-image.env
 )
 mapfile -t expected_profiles < <(printf '%s\n' "${expected_profiles[@]}" | sort)
 
@@ -177,6 +181,11 @@ while IFS= read -r -d '' file; do
   if [[ "$profile_name" == dflash* && "$speculative_method" != dflash ]]; then
     profile_error "$rel" "dflash filename requires SPECULATIVE_METHOD=dflash"
   fi
+  if [[ "$profile_name" =~ ^dspark([1-9][0-9]*)- ]]; then
+    if [[ "$speculative_method" != dspark || "$speculative_tokens" != "${BASH_REMATCH[1]}" ]]; then
+      profile_error "$rel" "DSpark filename must match SPECULATIVE_METHOD and SPECULATIVE_TOKENS"
+    fi
+  fi
   if [[ "$profile_name" =~ -([1-9][0-9]*)x[0-9]+[kK]- ]]; then
     expected_seqs=${BASH_REMATCH[1]}
     [[ "$expected_seqs" == "$(read_profile_value "$file" MAX_NUM_SEQS)" ]] || \
@@ -206,12 +215,15 @@ while IFS= read -r -d '' file; do
       [[ "$speculative_tokens" == 0 ]] || \
         profile_error "$rel" "SPECULATIVE_METHOD=none requires SPECULATIVE_TOKENS=0"
       ;;
-    mtp|dflash)
+    mtp|dflash|dspark)
       [[ "$speculative_tokens" =~ ^[1-9][0-9]*$ ]] || \
         profile_error "$rel" "$speculative_method requires positive SPECULATIVE_TOKENS"
+      if [[ "$speculative_method" == dspark && "$(read_profile_value "$file" MODEL_FAMILY)" != inkling2 ]]; then
+        profile_error "$rel" "SPECULATIVE_METHOD=dspark requires MODEL_FAMILY=inkling2"
+      fi
       ;;
     *)
-      profile_error "$rel" "SPECULATIVE_METHOD must be none, mtp, or dflash"
+      profile_error "$rel" "SPECULATIVE_METHOD must be none, mtp, dflash, or dspark"
       ;;
   esac
 

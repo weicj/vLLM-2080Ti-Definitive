@@ -17,13 +17,9 @@ based on upstream vLLM; retain both the upstream license and attribution to
 For usage feedback, feature requests, and community discussion, join the
 [Discord community](https://discord.gg/VFqVVySdMS).
 
-![Live single-request throughput demo](docs/assets/vllmspeed_dflash.gif)
-
 Current development version is `v0.3.0.dev0` on `vllm-2080ti-definitive-0.3.x`.
 The Docker runtime uses the official [vLLM v0.34.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0).
-The native runtime comes from v0.2.2-post3. Each hardware profile guide
-records the runtime version used for its benchmark.
-[v0.2.2-post3 release](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)
+The hardware profile guides record the version, environment, and results of the current benchmarks.
 
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
@@ -46,11 +42,6 @@ for serious local 27B and 35B-class serving rather than only small-model use.
 The fork turns those hardware properties into a usable serving stack through
 Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph support.
 
-The supported hardware families also include two 16 GiB Tesla T10 GPUs over
-PCIe, with validated TP=2 Qwen 27B routes. The four-GPU Tesla T10 profiles
-target TP=4 serving; routes with a noted image-semantic failure remain explicitly
-marked as candidates.
-
 ## 🧩 Support Status
 
 The native build targets Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. For CUDA 12.8, PyTorch 2.11, older kernels, or GCC 12/13/14, refer to the `0.1.x` line, which is no longer actively maintained.
@@ -58,29 +49,17 @@ The native build targets Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++
 Supported model routes and their measurements are listed in the corresponding
 hardware profile guides.
 
-The launcher supports TP, PP, and mixed TP/PP inference; validated layouts
-include two RTX 2080 Ti GPUs with TP=2, two Tesla T10 GPUs with TP=2, and four
-Tesla T10 GPUs with TP=4.
+The launcher supports TP, PP, and mixed TP/PP inference. The 0.3.x Docker
+runtime was validated with Qwen and Inkling on two T10s (TP=2) and four
+T10s (TP=4).
 
-## 🧪 Tested Model Checkpoints
+## 🧪 Validated Models And Profiles
 
-Current tested model and weight routes:
-
-| Model route | Weight route | Model card | Recommended use | Profile path |
-| --- | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | High-precision single-request inference | `qwen27b/w8a16` |
-| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | Long-context concurrent inference | `qwen27b/w4a16` |
-| Qwen3.8 27B | INT4 (W4A16) | [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) | 2xT10 MTP3 serving | `qwen27b/w4a16` |
-| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | Fast personal inference | `qwen35b/w8a16` |
-
-## ⚡ Highlights
-
-| Hardware | Weight | Context / KV | 4K Prompt decode | 32K Prompt decode |
-| --- | --- | --- | ---: | ---: |
-| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 KV | **220.84 tok/s** | **209.35 tok/s** |
-| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 KV | **191.89 tok/s** | **189.38 tok/s** |
-
-Both rows are single-request tests using DFlash2 (default K=7) and synthetic text inputs with high speculative-hit rates. Real-task throughput depends on draft acceptance and may not reach these figures.
+| Hardware | Model | Weights | Profile guide |
+| --- | --- | --- | --- |
+| 2×T10 | Qwen3.8-27B | INT4 (W4A16) | [Qwen3.8-27B-INT4](profiles/2xT10/README.md#qwen38-27b-int4) |
+| 4×T10 | Qwen3.8-27B | FP8 (W8A16), NVFP4 (W4A16) | [FP8](profiles/4xT10/README.md#qwen38-27b-fp8) · [NVFP4](profiles/4xT10/README.md#qwen38-27b-nvfp4) |
+| 2×T10, 4×T10 | Inkling 2 Mini | Official checkpoint | [2×T10 AR and DSpark/7](profiles/2xT10/README.md#inkling-2-mini) · [4×T10 AR and DSpark/7](profiles/4xT10/README.md#inkling-2-mini) |
 
 ## 🚀 Build And Launch
 
@@ -111,14 +90,12 @@ profile, configures GPU and TP/PP topology, chooses the launch mode and network
 settings, starts the service with health and smoke checks, and stops a running
 service.
 
-![launcher.sh interactive main menu](docs/assets/launcher-main-menu.png)
-
 For automated deployment, pass the configuration non-interactively:
 
 ```bash
-MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env \
-MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
+MODEL_DIR=/path/to/Qwen3.8-27B-INT4 \
+PROFILE=2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env \
+MODE=fast GPU_DEVICES=0,1 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
@@ -129,62 +106,37 @@ The Docker launcher uses the same local checkpoint paths, profile files, GPU
 order, and service settings. It uses upstream scheduling and fast-mode graph
 defaults, with PIECEWISE graphs for speculative decoding in normal mode and
 for the dual T10 Qwen TurboQuant MTP text-image route. The server-wide
-thinking budget and the 0.2.x prefill barrier are
-available through the native runtime.
-
-The Docker runtime is experimental on SM75. The T10 profile guides record
-Docker results alongside the 0.2.x measurements.
-[2xT10 profile results](profiles/2xT10/README.md#03x-docker-validation) ·
-[4xT10 profile results](profiles/4xT10/README.md#03x-docker-validation)
+thinking budget and the prefill barrier are available through the native runtime.
 
 ### Inkling 2 Mini on SM75
 
-Inkling 2 Mini support landed on vLLM main after the v0.34.0 release. The
-Inkling image backports it to the pinned base.
-
-Build the Inkling image and select it when launching the official checkpoint.
-Set the GPU indices and tensor parallel size for your host. This example uses
-two PCIe P2P-capable T10s and serves text with an 8,192-token context.
+The Inkling image backports model support that landed on vLLM main after the
+v0.34.0 release. Build the image, then select the route with `PROFILE`. This
+example uses two T10s with PCIe P2P.
 
 ```bash
 VLLM_DOCKER_VARIANT=inkling ./build.sh
 
 VLLM_DOCKER_VARIANT=inkling MODEL_DIR=/path/to/Inkling-2-Mini \
-GPU_DEVICES=0,1 TP_SIZE=2 MAX_MODEL_LEN=8192 GPU_UTIL=0.94 \
-KV_CACHE_DTYPE=fp8 MESSAGE_TYPE=text-only NCCL_P2P_DISABLE=0 \
-DISABLE_PREFIX_CACHING=1 DISABLE_LOG_STATS=0 NON_INTERACTIVE=1 ./launcher.sh
+PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env \
+GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
+NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-Set `SPECULATIVE_CONFIG='{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'`
-on the launcher command to load `mtp.safetensors` from the official model
-directory.
+For pure AR, select `nomtp-fp8kv-1x8K-text-only.env`. For four cards, select
+the corresponding `4xT10` profile, set `TP_SIZE=4`, and select four GPUs with
+PCIe P2P.
 
-The 2×T10 and 4×T10 tests used NCCL PCIe P2P and FP8 KV at
-an 8,192-token context limit. Each row reports single-request medians from
-three samples of exactly 4,096 input and 128 output tokens with prefix
-caching disabled. DSpark uses seven draft tokens.
-
-| GPUs | Prompt | AR prefill / decode (tok/s) | DSpark prefill / decode (tok/s) | Draft acceptance |
-| --- | --- | ---: | ---: | ---: |
-| 2×T10 | Prose | 3644.31 / 63.67 | 3556.14 / 175.24 | 76.4–81.2% |
-| 2×T10 | Code | 3615.24 / 63.40 | 3540.27 / 183.17 | 86.5% |
-| 2×T10 | Repetitive | 3673.90 / 62.98 | 3594.91 / 278.34 | 100% |
-| 4×T10 | Prose | 4314.14 / 77.71 | 4172.03 / 255.02 | 81.2–86.5% |
-| 4×T10 | Code | 4312.15 / 77.37 | 4184.09 / 251.59 | 86.5% |
-| 4×T10 | Repetitive | 4192.41 / 76.68 | 4089.48 / 353.55 | 78.6–100% |
-
-The experimental image uses the upstream model implementation and
-the SM75 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
+The experimental image uses the upstream model implementation and the SM75
+port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
 [Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
 [Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
 
 ## 🧭 Profiles
 
-Read the [Profile Guide](profiles/README.md) for the layout and route fields.
-Detailed profiles and reference performance are listed for
-[2x2080Ti](profiles/2x2080Ti/README.md) and
-[2xT10](profiles/2xT10/README.md), and
-[4xT10](profiles/4xT10/README.md).
+The [Profile Guide](profiles/README.md) explains the layout and route fields.
+The [2x2080Ti guide](profiles/2x2080Ti/README.md) lists the native profiles for
+dual RTX 2080 Ti.
 
 Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
 The launcher selects the startup mode and defaults to `MODE=fast`; the mode can
@@ -206,7 +158,7 @@ port, target and draft model paths, chat template, and reasoning defaults.
 - Two 16 GiB Tesla T10 GPUs over PCIe (TP=2 profiles)
 - Four 16 GiB Tesla T10 GPUs over PCIe (TP=4 profiles)
 - NVIDIA Turing / SM75, with validated tensor parallel sizes 2 and 4
-- `0.2.x` target: CUDA 13.0, PyTorch 2.13, Python 3.12
+- Native runtime target: CUDA 13.0, PyTorch 2.13, Python 3.12
 - Native build host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
 
 Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
@@ -237,7 +189,7 @@ confirmed PCIe P2P and a separate profile validation.
 
 **Which CUDA and PyTorch versions apply?**
 
-The `0.2.x` target is CUDA 13.0 with PyTorch 2.13. For the older CUDA 12.8 /
+The native runtime uses CUDA 13.0 with PyTorch 2.13. For the older CUDA 12.8 /
 PyTorch 2.11 stack, refer to the unmaintained `v0.1.x` compatibility line. Keep
 the PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
 aligned; they are not interchangeable runtime combinations.

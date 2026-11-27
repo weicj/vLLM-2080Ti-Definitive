@@ -10,16 +10,18 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Keeps the build, launcher, and update commands, plus the native 0.2.x
   runtime via `VLLM_RUNTIME_BACKEND=native`.
 - Uses FlashInfer for TurboQuant prefill on SM75. Records Docker results for
-  the existing 2xT10 Qwen3.8-27B-INT4 MTP/3 FP8 KV, TQK8V4 and TQ4NC text
-  profiles alongside the original 0.2.x figures.
+  the 2xT10 Qwen3.8-27B-INT4 MTP/3 profiles with FP8, TQK8V4 and TQ4NC KV.
 - Validates the shipped 4xT10 throughput profiles on the Docker runtime.
   Uses BLHNC pages and batched DFlash verification for TurboQuant and unit
   cache scales for unquantized compressed-tensors KV.
 - Groups TP4 Qwen DFlash2 target layers independently of the draft layer
   count to recover usable KV capacity on SM75.
 - Adds an experimental Inkling 2 Mini Docker variant with the upstream model
-  implementation and lvb-s's SM75 port. Tests the official checkpoint with
-  autoregressive decoding and DSpark/7 on 2xT10 and 4xT10 over PCIe P2P.
+  implementation and lvb-s's SM75 port. Adds pure AR and DSpark/7 profiles
+  validated with the official checkpoint on 2xT10 and 4xT10 over PCIe P2P.
+- Renames the Qwen3.8-27B profile directories to `qwen38-27b` and resolves
+  the previous paths in the launcher. The hardware guides report the current
+  Docker measurements and test environment.
 
 ## v0.2.2-post3 - 2026-10-01
 

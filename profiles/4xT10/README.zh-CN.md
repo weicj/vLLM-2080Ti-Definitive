@@ -1,49 +1,55 @@
-# 4xT10 Profile
+# 4xT10 Profiles
+
+语言：[English](README.md) | 简体中文
 
 ## Qwen3.8-27B-FP8
 
-测试权重：[Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)；DFlash2 draft：[incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
+权重 [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
+
+DFlash2 草稿权重 [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 
 | Profile | 上下文 | KV | 投机解码 | 消息 | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
-|---|---:|---|---|---|---:|---:|---:|
-| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 262K | FP16 | DFlash2/7 | text-only | 300,304 | 1433.91 / 191.89 | 1536.13 / 189.38 |
-| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 240K | FP16 | DFlash2/7 | text+image | 241,215 | 1443.96 / 190.89 | 1532.96 / 187.85 |
-| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 2 x 220K | FP8 | DFlash2/7 | text-only | 445,644 | 1395.16 / 200.56 | 1486.57 / 210.18 |
-| `qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env` | 262K | FP16 | MTP/4 | text+image | 320,484 | 1484.30 / 106.04 | 1527.71 / 104.25 |
-| `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 2 x 262K | FP8 | MTP/4 | text+image | 565,524 | 1459.21 / 102.41 | 1521.55 / 104.32 |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| [`qwen38-27b/w8a16/dflash2-fp16kv-1x262K-text-only.env`](qwen38-27b/w8a16/dflash2-fp16kv-1x262K-text-only.env) | 262,144 | FP16 | DFlash2/7 | text-only | 331,998 | 1583.68 / 211.09 | 1466.17 / 210.14 |
+| [`qwen38-27b/w8a16/dflash2-fp16kv-1x240K-text-image.env`](qwen38-27b/w8a16/dflash2-fp16kv-1x240K-text-image.env) | 240,384 | FP16 | DFlash2/7 | text+image | 293,387 | 1584.73 / 209.94 | 1443.93 / 218.32 |
+| [`qwen38-27b/w8a16/dflash2-fp8kv-2x220K-text-only.env`](qwen38-27b/w8a16/dflash2-fp8kv-2x220K-text-only.env) | 2 × 220,000 | FP8 | DFlash2/7 | text-only | 515,625 | 1585.14 / 211.10 | 1344.57 / 209.08 |
+| [`qwen38-27b/w8a16/mtp4-fp16kv-1x262K-text-image.env`](qwen38-27b/w8a16/mtp4-fp16kv-1x262K-text-image.env) | 262,144 | FP16 | MTP/4 | text+image | 345,301 | 1578.10 / 121.59 | 1454.63 / 120.15 |
+| [`qwen38-27b/w8a16/mtp4-fp8kv-2x262K-text-image.env`](qwen38-27b/w8a16/mtp4-fp8kv-2x262K-text-image.env) | 2 × 262,144 | FP8 | MTP/4 | text+image | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
 
 ## Qwen3.8-27B-NVFP4
 
-测试权重：[unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)；DFlash2 draft：[incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
+权重 [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
+
+DFlash2 草稿权重 [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 
 | Profile | 上下文 | KV | 投机解码 | 消息 | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
-|---|---:|---|---|---|---:|---:|---:|
-| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 262K | FP16 | DFlash2/7 | text-only | 432,205 | 1435.68 / 220.99 | 1505.42 / 216.84 |
-| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 2 x 262K | FP8 | DFlash2/7 | text-only | 763,494 | 1334.35 / 213.94 | 1348.40 / 228.76 |
-| `qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env` | 4 x 220K | TQK8V4 | DFlash2/7 | text-only | 923,137 | 1374.96 / 234.92 | 1380.19 / 154.43 |
-| `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 262K | FP16 | MTP/4 | text+image | 436,388 | 1526.32 / 125.70 | 1517.31 / 123.13 |
-| `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 2 x 262K | FP8 | MTP/4 | text+image | 823,249 | 1507.94 / 116.86 | 1477.49 / 118.77 |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| [`qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env`](qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env) | 262,144 | FP16 | DFlash2/7 | text-only | 443,917 | 1559.39 / 249.82 | 1443.68 / 246.30 |
+| [`qwen38-27b/w4a16/dflash2-fp8kv-2x262K-text-only.env`](qwen38-27b/w4a16/dflash2-fp8kv-2x262K-text-only.env) | 2 × 262,144 | FP8 | DFlash2/7 | text-only | 703,905 | 1561.66 / 247.63 | 1428.82 / 243.43 |
+| [`qwen38-27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env`](qwen38-27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env) | 4 × 220,000 | TQK8V4 | DFlash2/7 | text-only | 956,153 | 1517.36 / 304.25 | 1424.45 / 275.50 |
+| [`qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env`](qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env) | 262,144 | FP16 | MTP/4 | text+image | 451,426 | 1557.56 / 143.11 | 1437.54 / 137.96 |
+| [`qwen38-27b/w4a16/mtp4-fp8kv-2x262K-text-image.env`](qwen38-27b/w4a16/mtp4-fp8kv-2x262K-text-image.env) | 2 × 262,144 | FP8 | MTP/4 | text+image | 853,104 | 1547.72 / 141.89 | 1412.98 / 124.51 |
 
-## 0.3.x Docker 实测
+## Inkling 2 Mini
 
-测试使用官方 vLLM 0.34.0 镜像叠加本项目 SM75 补丁，
-使用四张支持 PCIe P2P 的 T10、FP16 activation 和 2,048 的批处理 token 上限。
-吞吐沿用上方表格的纯文本请求口径。
+官方权重 [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 
-| Profile | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
-|---|---:|---:|---:|
-| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 331,998 | 1583.68 / 211.09 | 1466.17 / 210.14 |
-| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 293,387 | 1584.73 / 209.94 | 1443.93 / 218.32 |
-| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 515,625 | 1585.14 / 211.10 | 1344.57 / 209.08 |
-| `qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env` | 345,301 | 1578.10 / 121.59 | 1454.63 / 120.15 |
-| `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
-| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 443,917 | 1559.39 / 249.82 | 1443.68 / 246.30 |
-| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 703,905 | 1561.66 / 247.63 | 1428.82 / 243.43 |
-| `qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env` | 956,153 | 1517.36 / 304.25 | 1424.45 / 275.50 |
-| `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 451,426 | 1557.56 / 143.11 | 1437.54 / 137.96 |
-| `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 853,104 | 1547.72 / 141.89 | 1412.98 / 124.51 |
+此路线使用 Inkling 镜像。DSpark/7 从官方权重目录自动加载 `mtp.safetensors`，草稿采用概率采样。
 
-吞吐测试使用固定 KV 分配、LBNHC 布局（4×220K 除外）、FlashInfer PCIe IPC
+| Profile | 上下文 | KV | 投机解码 | 消息 | GPU KV tokens |
+| --- | ---: | --- | --- | --- | ---: |
+| [`inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env`](inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env) | 8,192 | FP8 | 纯 AR | text-only | 24,503 |
+| [`inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env`](inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env) | 8,192 | FP8 | DSpark/7 | text-only | 23,106 |
+
+| 提示词 | 纯 AR 4K/128 prefill / decode | DSpark/7 4K/128 prefill / decode | 草稿接受率 |
+| --- | ---: | ---: | ---: |
+| 自然语言 | 4314.14 / 77.71 | 4172.03 / 255.02 | 81.2–86.5% |
+| 代码 | 4312.15 / 77.37 | 4184.09 / 251.59 | 86.5% |
+| 重复文本 | 4192.41 / 76.68 | 4089.48 / 353.55 | 78.6–100% |
+
+## 容量与功能验证
+
+Qwen 吞吐测试使用固定 KV 分配、LBNHC 布局（4×220K 除外）、FlashInfer PCIe IPC
 all-reduce 和 launcher 的 `fast` 模式。测试期间关闭 Prefix Cache，240K 路线采用
 0.96 的 GPU 显存利用率，其余 LBNHC 路线采用 0.94。240K 和 2×220K DFlash2
 路线仅为解码捕获 CUDA Graph。五条图文路线均在图卡测试中识别出蓝色方块和橙色圆形。
@@ -63,10 +69,10 @@ FlashInfer 会在 DFlash 验证 token 之间复用解量化后的前缀。
 NVFP4 权重的部分层采用 FP8 权重。镜像在 Turing 上对这些层和 NVFP4 投影均使用
 Marlin。FP16 KV 路径使用单位缩放因子。
 
-## 说明
+2×262K NVFP4 DFlash2 FP8 KV 路线完成了双路并发 32K/512。多路请求同时逼近配置的上下文上限时，DFlash 临时缓冲区仍可能耗尽显存。
 
-1. Profile 直接放在各模型/权重目录下，不再按 mode 分目录。Mode 由 launcher 选择，默认使用 `fast`。
-2. 性能数据统一使用 launcher 的可复测参考口径：仅在测试期间关闭 Prefix Cache、单次只发送一个纯文本请求、预热不计入统计、4K/128 取三次中位数，并完整运行 32K/512。图文 Profile 同样使用纯文本性能口径，图像语义另行验证。`4K/128` 表示准确的 4,096 输入 token，`32K/512` 表示准确的 32,768 输入 token。原始日志和请求 JSON 已留存备查。
-3. 测试环境：FP8/W8A16 profile 于 2026-09-19 验证，NVFP4/W4A16 profile 于 2026-09-23 验证，软件版本均为 v0.2.1。测试主机为双路 Intel Xeon E5-2673 v4（共 80 个逻辑 CPU），内存 60 GiB，Swap 8 GiB。服务使用 TP4，运行在同一 NUMA 节点上通过 PCIe PIX 连接的四张 Tesla T10 上，每张卡有 16,384 MiB 显存。NVIDIA 驱动版本为 595.91.07。运行环境为仓库的 `vllm-def-cu130`（CUDA 13.0，torch 2.13.0+cu130）。
-4. `4x220K` 路线固定使用 `GPU_UTIL=0.93`，为运行时临时显存预留空间。四路同时 32K 请求已通过；四路同时接近 220K 上限不属于最坏情况保证，DFlash 临时 buffer 可能导致 OOM。多并发 profile 不应同时接收多个超长请求。
-5. 所有 profile 均使用 launcher 默认的 `MAX_BATCHED_TOKENS=2048`；FP8KV 路线生产环境应启用 Prefix Cache。上表性能测试特意关闭了 Prefix Cache。W8A16 FP8KV DFlash2 2x220K 路线依据 `GPU_UTIL=0.96` 下实测 445,644 GPU KV tokens 进行容量定标；双路同时 32K/512 验证均准确生成 512 tokens 且服务保持健康，并发时两路解码速度分别约为 62.88 和 65.70 tok/s。
+## 测试版本与环境
+
+- 2026-11-27，vLLM 2080 Ti Definitive Edition `v0.3.0.dev0`。镜像基于官方 vLLM `v0.34.0`，使用 CUDA 13.0、PyTorch `2.14.0+cu130` 和 NVIDIA 驱动 610.43.03。
+- 4 张 16 GiB Tesla T10，TP4，同一 NUMA 节点内 PCIe P2P。测试采用 `fast` 模式，批处理上限为 2,048 token。Inkling 使用 NCCL PCIe P2P。
+- 吞吐单位为 tok/s。预热后关闭 Prefix Cache，逐个发送纯文本请求。4K/128 取三次中位数，Qwen 的 32K/512 完整跑一次。4K/128 和 32K/512 分别是精确的 4,096 输入 / 128 输出和 32,768 输入 / 512 输出。图文 profile 的图像理解另行验证。

@@ -609,6 +609,9 @@ effective_speculative_draft_sample_method() {
     value=$(json_config_field "$SPECULATIVE_CONFIG" draft_sample_method 2>/dev/null || true)
   else
     value=${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}
+    if [[ -z "$value" && "${SPECULATIVE_METHOD:-}" == dspark ]]; then
+      value=probabilistic
+    fi
   fi
   case "${value,,}" in
     greedy|probabilistic)
@@ -1393,22 +1396,34 @@ apply_profile_overrides() {
 }
 
 resolve_profile_file() {
+  local file renamed
   if [[ -n "${PROFILE_FILE:-}" ]]; then
-    printf '%s\n' "$PROFILE_FILE"
-    return 0
-  fi
-  if [[ -z "${PROFILE:-}" ]]; then
+    file=$PROFILE_FILE
+  elif [[ -n "${PROFILE:-}" ]]; then
+    file="$PROFILE_DIR/$PROFILE"
+  else
     return 1
   fi
-  if [[ -f "$PROFILE_DIR/$PROFILE" ]]; then
-    printf '%s\n' "$PROFILE_DIR/$PROFILE"
+  if [[ -f "$file" ]]; then
+    printf '%s\n' "$file"
     return 0
   fi
-  if [[ -f "$PROFILE_DIR/${PROFILE%.env}.env" ]]; then
-    printf '%s\n' "$PROFILE_DIR/${PROFILE%.env}.env"
+  if [[ -z "${PROFILE_FILE:-}" && -f "${file%.env}.env" ]]; then
+    printf '%s\n' "${file%.env}.env"
     return 0
   fi
-  return 1
+  # Resolve old shipped profile names in saved launcher state and scripts.
+  case "$file" in
+    "$PROFILE_DIR"/2x2080Ti/qwen27b/*|"$PROFILE_DIR"/2xT10/qwen27b/*|"$PROFILE_DIR"/4xT10/qwen27b/*)
+      renamed=${file#"$PROFILE_DIR"/}
+      renamed="$PROFILE_DIR/${renamed/\/qwen27b\//\/qwen38-27b\/}"
+      if [[ -f "${renamed%.env}.env" ]]; then
+        printf '%s\n' "${renamed%.env}.env"
+        return 0
+      fi
+      ;;
+  esac
+  [[ -n "${PROFILE_FILE:-}" ]] && printf '%s\n' "$PROFILE_FILE"
 }
 
 is_docker_tp4_t10_qwen_profile() {
@@ -1416,7 +1431,7 @@ is_docker_tp4_t10_qwen_profile() {
      "${MODEL_FAMILY:-}" == qwen35 ]] || return 1
   local profile_file
   profile_file=$(resolve_profile_file) || return 1
-  [[ "$profile_file" == "$PROFILE_DIR"/4xT10/qwen27b/* ]]
+  [[ "$profile_file" == "$PROFILE_DIR"/4xT10/@(qwen38-27b|qwen27b)/* ]]
 }
 
 docker_t10_220k_prefix_cache() {
@@ -1425,7 +1440,7 @@ docker_t10_220k_prefix_cache() {
   if [[ -z "$profile_file" ]]; then
     profile_file=$(resolve_profile_file) || return 1
   fi
-  [[ "$profile_file" == "$PROFILE_DIR"/4xT10/qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env &&
+  [[ "$profile_file" == "$PROFILE_DIR"/4xT10/@(qwen38-27b|qwen27b)/w8a16/dflash2-fp8kv-2x220K-text-only.env &&
      "$(current_prefix_cache_label)" == enabled ]]
 }
 
@@ -1438,9 +1453,10 @@ docker_t10_220k_prefers_nccl() {
 }
 
 docker_profile_gpu_util() {
-  local file=$1 value=$2
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$file" == "$PROFILE_DIR"/4xT10/qwen27b/* ]]; then
-    case "${file#"$PROFILE_DIR"/4xT10/qwen27b/}:$value" in
+  local file=$1 value=$2 route
+  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$file" == "$PROFILE_DIR"/4xT10/@(qwen38-27b|qwen27b)/* ]]; then
+    route=${file#"$PROFILE_DIR"/4xT10/}
+    case "${route#*/}:$value" in
       w8a16/dflash2-fp16kv-1x240K-text-image.env:0.96|w8a16/dflash2-fp16kv-1x240K-text-image.env:0.965)
         value=0.96
         [[ "$(current_prefix_cache_label)" == enabled ]] && value=0.965
@@ -1606,10 +1622,11 @@ profile_family_dir() {
       if [[ "${MODEL_DIR,,} ${SERVED_NAME,,}" == *35b* ]]; then
         echo qwen35b
       else
-        echo qwen27b
+        echo qwen38-27b
       fi
       ;;
-    qwen35|qwen|"") echo qwen27b ;;
+    qwen35|qwen|"") echo qwen38-27b ;;
+    inkling2) echo inkling-2-mini ;;
     *)
       printf '%s\n' "${MODEL_FAMILY//[^A-Za-z0-9_.-]/-}"
       ;;
@@ -1711,7 +1728,7 @@ default_qwen_reasoning_parser_applies() {
       ;;
   esac
   case "$profile_l" in
-    */qwen27b/*|*/qwen35b/*)
+    */qwen38-27b/*|*/qwen27b/*|*/qwen35b/*)
       return 0
       ;;
   esac
@@ -4722,6 +4739,8 @@ if method == "dflash":
         cfg["draft_sample_method"] = draft_sample_method
     if disable_padded in {"1", "true", "True", "yes", "on"}:
         cfg["disable_padded_drafter_batch"] = True
+elif method == "dspark":
+    cfg["draft_sample_method"] = draft_sample_method
 if use_local_argmax in {"1", "true", "True", "yes", "on"}:
     cfg["use_local_argmax_reduction"] = True
 
@@ -4769,7 +4788,7 @@ validate_speculative_route() {
   if [[ -z "$method" ]]; then
     if [[ -n "${SPECULATIVE_TOKENS:-}" || -n "${SPECULATIVE_DRAFT_TP_SIZE:-}" || -n "${SPECULATIVE_MAX_MODEL_LEN:-}" || -n "${SPECULATIVE_ATTENTION_BACKEND:-}" || -n "${SPECULATIVE_KV_CACHE_DTYPE:-}" || -n "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}" ]] || config_key_has_explicit_value SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH || config_key_has_explicit_value SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION; then
       echo "ERROR: speculative fields were set but SPECULATIVE_METHOD is missing." >&2
-      echo "       Use SPECULATIVE_METHOD=mtp|dflash or provide SPECULATIVE_CONFIG." >&2
+      echo "       Use SPECULATIVE_METHOD=mtp|dflash|dspark or provide SPECULATIVE_CONFIG." >&2
       return 1
     fi
     return 0
@@ -4785,6 +4804,12 @@ validate_speculative_route() {
 
   case "$method" in
     mtp|dflash)
+      ;;
+    dspark)
+      if [[ "$VLLM_RUNTIME_BACKEND" != docker || "${MODEL_FAMILY:-}" != inkling2 ]]; then
+        echo "ERROR: the DSpark shortcut requires the Inkling 2 Mini Docker runtime." >&2
+        return 1
+      fi
       ;;
     *)
       echo "ERROR: SPECULATIVE_METHOD=$method is not supported by launcher shortcuts." >&2

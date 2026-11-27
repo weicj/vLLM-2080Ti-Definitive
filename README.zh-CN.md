@@ -15,12 +15,9 @@ profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须�
 欢迎在 [Discord 交流群](https://discord.gg/VFqVVySdMS) 分享使用体验、提出功能请求，
 以及交流部署和运行问题。
 
-![单请求实时测速演示](docs/assets/vllmspeed_dflash.gif)
-
 当前开发版本为 `v0.3.0.dev0`，分支为 `vllm-2080ti-definitive-0.3.x`。
 Docker 运行时使用官方 [vLLM v0.34.0](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)。
-原生运行时来自 [v0.2.2-post3](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)，
-下文的 benchmark 版本以各硬件 profile 文档中的记录为准。
+本轮的实测版本、测试环境和性能数据记录在各硬件的 profile 说明中。
 
 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
@@ -42,37 +39,21 @@ Docker 运行时使用官方 [vLLM v0.34.0](https://github.com/vllm-project/vllm
 本 fork 通过 Marlin、FlashInfer/FlashQLA、TurboQuant/INT8 KV、MTP/DFlash2 和 CUDA
 Graph，把这些硬件资源转成可用的 serving 栈。
 
-支持的硬件还包括两张通过 PCIe 连接的 16 GiB Tesla T10，提供已验证的 TP=2
-Qwen 27B 路线。四卡 Tesla T10 Profile 面向 TP=4 服务；存在图像语义失败的路线
-会在硬件 README 中明确标记为 candidate。
-
 ## 🧩 支持状态
 
 原生构建的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。如果使用 CUDA 12.8、PyTorch 2.11、较早 kernel 或 GCC 12/13/14，可参考已不再持续维护的 `0.1.x` 版本线。
 
 支持的模型路线和实测数据以对应硬件组的 profile 说明为准。
 
-Launcher 支持 TP、PP 及 TP/PP 混合推理；已验证布局包括双 RTX 2080 Ti（TP=2）、双 Tesla T10（TP=2）和四张 Tesla T10（TP=4）。
+Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10（TP=2）和四 T10（TP=4）的 Qwen 与 Inkling 验证。
 
-## 🧪 已验证模型路线
+## 🧪 已验证模型与 Profile
 
-当前实测模型和权重路线：
-
-| 模型路线 | 权重路线 | 模型卡 | 推荐场景 | Profile 路径 |
-| --- | --- | --- | --- | --- |
-| Qwen3.8 27B | FP8 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 高精度单并发 | `qwen27b/w8a16` |
-| Qwen3.8 27B | NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 长上下文多并发 | `qwen27b/w4a16` |
-| Qwen3.8 27B | INT4 (W4A16) | [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) | 2xT10 MTP3 推理 | `qwen27b/w4a16` |
-| Qwen3.x 35B | FP8 | [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8) | 个人快速推理 | `qwen35b/w8a16` |
-
-## ⚡ 性能亮点
-
-| 硬件 | 权重 | 上下文 / KV | 4K 输入解码 | 32K 输入解码 |
-| --- | --- | --- | ---: | ---: |
-| 2x RTX 2080 Ti | Qwen3.8 27B NVFP4 | 256K / FP8 KV | **220.84 tok/s** | **209.35 tok/s** |
-| 4x Tesla T10 | Qwen3.8 27B FP8 | 256K / FP16 KV | **191.89 tok/s** | **189.38 tok/s** |
-
-两组均为单请求测试，使用 DFlash2（默认 K=7）和高投机命中率的纯文本合成输入；真实任务吞吐会受到 draft 接受率影响，可能无法达到以上数据。
+| 硬件 | 模型 | 权重 | Profile 说明 |
+| --- | --- | --- | --- |
+| 2×T10 | Qwen3.8-27B | INT4（W4A16） | [Qwen3.8-27B-INT4](profiles/2xT10/README.zh-CN.md#qwen38-27b-int4) |
+| 4×T10 | Qwen3.8-27B | FP8（W8A16）、NVFP4（W4A16） | [FP8](profiles/4xT10/README.zh-CN.md#qwen38-27b-fp8) · [NVFP4](profiles/4xT10/README.zh-CN.md#qwen38-27b-nvfp4) |
+| 2×T10、4×T10 | Inkling 2 Mini | 官方权重 | [2×T10 纯 AR 与 DSpark/7](profiles/2xT10/README.zh-CN.md#inkling-2-mini) · [4×T10 纯 AR 与 DSpark/7](profiles/4xT10/README.zh-CN.md#inkling-2-mini) |
 
 ## 🚀 构建与启动
 
@@ -98,14 +79,12 @@ Launcher 支持 TP、PP 及 TP/PP 混合推理；已验证布局包括双 RTX 20
 TP/PP 拓扑、选择启动模式与网络配置，并在启动时自动完成健康检查和 smoke 测试；
 也可以在菜单中停止已启动的服务。
 
-![launcher.sh 交互式主菜单](docs/assets/launcher-main-menu.png)
-
 自动化部署可使用非交互参数：
 
 ```bash
-MODEL_DIR=/path/to/checkpoint \
-PROFILE=2x2080Ti/qwen27b/w8a16/mtp4-fp8kv-1x262K-text-only.env \
-MODE=fast GPU_DEVICES=1,5 TP_SIZE=2 \
+MODEL_DIR=/path/to/Qwen3.8-27B-INT4 \
+PROFILE=2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env \
+MODE=fast GPU_DEVICES=0,1 TP_SIZE=2 \
 NON_INTERACTIVE=1 ./launcher.sh
 ```
 
@@ -114,58 +93,35 @@ NON_INTERACTIVE=1 ./launcher.sh
 
 Docker launcher 继续使用本地权重路径、profile、GPU 顺序和服务配置。
 `fast` 模式采用上游调度与 CUDA Graph 默认配置。`normal` 模式的投机解码和双卡
-T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。服务级思考预算和 0.2.x 的
+T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。服务级思考预算和
 prefill barrier 可通过原生运行时使用。
-
-Docker 运行时在 SM75 上处于实验阶段。T10 profile 文档并列记录 Docker 实测与 0.2.x 数据。
-[2xT10 实测结果](profiles/2xT10/README.zh-CN.md#03x-docker-验证) ·
-[4xT10 实测结果](profiles/4xT10/README.zh-CN.md#03x-docker-实测)
 
 ### 在 SM75 上运行 Inkling 2 Mini
 
-Inkling 2 Mini 支持在 v0.34.0 发布后合入 vLLM 主线。Inkling 镜像将该支持
-移植到当前固定的底座版本。
-
-先构建 Inkling 镜像，再通过 launcher 选择该镜像并加载官方权重。将 GPU 编号和
-张量并行度设为宿主机的实际配置。以下示例使用支持 PCIe P2P 的两张 T10，
-以 8,192 token 上下文提供纯文本服务。
+Inkling 镜像把 v0.34.0 发布后合入主线的模型支持移植到固定底座。先构建镜像，
+再通过 `PROFILE` 选择路线。下面的示例使用支持 PCIe P2P 的两张 T10。
 
 ```bash
 VLLM_DOCKER_VARIANT=inkling ./build.sh
 
 VLLM_DOCKER_VARIANT=inkling MODEL_DIR=/path/to/Inkling-2-Mini \
-GPU_DEVICES=0,1 TP_SIZE=2 MAX_MODEL_LEN=8192 GPU_UTIL=0.94 \
-KV_CACHE_DTYPE=fp8 MESSAGE_TYPE=text-only NCCL_P2P_DISABLE=0 \
-DISABLE_PREFIX_CACHING=1 DISABLE_LOG_STATS=0 NON_INTERACTIVE=1 ./launcher.sh
+PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env \
+GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
+NON_INTERACTIVE=1 ./launcher.sh
 ```
 
-启动时设置 `SPECULATIVE_CONFIG='{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'`，
-即可从官方模型目录加载 `mtp.safetensors`。
+纯 AR 请选择 `nomtp-fp8kv-1x8K-text-only.env`。四卡使用 `4xT10` 下的同名
+profile，将 `TP_SIZE` 设为 `4`，并选择四张支持 PCIe P2P 的 GPU。
 
-2×T10 和 4×T10 的测试均使用 NCCL PCIe P2P、FP8 KV 和 8,192 token
-上下文上限。下表每行取三次单请求的吞吐中位数，关闭 Prefix Cache，精确输入
-4,096 token、输出 128 token。DSpark 每步最多提出七个草稿 token。
-
-| 显卡 | 提示词 | 纯 AR prefill / decode（tok/s） | DSpark prefill / decode（tok/s） | 草稿接受率 |
-| --- | --- | ---: | ---: | ---: |
-| 2×T10 | 自然语言 | 3644.31 / 63.67 | 3556.14 / 175.24 | 76.4–81.2% |
-| 2×T10 | 代码 | 3615.24 / 63.40 | 3540.27 / 183.17 | 86.5% |
-| 2×T10 | 重复文本 | 3673.90 / 62.98 | 3594.91 / 278.34 | 100% |
-| 4×T10 | 自然语言 | 4314.14 / 77.71 | 4172.03 / 255.02 | 81.2–86.5% |
-| 4×T10 | 代码 | 4312.15 / 77.37 | 4184.09 / 251.59 | 86.5% |
-| 4×T10 | 重复文本 | 4192.41 / 76.68 | 4089.48 / 353.55 | 78.6–100% |
-
-实验镜像使用 vLLM 上游模型实现和 lvb-s 的 SM75 移植。
+该实验镜像使用 vLLM 上游模型实现和 lvb-s 的 SM75 移植。
 [官方权重](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
 [上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
 [社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)
 
 ## 🧭 Profile 与推荐路线
 
-目录结构和路线字段请参阅 [Profile 指南](profiles/README.zh-CN.md)；详细 Profile
-说明与参考性能见 [2x2080Ti](profiles/2x2080Ti/README.zh-CN.md)、
-[2xT10](profiles/2xT10/README.zh-CN.md) 和
-[4xT10](profiles/4xT10/README.zh-CN.md)。
+目录结构和路线字段见 [Profile 指南](profiles/README.zh-CN.md)。
+双 RTX 2080 Ti 的原生路线见 [2x2080Ti Profile](profiles/2x2080Ti/README.zh-CN.md)。
 
 Profile 按扁平路径 `profiles/<硬件>/<模型>/<权重>/<路线>.env` 组织。启动模式由
 launcher 选择，默认 `MODE=fast`；也可以由 launcher 或 profile 显式设置。
@@ -186,7 +142,7 @@ reasoning 默认值由 launcher 统一管理。
 - 两张通过 PCIe 连接的 16 GiB Tesla T10（TP=2 Profile）
 - 四张通过 PCIe 连接的 16 GiB Tesla T10（TP=4 Profile）
 - NVIDIA Turing / SM75，已验证的 tensor parallel size 为 2 和 4
-- `0.2.x` 目标：CUDA 13.0、PyTorch 2.13、Python 3.12
+- 原生运行时目标：CUDA 13.0、PyTorch 2.13、Python 3.12
 - 原生构建主机：Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15
 
 其它 Turing 显卡仍需针对显存容量、PCIe/NVLink 拓扑、模型 head dimension、
@@ -212,7 +168,7 @@ KV cache dtype 和 CUDA Graph 行为独立验证。
 
 **应该使用哪些 CUDA 和 PyTorch 版本？**
 
-`0.2.x` 目标是 CUDA 13.0 + PyTorch 2.13。使用旧的 CUDA 12.8 + PyTorch 2.11
+原生运行时使用 CUDA 13.0 + PyTorch 2.13。使用旧的 CUDA 12.8 + PyTorch 2.11
 时，可参考已停止维护的 `v0.1.x` 兼容路线。PyTorch CUDA 构建、toolkit、FlashInfer/
 FlashQLA 构建和启动 profile 必须保持一致，不能混用运行时假设。
 

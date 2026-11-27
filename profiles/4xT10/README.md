@@ -1,49 +1,55 @@
 # 4xT10 Profiles
 
+Language: English | [简体中文](README.zh-CN.md)
+
 ## Qwen3.8-27B-FP8
 
-Tested weight: [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8); DFlash2 draft: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
+Checkpoint [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
+
+DFlash2 draft checkpoint [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 
 | Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
-|---|---:|---|---|---|---:|---:|---:|
-| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 262K | FP16 | DFlash2/7 | text-only | 300,304 | 1433.91 / 191.89 | 1536.13 / 189.38 |
-| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 240K | FP16 | DFlash2/7 | text+image | 241,215 | 1443.96 / 190.89 | 1532.96 / 187.85 |
-| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 2 x 220K | FP8 | DFlash2/7 | text-only | 445,644 | 1395.16 / 200.56 | 1486.57 / 210.18 |
-| `qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env` | 262K | FP16 | MTP/4 | text+image | 320,484 | 1484.30 / 106.04 | 1527.71 / 104.25 |
-| `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 2 x 262K | FP8 | MTP/4 | text+image | 565,524 | 1459.21 / 102.41 | 1521.55 / 104.32 |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| [`qwen38-27b/w8a16/dflash2-fp16kv-1x262K-text-only.env`](qwen38-27b/w8a16/dflash2-fp16kv-1x262K-text-only.env) | 262,144 | FP16 | DFlash2/7 | text-only | 331,998 | 1583.68 / 211.09 | 1466.17 / 210.14 |
+| [`qwen38-27b/w8a16/dflash2-fp16kv-1x240K-text-image.env`](qwen38-27b/w8a16/dflash2-fp16kv-1x240K-text-image.env) | 240,384 | FP16 | DFlash2/7 | text+image | 293,387 | 1584.73 / 209.94 | 1443.93 / 218.32 |
+| [`qwen38-27b/w8a16/dflash2-fp8kv-2x220K-text-only.env`](qwen38-27b/w8a16/dflash2-fp8kv-2x220K-text-only.env) | 2 × 220,000 | FP8 | DFlash2/7 | text-only | 515,625 | 1585.14 / 211.10 | 1344.57 / 209.08 |
+| [`qwen38-27b/w8a16/mtp4-fp16kv-1x262K-text-image.env`](qwen38-27b/w8a16/mtp4-fp16kv-1x262K-text-image.env) | 262,144 | FP16 | MTP/4 | text+image | 345,301 | 1578.10 / 121.59 | 1454.63 / 120.15 |
+| [`qwen38-27b/w8a16/mtp4-fp8kv-2x262K-text-image.env`](qwen38-27b/w8a16/mtp4-fp8kv-2x262K-text-image.env) | 2 × 262,144 | FP8 | MTP/4 | text+image | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
 
 ## Qwen3.8-27B-NVFP4
 
-Tested weight: [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4); DFlash2 draft: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
+Checkpoint [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
+
+DFlash2 draft checkpoint [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 
 | Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
-|---|---:|---|---|---|---:|---:|---:|
-| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 262K | FP16 | DFlash2/7 | text-only | 432,205 | 1435.68 / 220.99 | 1505.42 / 216.84 |
-| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 2 x 262K | FP8 | DFlash2/7 | text-only | 763,494 | 1334.35 / 213.94 | 1348.40 / 228.76 |
-| `qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env` | 4 x 220K | TQK8V4 | DFlash2/7 | text-only | 923,137 | 1374.96 / 234.92 | 1380.19 / 154.43 |
-| `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 262K | FP16 | MTP/4 | text+image | 436,388 | 1526.32 / 125.70 | 1517.31 / 123.13 |
-| `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 2 x 262K | FP8 | MTP/4 | text+image | 823,249 | 1507.94 / 116.86 | 1477.49 / 118.77 |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| [`qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env`](qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env) | 262,144 | FP16 | DFlash2/7 | text-only | 443,917 | 1559.39 / 249.82 | 1443.68 / 246.30 |
+| [`qwen38-27b/w4a16/dflash2-fp8kv-2x262K-text-only.env`](qwen38-27b/w4a16/dflash2-fp8kv-2x262K-text-only.env) | 2 × 262,144 | FP8 | DFlash2/7 | text-only | 703,905 | 1561.66 / 247.63 | 1428.82 / 243.43 |
+| [`qwen38-27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env`](qwen38-27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env) | 4 × 220,000 | TQK8V4 | DFlash2/7 | text-only | 956,153 | 1517.36 / 304.25 | 1424.45 / 275.50 |
+| [`qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env`](qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env) | 262,144 | FP16 | MTP/4 | text+image | 451,426 | 1557.56 / 143.11 | 1437.54 / 137.96 |
+| [`qwen38-27b/w4a16/mtp4-fp8kv-2x262K-text-image.env`](qwen38-27b/w4a16/mtp4-fp8kv-2x262K-text-image.env) | 2 × 262,144 | FP8 | MTP/4 | text+image | 853,104 | 1547.72 / 141.89 | 1412.98 / 124.51 |
 
-## 0.3.x Docker validation
+## Inkling 2 Mini
 
-These tests use the official vLLM 0.34.0 image with the project's
-SM75 patches, four PCIe P2P-capable T10s, FP16 activations and 2,048 batched
-tokens. Throughput uses the same text request protocol as the tables above.
+Official checkpoint [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 
-| Profile | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
-|---|---:|---:|---:|
-| `qwen27b/w8a16/dflash2-fp16kv-1x262K-text-only.env` | 331,998 | 1583.68 / 211.09 | 1466.17 / 210.14 |
-| `qwen27b/w8a16/dflash2-fp16kv-1x240K-text-image.env` | 293,387 | 1584.73 / 209.94 | 1443.93 / 218.32 |
-| `qwen27b/w8a16/dflash2-fp8kv-2x220K-text-only.env` | 515,625 | 1585.14 / 211.10 | 1344.57 / 209.08 |
-| `qwen27b/w8a16/mtp4-fp16kv-1x262K-text-image.env` | 345,301 | 1578.10 / 121.59 | 1454.63 / 120.15 |
-| `qwen27b/w8a16/mtp4-fp8kv-2x262K-text-image.env` | 650,056 | 1567.30 / 124.74 | 1428.35 / 125.80 |
-| `qwen27b/w4a16/dflash2-fp16kv-1x262K-text-only.env` | 443,917 | 1559.39 / 249.82 | 1443.68 / 246.30 |
-| `qwen27b/w4a16/dflash2-fp8kv-2x262K-text-only.env` | 703,905 | 1561.66 / 247.63 | 1428.82 / 243.43 |
-| `qwen27b/w4a16/dflash2-tqk8v4-4x220K-text-only.env` | 956,153 | 1517.36 / 304.25 | 1424.45 / 275.50 |
-| `qwen27b/w4a16/mtp4-fp16kv-1x262K-text-image.env` | 451,426 | 1557.56 / 143.11 | 1437.54 / 137.96 |
-| `qwen27b/w4a16/mtp4-fp8kv-2x262K-text-image.env` | 853,104 | 1547.72 / 141.89 | 1412.98 / 124.51 |
+These profiles use the Inkling Docker image. DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabilistic draft sampling.
 
-The throughput runs use fixed KV allocation, the LBNHC layout except for
+| Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens |
+| --- | ---: | --- | --- | --- | ---: |
+| [`inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env`](inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env) | 8,192 | FP8 | AR | text-only | 24,503 |
+| [`inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env`](inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env) | 8,192 | FP8 | DSpark/7 | text-only | 23,106 |
+
+| Prompt | AR 4K/128 prefill / decode | DSpark/7 4K/128 prefill / decode | Draft acceptance |
+| --- | ---: | ---: | ---: |
+| Prose | 4314.14 / 77.71 | 4172.03 / 255.02 | 81.2–86.5% |
+| Code | 4312.15 / 77.37 | 4184.09 / 251.59 | 86.5% |
+| Repetitive | 4192.41 / 76.68 | 4089.48 / 353.55 | 78.6–100% |
+
+## Capacity and feature checks
+
+The Qwen throughput runs use fixed KV allocation, the LBNHC layout except for
 4×220K, FlashInfer PCIe IPC all-reduce and launcher mode `fast`. With Prefix
 Cache disabled for those runs, GPU utilization was 0.96 for the 240K route
 and 0.94 for the other LBNHC routes. The 240K and 2×220K DFlash2 routes
@@ -67,10 +73,10 @@ The NVFP4 checkpoint uses FP8 weights in part of the model. On Turing the
 image uses Marlin for those layers as well as the NVFP4 projections.
 For the FP16 KV route, the image uses unit KV scales.
 
-## Notes
+The 2×262K NVFP4 DFlash2 FP8 KV route completed two concurrent 32K/512 requests. DFlash temporary buffers can exhaust VRAM when multiple requests approach the configured context limit together.
 
-1. Profiles are flat under each model/weight directory. Mode is selected by the launcher and defaults to `fast`.
-2. Performance uses the launcher's reproducible reference lane: Prefix Cache is disabled only during testing, one text-only request is sent at a time, warm-up is excluded, 4K/128 is the median of three requests, and 32K/512 is run to completion. Multimodal profiles use the same text-only performance lane; image semantics are validated separately. `4K/128` means exactly 4,096 input tokens and 128 output tokens; `32K/512` means exactly 32,768 input tokens and 512 output tokens. Raw logs and request JSON were retained for verification.
-3. Test environment: the FP8/W8A16 profiles were validated on 2026-09-19 and the NVFP4/W4A16 profiles on 2026-09-23, both with v0.2.1. The host has two sockets with Intel Xeon E5-2673 v4 CPUs (80 logical CPUs total), 60 GiB RAM and 8 GiB swap. The service uses TP4 across four Tesla T10 GPUs with 16,384 MiB each, connected by PCIe PIX on the same NUMA node. The host driver is NVIDIA 595.91.07. The runtime is the repository's `vllm-def-cu130` environment (CUDA 13.0, torch 2.13.0+cu130).
-4. The `4x220K` route uses `GPU_UTIL=0.93` to reserve runtime headroom. Four simultaneous 32K requests passed; four simultaneous requests near the 220K limit are not a supported worst-case guarantee and can OOM on DFlash temporary buffers. Multi-concurrency profiles should not receive simultaneous ultra-long requests.
-5. All profiles use the launcher's default `MAX_BATCHED_TOKENS=2048`; enable Prefix Cache in production for FP8KV routes. The measurements above deliberately disabled Prefix Cache. The W8A16 FP8KV DFlash2 2x220K route was capacity-sized from 445,644 GPU KV tokens at `GPU_UTIL=0.96`; two simultaneous 32K/512 requests completed with exact token counts and the service remained healthy. Under that concurrent load, decode throughput was 62.88 and 65.70 tok/s per request.
+## Test version and environment
+
+- 2026-11-27, vLLM 2080 Ti Definitive Edition `v0.3.0.dev0`. The image uses official vLLM `v0.34.0`, CUDA 13.0, PyTorch `2.14.0+cu130`, and NVIDIA driver 610.43.03.
+- 4 Tesla T10 GPUs with 16 GiB each, TP4, and PCIe P2P within one NUMA node. Tests used `fast` mode and a 2,048-token batch limit. Inkling used NCCL PCIe P2P.
+- Throughput is in tok/s. After warmup, the tests sent one text-only request at a time with Prefix Cache disabled. 4K/128 is the median of three requests. The Qwen 32K/512 lane ran one request to completion. The two lanes used exactly 4,096 input and 128 output tokens, or 32,768 input and 512 output tokens. Image understanding was checked separately for multimodal profiles.
