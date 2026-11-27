@@ -20,9 +20,9 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Adds an experimental Inkling 2 Mini Docker variant with the upstream model
   implementation and lvb-s's SM75 port. Adds pure AR and DSpark/7 profiles
   validated with the official checkpoint on 2xT10 and 4xT10 over PCIe P2P.
-- Renames the Qwen3.8-27B profile directories to `qwen38-27b` and resolves
-  the previous paths in the launcher. The hardware guides report the current
-  Docker measurements and test environment.
+- Renames the Qwen3.8-27B and Qwen3.6-35B profile directories to `qwen38-27b`
+  and `qwen36-35b`. The launcher resolves the previous paths. The hardware
+  guides report the current Docker measurements and test environment.
 
 ## v0.2.2-post3 - 2026-10-01
 

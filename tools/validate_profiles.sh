@@ -70,8 +70,8 @@ expected_profiles=(
   2x2080Ti/qwen38-27b/w4a16/mtp4-fp8kv-2x229K-text-only.env
   2x2080Ti/qwen38-27b/w4a16/dflash-fp8kv-2x176K-text-only.env
   2x2080Ti/qwen38-27b/w4a16/mtp4-tq4nc-3x262K-text-only.env
-  2x2080Ti/qwen35b/w8a16/nomtp-fp16kv-1x262K-text-only.env
-  2x2080Ti/qwen35b/w8a16/nomtp-fp8kv-1x221K-text-image.env
+  2x2080Ti/qwen36-35b/w8a16/nomtp-fp16kv-1x262K-text-only.env
+  2x2080Ti/qwen36-35b/w8a16/nomtp-fp8kv-1x221K-text-image.env
   4xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
   4xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
   4xT10/qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env

@@ -29,5 +29,5 @@
 
 [Qwen/Qwen3.6-35B-A3B-FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)
 
-- [`qwen35b/w8a16/nomtp-fp16kv-1x262K-text-only.env`](qwen35b/w8a16/nomtp-fp16kv-1x262K-text-only.env)
-- [`qwen35b/w8a16/nomtp-fp8kv-1x221K-text-image.env`](qwen35b/w8a16/nomtp-fp8kv-1x221K-text-image.env)
+- [`qwen36-35b/w8a16/nomtp-fp16kv-1x262K-text-only.env`](qwen36-35b/w8a16/nomtp-fp16kv-1x262K-text-only.env)
+- [`qwen36-35b/w8a16/nomtp-fp8kv-1x221K-text-image.env`](qwen36-35b/w8a16/nomtp-fp8kv-1x221K-text-image.env)

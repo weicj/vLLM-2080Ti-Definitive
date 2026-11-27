@@ -1345,7 +1345,7 @@ apply_profile_overrides() {
 }
 
 resolve_profile_file() {
-  local file renamed
+  local file renamed=""
   if [[ -n "${PROFILE_FILE:-}" ]]; then
     file=$PROFILE_FILE
   elif [[ -n "${PROFILE:-}" ]]; then
@@ -1366,12 +1366,15 @@ resolve_profile_file() {
     "$PROFILE_DIR"/2x2080Ti/qwen27b/*|"$PROFILE_DIR"/2xT10/qwen27b/*|"$PROFILE_DIR"/4xT10/qwen27b/*)
       renamed=${file#"$PROFILE_DIR"/}
       renamed="$PROFILE_DIR/${renamed/\/qwen27b\//\/qwen38-27b\/}"
-      if [[ -f "${renamed%.env}.env" ]]; then
-        printf '%s\n' "${renamed%.env}.env"
-        return 0
-      fi
+      ;;
+    "$PROFILE_DIR"/2x2080Ti/qwen35b/*)
+      renamed="$PROFILE_DIR/2x2080Ti/qwen36-35b/${file#"$PROFILE_DIR"/2x2080Ti/qwen35b/}"
       ;;
   esac
+  if [[ -n "$renamed" && -f "${renamed%.env}.env" ]]; then
+    printf '%s\n' "${renamed%.env}.env"
+    return 0
+  fi
   [[ -n "${PROFILE_FILE:-}" ]] && printf '%s\n' "$PROFILE_FILE"
 }
 
@@ -1556,7 +1559,11 @@ model_families_match() {
 
 profile_family_dir() {
   if [[ -n "${PROFILE:-}" && "$PROFILE" == */* ]]; then
-    local parent=${PROFILE%/*}
+    local profile_file selected=$PROFILE
+    if profile_file=$(PROFILE_FILE= resolve_profile_file); then
+      selected=${profile_file#"$PROFILE_DIR"/}
+    fi
+    local parent=${selected%/*}
     [[ "${parent##*/}" == "user" ]] && parent=${parent%/*}
     printf '%s\n' "$parent"
     return 0
@@ -1566,7 +1573,7 @@ profile_family_dir() {
     qwen4*) echo qwen38flashnext ;;
     qwen35moe)
       if [[ "${MODEL_DIR,,} ${SERVED_NAME,,}" == *35b* ]]; then
-        echo qwen35b
+        echo qwen36-35b
       else
         echo qwen38-27b
       fi
@@ -1671,7 +1678,7 @@ default_qwen_reasoning_parser_applies() {
       ;;
   esac
   case "$profile_l" in
-    */qwen38-27b/*|*/qwen27b/*|*/qwen35b/*)
+    */qwen38-27b/*|*/qwen27b/*|*/qwen36-35b/*|*/qwen35b/*)
       return 0
       ;;
   esac
