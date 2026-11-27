@@ -13,7 +13,7 @@ selects the startup mode, defaulting to `fast`.
 
 - [2xT10](2xT10/README.md) has `qwen38-27b/w4a16` and `inkling-2-mini/official`.
 - [4xT10](4xT10/README.md) has `qwen38-27b/w8a16`, `qwen38-27b/w4a16`, and `inkling-2-mini/official`.
-- [2x2080Ti](2x2080Ti/README.md) lists native runtime profiles.
+- [2x2080Ti](2x2080Ti/README.md) lists profiles pending Docker validation.
 
 Build and launch Inkling profiles with `VLLM_DOCKER_VARIANT=inkling`.
 The DSpark/7 profile sets `SPECULATIVE_METHOD=dspark` and `SPECULATIVE_TOKENS=7`

@@ -25,7 +25,7 @@ class CheckpointFingerprintTests(unittest.TestCase):
                 nonlocal scans
                 scans += 1
                 if scans == 2:
-                    first.write_bytes(b"new")
+                    first.write_bytes(b"updated shard")
                 return scan(path, role)
 
             with patch.object(

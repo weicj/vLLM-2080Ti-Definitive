@@ -1,2 +1,0 @@
-# DGX Spark model configurations for GPQA evaluation
-gpt-oss-20b-sm120.yaml

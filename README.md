@@ -8,25 +8,23 @@ Language: English | [简体中文](README.zh-CN.md)
 The definitive vLLM inference runtime for dual RTX 2080 Ti and other SM75 GPUs,
 including Tesla T10/T40/T4, TITAN RTX, and Quadro RTX 6000/8000.
 
-This hardware-focused fork preserves the SM75-specific source changes, launcher
-profiles, and validation evidence needed to reproduce these Turing inference
-stacks. It is
-based on upstream vLLM; retain both the upstream license and attribution to
+This hardware-focused fork maintains the SM75 patches, launcher profiles, and
+validation evidence needed to reproduce these Turing inference stacks. It is
+based on upstream vLLM. Retain both the upstream license and attribution to
 `github.com/weicj` when redistributing a derivative.
 
 For usage feedback, feature requests, and community discussion, join the
 [Discord community](https://discord.gg/VFqVVySdMS).
 
 Current development version is `v0.3.0.dev0` on `vllm-2080ti-definitive-0.3.x`.
-**Docker is the default deployment.** `./build.sh` applies the SM75 patches
+**The 0.3.x branch runs on Docker.** `./build.sh` applies the SM75 patches
 and adds the FlashQLA extension to the official vLLM v0.34.0 image.
 `./launcher.sh` starts the resulting image with your model weights mounted
 from the host. The container runs a single copy of vLLM, installed in the
 image. [Official vLLM release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)
 
-The repository's `vllm/` and `csrc/` source trees serve the optional native
-build. The Docker build context contains the Dockerfile, patches, FlashQLA
-extension sources, and license files. [Build script](build.sh)
+This repository maintains the SM75 patches, FlashQLA extension, launcher,
+and hardware profiles. Native builds are available in the [0.2.x release](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3).
 
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
@@ -65,8 +63,8 @@ T10s (TP=4).
 
 ## 🚀 Build And Launch
 
-1. Run `./build.sh` in the 0.3.x checkout. The default build uses Docker
-   and takes the Torch and CUDA stack from the upstream release image. The
+1. Run `./build.sh` in the 0.3.x checkout. The Docker build takes the Torch
+   and CUDA stack from the upstream release image. The
    [image lock](PROJECT_RELEASE.env) pins the official linux/amd64 image by
    digest. The build applies the SM75 GDN prefill patch and compiles FlashQLA
    into the image.
@@ -132,24 +130,11 @@ port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Ink
 [Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
 [Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
 
-### Optional Native Build
-
-The native build uses the repository source and installs into a host `.venv`.
-This path provides the server-wide thinking budget and prefill barrier.
-It targets Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA
-13.0, and PyTorch 2.13. The unmaintained `0.1.x` line used CUDA 12.8 and
-PyTorch 2.11 with older kernels and compilers.
-
-```bash
-VLLM_RUNTIME_BACKEND=native ./build.sh
-VLLM_RUNTIME_BACKEND=native ./launcher.sh
-```
-
 ## 🧭 Profiles
 
 The [Profile Guide](profiles/README.md) explains the layout and route fields.
-The [2x2080Ti guide](profiles/2x2080Ti/README.md) lists the native profiles for
-dual RTX 2080 Ti.
+The [2x2080Ti guide](profiles/2x2080Ti/README.md) lists the dual RTX 2080 Ti profiles pending
+Docker validation.
 
 Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
 The launcher selects the startup mode and defaults to `MODE=fast`; the mode can
@@ -171,8 +156,6 @@ port, target and draft model paths, chat template, and reasoning defaults.
 - Two 16 GiB Tesla T10 GPUs over PCIe (TP=2 profiles)
 - Four 16 GiB Tesla T10 GPUs over PCIe (TP=4 profiles)
 - NVIDIA Turing / SM75, with validated tensor parallel sizes 2 and 4
-- Native runtime target: CUDA 13.0, PyTorch 2.13, Python 3.12
-- Native build host: Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15
 
 Other Turing cards need independent validation for VRAM capacity, PCIe/NVLink
 topology, model head dimensions, KV-cache dtype, and CUDA Graph behavior.
@@ -202,10 +185,9 @@ confirmed PCIe P2P and a separate profile validation.
 
 **Which CUDA and PyTorch versions apply?**
 
-The native runtime uses CUDA 13.0 with PyTorch 2.13. For the older CUDA 12.8 /
-PyTorch 2.11 stack, refer to the unmaintained `v0.1.x` compatibility line. Keep
-the PyTorch CUDA build, toolkit, FlashInfer/FlashQLA build, and selected profile
-aligned; they are not interchangeable runtime combinations.
+The 0.3.x image supplies CUDA 13.0 and PyTorch. The host needs a compatible
+NVIDIA driver, Docker, the NVIDIA Container Toolkit, and Python 3. The
+profile guides record the exact versions used for their benchmarks.
 
 **What other hardware risks matter?**
 
@@ -222,9 +204,8 @@ particularly during long prefill and repeated CUDA Graph/AOT compilation.
 ## 🙏 Credits And Upstream Projects
 
 This repository is a hardware-focused fork of
-[vLLM](https://github.com/vllm-project/vllm), licensed under Apache-2.0. It
-keeps the upstream project structure and adds local SM75 runtime patches,
-launch profiles, and dual-2080-Ti validation notes.
+vLLM, licensed under Apache-2.0. It provides SM75 runtime patches, launch
+profiles, and validation notes. [Upstream vLLM](https://github.com/vllm-project/vllm)
 
 Acceleration components used or integrated by this runtime include:
 

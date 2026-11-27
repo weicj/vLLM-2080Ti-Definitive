@@ -2,30 +2,8 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-VLLM_RUNTIME_BACKEND=native
 # shellcheck source=../../launcher.sh
 source "$ROOT/launcher.sh"
-
-assert_capture_sizes() {
-  local speculative_tokens=$1
-  local max_num_seqs=$2
-  local expected=$3
-  local actual
-
-  actual=$(speculative_cudagraph_capture_sizes \
-    "$speculative_tokens" "$max_num_seqs")
-  [[ "$actual" == "$expected" ]] || {
-    printf 'expected capture sizes %s for K=%s C=%s\n' \
-      "$expected" "$speculative_tokens" "$max_num_seqs" >&2
-    printf 'actual: %s\n' "$actual" >&2
-    return 1
-  }
-}
-
-assert_capture_sizes 7 1 "8"
-assert_capture_sizes 7 2 "8,16"
-assert_capture_sizes 7 3 "8,16,24"
-assert_capture_sizes 5 3 "6,12,18"
 
 dflash_profile=$(mktemp)
 trap 'rm -f "$dflash_profile"' EXIT
@@ -37,12 +15,11 @@ printf '%s\n' \
   'SPECULATIVE_METHOD=dflash' \
   'SPECULATIVE_TOKENS=7' > "$dflash_profile"
 
-unset LONG_PREFILL_TOKEN_THRESHOLD PREFILL_BATCH_BARRIER TP_SIZE
+unset LONG_PREFILL_TOKEN_THRESHOLD TP_SIZE
 apply_profile_overrides "$dflash_profile"
 TP_SIZE=2
 apply_speculative_runtime_defaults
 [[ "$LONG_PREFILL_TOKEN_THRESHOLD" == "2560" ]]
-[[ -z "${PREFILL_BATCH_BARRIER:-}" ]]
 
 MODEL_DIR=/tmp/test-model
 SERVED_NAME=test-model
@@ -58,23 +35,16 @@ SPECULATIVE_CONFIG='{"method":"dflash","model":"draft","num_speculative_tokens":
 LONG_PREFILL_TOKEN_THRESHOLD=256
 VLLM_ARGS=()
 
-configure_automatic_prefill_batch_barrier
-[[ "$PREFILL_BATCH_BARRIER" == "1" ]]
-
 build_args 127.0.0.1
 args=$(printf '%s\n' "${VLLM_ARGS[@]}")
-grep -Fxq -- '--prefill-batch-barrier' <<<"$args"
 grep -Fxq -- '--long-prefill-token-threshold' <<<"$args"
 grep -Fxq -- '256' <<<"$args"
-grep -Fxq -- '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[8,16,24],"max_cudagraph_capture_size":24}' <<<"$args"
+! grep -Fxq -- '--compilation-config' <<<"$args"
 
-MAX_NUM_SEQS=1
-configure_automatic_prefill_batch_barrier
-[[ "$PREFILL_BATCH_BARRIER" == "0" ]]
-VLLM_ARGS=()
+MODE=normal
 build_args 127.0.0.1
 args=$(printf '%s\n' "${VLLM_ARGS[@]}")
-! grep -Fxq -- '--prefill-batch-barrier' <<<"$args"
+grep -Fxq -- '{"cudagraph_mode":"PIECEWISE"}' <<<"$args"
 
 capacity_log=$(mktemp)
 trap 'rm -f "$dflash_profile" "$capacity_log"' EXIT

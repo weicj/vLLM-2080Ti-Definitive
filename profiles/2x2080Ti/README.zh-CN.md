@@ -2,7 +2,7 @@
 
 语言：[English](README.md) | 简体中文
 
-此页列出原生运行时的现有 profile。0.3.x Docker 实测见 [2xT10](../2xT10/README.zh-CN.md) 和 [4xT10](../4xT10/README.zh-CN.md)。
+下列 profile 沿用 0.2.x 的配置，待完成 0.3.x Docker 验证。0.3.x Docker 实测见 [2xT10](../2xT10/README.zh-CN.md) 和 [4xT10](../4xT10/README.zh-CN.md)。
 
 ## Qwen3.8-27B-FP8
 

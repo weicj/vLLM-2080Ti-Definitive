@@ -2,7 +2,10 @@
 # Shared by build.sh and the host-side launcher.
 VLLM_DOCKER_COMMAND=${VLLM_DOCKER_COMMAND:-docker}
 VLLM_DOCKER_VARIANT=${VLLM_DOCKER_VARIANT:-default}
-VLLM_RUNTIME_BACKEND=${VLLM_RUNTIME_BACKEND:-docker}
+if [[ "${VLLM_RUNTIME_BACKEND:-docker}" != docker ]]; then
+  printf 'This branch uses Docker. Use the 0.2.x release line for native builds.\n' >&2
+  exit 1
+fi
 case "$VLLM_DOCKER_VARIANT" in
   default) docker_image_suffix='' ;;
   inkling) docker_image_suffix='-inkling' ;;

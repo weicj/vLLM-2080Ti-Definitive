@@ -2,7 +2,7 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-This page lists the existing native profiles. The [2xT10](../2xT10/README.md) and [4xT10](../4xT10/README.md) guides contain the 0.3.x Docker measurements.
+These profiles were carried over from 0.2.x and are pending 0.3.x Docker validation. The [2xT10](../2xT10/README.md) and [4xT10](../4xT10/README.md) guides contain the 0.3.x Docker measurements.
 
 ## Qwen3.8-27B-FP8
 

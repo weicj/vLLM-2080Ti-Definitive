@@ -187,10 +187,10 @@ reset_spec_test_state
 SPECULATIVE_METHOD=dflash
 MAX_NUM_SEQS=1
 TP_SIZE=2
-VLLM_RUNTIME_BACKEND=native apply_speculative_runtime_defaults
+apply_speculative_runtime_defaults
 assert_eq dflash "$(effective_speculative_method)" "dflash method"
 assert_eq 7 "$(effective_speculative_tokens)" "dflash default tokens"
-assert_eq BLHNC "$VLLM_KV_CACHE_LAYOUT" "dflash target KV layout"
+[[ -z "${VLLM_KV_CACHE_LAYOUT:-}" ]]
 assert_eq TRITON_ATTN "$SPECULATIVE_ATTENTION_BACKEND" "dflash attention backend"
 assert_eq float16 "$SPECULATIVE_KV_CACHE_DTYPE" "dflash draft KV dtype"
 assert_eq detailed "$PER_REQUEST_SPEC_DECODE_METRICS" "dflash metrics"

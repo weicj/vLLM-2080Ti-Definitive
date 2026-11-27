@@ -13,10 +13,6 @@ PROJECT_RELEASE_FILE=${PROJECT_RELEASE_FILE:-"$MANAGER_ROOT/PROJECT_RELEASE.env"
 source "$PROJECT_RELEASE_FILE"
 # shellcheck source=tools/docker_runtime.sh
 source "$MANAGER_ROOT/tools/docker_runtime.sh"
-if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-  RUNTIME_IDENTITY=$DOCKER_RUNTIME_IDENTITY
-  BASE_VLLM_VERSION=$DOCKER_VLLM_VERSION
-fi
 RUNTIME_ROOT=${RUNTIME_ROOT:-"$MANAGER_ROOT"}
 PROFILE_DIR=${PROFILE_DIR:-"$MANAGER_ROOT/profiles"}
 TEMPLATE_DIR=${TEMPLATE_DIR:-"$PROFILE_DIR/templates"}
@@ -39,7 +35,7 @@ banner() {
 ============================================================
  $PROJECT_NAME v$VERSION
  Service manager
- Runtime: $RUNTIME_IDENTITY
+ Runtime: $DOCKER_RUNTIME_IDENTITY
  Author: $PROJECT_AUTHOR
 ============================================================
 EOF
@@ -470,39 +466,11 @@ effective_speculative_tokens() {
   esac
 }
 
-speculative_cudagraph_capture_sizes() {
-  local speculative_tokens=${1:-$(effective_speculative_tokens)}
-  local max_num_seqs=${2:-${MAX_NUM_SEQS:-1}}
-  local query_width sequence_count sizes=""
-
-  [[ "$speculative_tokens" =~ ^[0-9]+$ ]] || return 1
-  [[ "$max_num_seqs" =~ ^[1-9][0-9]*$ ]] || return 1
-
-  query_width=$((speculative_tokens + 1))
-  for ((sequence_count = 1; sequence_count <= max_num_seqs; sequence_count++)); do
-    [[ -z "$sizes" ]] || sizes+=","
-    sizes+=$((query_width * sequence_count))
-  done
-  printf '%s\n' "$sizes"
-}
-
 current_cudagraph_capture_label() {
-  local speculative_tokens
-
   if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
     printf 'custom\n'
-    return 0
-  fi
-
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    printf 'upstream defaults\n'
-    return 0
-  fi
-  speculative_tokens=$(effective_speculative_tokens)
-  if [[ -n "${SPECULATIVE_CONFIG:-}" || "$speculative_tokens" -gt 0 ]]; then
-    speculative_cudagraph_capture_sizes "$speculative_tokens" "${MAX_NUM_SEQS:-1}"
   else
-    printf '1\n'
+    printf 'upstream defaults\n'
   fi
 }
 
@@ -530,19 +498,14 @@ docker_default_cudagraph_mode() {
 }
 
 spec_graph_policy_label() {
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    local graph_mode
-    if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
-      printf 'custom'
-    elif [[ "$MODE" == safe ]]; then
-      printf 'eager'
-    else
-      graph_mode=$(docker_default_cudagraph_mode)
-      printf '%s' "${graph_mode:-upstream defaults}"
-    fi
+  local graph_mode
+  if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
+    printf 'custom'
+  elif [[ "$MODE" == safe ]]; then
+    printf 'eager'
   else
-    printf 'VLLM_SM75_SPEC_SYNC_MODE=%s, VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%s' \
-      "${VLLM_SM75_SPEC_SYNC_MODE:-auto}" "${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-0}"
+    graph_mode=$(docker_default_cudagraph_mode)
+    printf '%s' "${graph_mode:-upstream defaults}"
   fi
 }
 
@@ -941,33 +904,20 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   ENABLE_YARN
   ENABLE_PROMPT_TOKENS_DETAILS
   DISABLE_PREFIX_CACHING
-  VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH
   VLLM_ENFORCE_STRICT_TOOL_CALLING
   MAMBA_CACHE_MODE
   ENFORCE_EAGER
   NO_ASYNC_SCHEDULING
   CUSTOM_ALL_REDUCE_MODE
   DISABLE_LOG_STATS
-  VLLM_SM75_SPEC_SYNC_MODE
   RUNTIME_ROOT
   LOG_DIR
   STATE_FILE
-  FLASHQLA_ROOT
   START_TIMEOUT
   MM_IMAGE_LIMIT
   MM_LIMIT_JSON
-  CUDA_HOME
   CUDA_VISIBLE_DEVICES
   CUDA_DEVICE_ORDER
-  CUDACXX
-  CC
-  CXX
-  CUDAHOSTCXX
-  TORCH_CUDA_ARCH_LIST
-  TORCH_EXTENSIONS_DIR
-  FLASHINFER_ENABLE_AOT
-  FLASHINFER_WORKSPACE_BASE
-  RUN_HOME
 )
 
 NON_INTERACTIVE_BOOLEAN_KEYS=(
@@ -978,7 +928,6 @@ NON_INTERACTIVE_BOOLEAN_KEYS=(
   ENABLE_YARN
   ENABLE_PROMPT_TOKENS_DETAILS
   DISABLE_PREFIX_CACHING
-  VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH
   VLLM_ENFORCE_STRICT_TOOL_CALLING
   ENFORCE_EAGER
   NO_ASYNC_SCHEDULING
@@ -1427,7 +1376,7 @@ resolve_profile_file() {
 }
 
 is_docker_tp4_t10_qwen_profile() {
-  [[ "$VLLM_RUNTIME_BACKEND" == docker && "${TP_SIZE:-}" == 4 &&
+  [[ "${TP_SIZE:-}" == 4 &&
      "${MODEL_FAMILY:-}" == qwen35 ]] || return 1
   local profile_file
   profile_file=$(resolve_profile_file) || return 1
@@ -1436,7 +1385,6 @@ is_docker_tp4_t10_qwen_profile() {
 
 docker_t10_220k_prefix_cache() {
   local profile_file=${1:-}
-  [[ "$VLLM_RUNTIME_BACKEND" == docker ]] || return 1
   if [[ -z "$profile_file" ]]; then
     profile_file=$(resolve_profile_file) || return 1
   fi
@@ -1454,7 +1402,7 @@ docker_t10_220k_prefers_nccl() {
 
 docker_profile_gpu_util() {
   local file=$1 value=$2 route
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$file" == "$PROFILE_DIR"/4xT10/@(qwen38-27b|qwen27b)/* ]]; then
+  if [[ "$file" == "$PROFILE_DIR"/4xT10/@(qwen38-27b|qwen27b)/* ]]; then
     route=${file#"$PROFILE_DIR"/4xT10/}
     case "${route#*/}:$value" in
       w8a16/dflash2-fp16kv-1x240K-text-image.env:0.96|w8a16/dflash2-fp16kv-1x240K-text-image.env:0.965)
@@ -1529,7 +1477,6 @@ save_manager_state() {
     printf 'ATTENTION_BACKEND=%q\n' "${ATTENTION_BACKEND:-}"
     printf 'REASONING_MODE=%q\n' "${REASONING_MODE:-}"
     printf 'REASONING_PARSER=%q\n' "${REASONING_PARSER:-}"
-    printf 'REASONING_BUDGET=%q\n' "${REASONING_BUDGET:-}"
     printf 'DEFAULT_CHAT_TEMPLATE_KWARGS=%q\n' "${DEFAULT_CHAT_TEMPLATE_KWARGS:-}"
     printf 'ENABLE_AUTO_TOOL_CHOICE=%q\n' "${ENABLE_AUTO_TOOL_CHOICE:-0}"
     printf 'TOOL_CALL_PARSER=%q\n' "${TOOL_CALL_PARSER:-}"
@@ -1542,7 +1489,6 @@ save_manager_state() {
     printf 'CUSTOM_ALL_REDUCE_MODE=%q\n' "${CUSTOM_ALL_REDUCE_MODE:-}"
     printf 'DISABLE_CUSTOM_ALL_REDUCE=%q\n' "${DISABLE_CUSTOM_ALL_REDUCE:-}"
     printf 'DISABLE_LOG_STATS=%q\n' "${DISABLE_LOG_STATS:-}"
-    printf 'VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH=%q\n' "${VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH:-}"
     printf 'MODE=%q\n' "${MODE:-fast}"
     printf 'PORT=%q\n' "${PORT:-8000}"
     printf 'SERVICE_SCOPE=%q\n' "${SERVICE_SCOPE:-local}"
@@ -1697,9 +1643,6 @@ current_reasoning_label() {
   fi
   if [[ -n "${REASONING_PARSER:-}" ]]; then
     label+=" / parser=$REASONING_PARSER"
-  fi
-  if [[ -n "${REASONING_BUDGET:-}" ]]; then
-    label+=" / default budget=$REASONING_BUDGET"
   fi
   printf '%s\n' "$label"
 }
@@ -2055,12 +1998,9 @@ recommend_gpu_rank_order() {
   local tp_size=$2
   local pp_size=$3
   local helper="$MANAGER_ROOT/tools/recommend_gpu_topology.py"
-  local python_bin=${RUNTIME_ROOT:-$MANAGER_ROOT}/.venv/bin/python
 
   [[ -f "$helper" ]] || return 1
-  [[ -x "$python_bin" ]] || python_bin=$(command -v python3 || true)
-  [[ -n "$python_bin" ]] || return 1
-  "$python_bin" "$helper" --devices "$devices" --tp-size "$tp_size" --pp-size "$pp_size"
+  python3 "$helper" --devices "$devices" --tp-size "$tp_size" --pp-size "$pp_size"
 }
 
 model_history_file() {
@@ -2871,7 +2811,7 @@ show_help() {
   fi
   banner
   cat <<'EOF'
-This is the vLLM 2080 Ti Definitive service manager for a source checkout.
+This is the vLLM 2080 Ti Definitive Docker service manager.
 
 Main menu:
   1. Model weights: choose the target checkpoint and optional DFlash draft.
@@ -3328,7 +3268,6 @@ edit_reasoning_defaults_menu() {
     "thinking off"
     "custom kwargs"
     "reasoning parser"
-    "default thinking budget"
     "Return"
   )
   selected=$(menu_select "Reasoning defaults" "$(current_reasoning_label)" "${choices[@]}") || return 0
@@ -3357,13 +3296,6 @@ edit_reasoning_defaults_menu() {
       echo "Use off to disable the automatic parser default for diagnostics."
       REASONING_PARSER=$(prompt_optional "Reasoning parser" "${REASONING_PARSER:-}") || return 0
       save_manager_state
-      ;;
-    "default thinking budget")
-      REASONING_BUDGET=$(prompt_optional "Default thinking token budget" "${REASONING_BUDGET:-}") || return 0
-      echo "Default budget is applied only when a chat request does not provide thinking_token_budget."
-      echo
-      save_manager_state
-      pause_enter
       ;;
     "Return")
       return 0
@@ -4250,27 +4182,6 @@ stop_pid_tree() {
   fi
 }
 
-cleanup_vllm_residuals() {
-  local port=${1:-}
-  local served_name=${2:-}
-  local model_dir=${3:-}
-  local pid cmd
-
-  while IFS= read -r pid; do
-    [[ -n "$pid" && "$pid" != "$$" ]] || continue
-    cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-    [[ "$cmd" == *"vllm.entrypoints.openai.api_server"* ]] || continue
-    if [[ -n "$port" && "$cmd" != *"--port $port"* && "$cmd" != *"--port=${port}"* ]]; then
-      if [[ -z "$served_name" || "$cmd" != *"$served_name"* ]]; then
-        if [[ -z "$model_dir" || "$cmd" != *"$model_dir"* ]]; then
-          continue
-        fi
-      fi
-    fi
-    stop_pid_tree "$pid" || true
-  done < <(pgrep -f 'vllm.entrypoints.openai.api_server' 2>/dev/null || true)
-}
-
 cleanup_vllm_worker_residuals() {
   local mode=${1:-term}
   local signal owner pid user comm
@@ -4296,25 +4207,10 @@ cleanup_vllm_worker_residuals() {
 }
 
 cleanup_failed_launch() {
-  local pid_file=${1:-}
-  local pid
-
+  local pid_file=$1
   if [[ -f "${pid_file}.container" ]]; then
     docker_stop_service "$pid_file"
-    return $?
   fi
-  [[ "$VLLM_RUNTIME_BACKEND" != docker ]] || return 0
-  if [[ -n "$pid_file" && -f "$pid_file" ]]; then
-    pid=$(cat "$pid_file" 2>/dev/null || true)
-    stop_pid_tree "$pid" || true
-    sleep 1
-    stop_pid_tree "$pid" force || true
-    rm -f "$pid_file" "${pid_file}.token"
-  fi
-  cleanup_vllm_residuals "${PORT:-}" "${SERVED_NAME:-}" "${MODEL_DIR:-}" || true
-  cleanup_vllm_worker_residuals || true
-  sleep 1
-  cleanup_vllm_worker_residuals force || true
 }
 
 launch_token_pids() {
@@ -4675,31 +4571,12 @@ set_derived_default() {
 apply_mode() {
   normalize_mode
   case "$MODE" in
-    normal)
+    normal|fast|aggressive)
       set_derived_default ENFORCE_EAGER 0
       set_derived_default DISABLE_LOG_STATS 1
-      set_derived_default VLLM_SM75_SPEC_SYNC_MODE safe
-      set_derived_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 0
-      ;;
-    fast)
-      set_derived_default ENFORCE_EAGER 0
-      set_derived_default DISABLE_LOG_STATS 1
-      set_derived_default VLLM_SM75_SPEC_SYNC_MODE safe
-      set_derived_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
-      ;;
-    aggressive)
-      set_derived_default ENFORCE_EAGER 0
-      set_derived_default DISABLE_LOG_STATS 1
-      set_derived_default VLLM_SM75_SPEC_SYNC_MODE nosync
-      set_derived_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 1
       ;;
     safe)
       set_derived_default ENFORCE_EAGER 1
-      set_derived_default VLLM_SM75_SPEC_SYNC_MODE safe
-      set_derived_default VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH 0
-      ;;
-    *)
-      die "MODE must be safe, normal, fast, or aggressive."
       ;;
   esac
 }
@@ -4806,7 +4683,7 @@ validate_speculative_route() {
     mtp|dflash)
       ;;
     dspark)
-      if [[ "$VLLM_RUNTIME_BACKEND" != docker || "${MODEL_FAMILY:-}" != inkling2 ]]; then
+      if [[ "${MODEL_FAMILY:-}" != inkling2 ]]; then
         echo "ERROR: the DSpark shortcut requires the Inkling 2 Mini Docker runtime." >&2
         return 1
       fi
@@ -4891,9 +4768,6 @@ apply_speculative_runtime_defaults() {
         MTP_K=0
         export MTP_K
       fi
-      if [[ "$VLLM_RUNTIME_BACKEND" == native ]]; then
-        set_derived_default VLLM_KV_CACHE_LAYOUT BLHNC
-      fi
       set_derived_default SPECULATIVE_ATTENTION_BACKEND TRITON_ATTN
       set_derived_default SPECULATIVE_KV_CACHE_DTYPE float16
       set_derived_default PER_REQUEST_SPEC_DECODE_METRICS detailed
@@ -4931,150 +4805,23 @@ validate_mode_kv_policy() {
 }
 
 set_sm75_runtime_env() {
-  local cuda_candidate flashqla_candidate host_compiler_major
-  local runtime_cuda_version runtime_parent
   HF_ACTIVE_ENDPOINT=""
   HF_ROUTE_MODE_ACTIVE=""
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
-    export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
-    export PYTHONUNBUFFERED=1
-    if is_docker_tp4_t10_qwen_profile && [[ -z "${PYTORCH_ALLOC_CONF:-}" ]]; then
-      export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-    fi
-    if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
-      export PYTHONHASHSEED=0
-    fi
-    return 0
+  export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
+  export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
+  export PYTHONUNBUFFERED=1
+  if is_docker_tp4_t10_qwen_profile && [[ -z "${PYTORCH_ALLOC_CONF:-}" ]]; then
+    export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
   fi
-  export STABLE_ROOT="$RUNTIME_ROOT"
-  export HOME=${RUN_HOME:-"$HOME"}
   if [[ -n "${KV_DISK_CACHE_DIR:-}" ]]; then
     export PYTHONHASHSEED=0
-  fi
-  if [[ -z "${CUDA_HOME:-}" ]]; then
-    runtime_cuda_version=$(
-      "$RUNTIME_ROOT/.venv/bin/python" -c \
-        'import torch; print(torch.version.cuda or "")' 2>/dev/null || true
-    )
-    for cuda_candidate in \
-      "/usr/local/cuda-${runtime_cuda_version}" \
-      /usr/local/cuda \
-      /usr/local/cuda-12.8; do
-      if [[ -x "$cuda_candidate/bin/nvcc" ]]; then
-        CUDA_HOME="$cuda_candidate"
-        break
-      fi
-    done
-  fi
-  export CUDA_HOME
-  export CUDA_PATH="$CUDA_HOME"
-  export CUDACXX="$CUDA_HOME/bin/nvcc"
-  if [[ -z "${CC:-}" && -z "${CXX:-}" ]]; then
-    for host_compiler_major in 12 14; do
-      if [[ -x "/usr/bin/gcc-${host_compiler_major}" \
-        && -x "/usr/bin/g++-${host_compiler_major}" ]]; then
-        export CC="/usr/bin/gcc-${host_compiler_major}"
-        export CXX="/usr/bin/g++-${host_compiler_major}"
-        break
-      fi
-    done
-  fi
-  if [[ -z "${CUDAHOSTCXX:-}" && -n "${CXX:-}" ]]; then
-    export CUDAHOSTCXX="$CXX"
-  fi
-  export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-7.5}
-  # TileLang's TVM-FFI initialization is incompatible with SM75 TP workers.
-  # It is optional and not used by the supported SM75 runtime routes.
-  export VLLM_DISABLE_TILELANG=${VLLM_DISABLE_TILELANG:-1}
-  # The complete DFlash/DFlash2 implementation is hosted by Model Runner V2
-  # (candidate selector, dedicated KV precompute, and graph manager). Keep the
-  # legacy runner available for non-DFlash routes, but select V2 automatically
-  # whenever a DFlash route is requested.
-  if [[ "$(effective_speculative_method)" == "dflash" ]]; then
-    export VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-1}
-  fi
-  export CUDA_VISIBLE_DEVICES="${GPU_DEVICES:-${CUDA_VISIBLE_DEVICES:-$(detect_default_gpu_devices)}}"
-  export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
-  runtime_parent=$(cd -- "$RUNTIME_ROOT/.." && pwd)
-  if [[ -z "${FLASHQLA_ROOT:-}" ]]; then
-    for flashqla_candidate in \
-      "$RUNTIME_ROOT/.deps/FlashQLA-SM70-SM75" \
-      "$MANAGER_ROOT/.deps/FlashQLA-SM70-SM75" \
-      "$RUNTIME_ROOT/FlashQLA-SM70-SM75" \
-      "$MANAGER_ROOT/FlashQLA-SM70-SM75" \
-      "$runtime_parent/FlashQLA-SM70-SM75" \
-      /opt/FlashQLA-SM70-SM75; do
-      if [[ -d "$flashqla_candidate/flash_qla" ]]; then
-        FLASHQLA_ROOT="$flashqla_candidate"
-        break
-      fi
-    done
-  fi
-  export FLASHQLA_ROOT
-  export PYTHONPATH="$RUNTIME_ROOT${FLASHQLA_ROOT:+:$FLASHQLA_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
-  export PYTHONSAFEPATH=1
-  export PATH="$RUNTIME_ROOT/.venv/bin:${CUDA_HOME}/bin:$PATH"
-  if [[ -n "${FLASHQLA_ROOT:-}" ]]; then
-    export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-"$FLASHQLA_ROOT/.torch_extensions_vllm_flashqla_legacy"}
-  fi
-  export FLASHINFER_ENABLE_AOT=${FLASHINFER_ENABLE_AOT:-1}
-  # FlashInfer's Ninja files contain absolute venv and CUDA include paths.
-  # Isolate them per worktree so experiments cannot poison this runtime.
-  export FLASHINFER_WORKSPACE_BASE=${FLASHINFER_WORKSPACE_BASE:-"$MANAGER_ROOT"}
-  if [[ "${KV_CACHE_DTYPE:-}" == "int8_per_token_head" ]]; then
-    export VLLM_INT8KV_FA_PREFILL=${VLLM_INT8KV_FA_PREFILL:-1}
-    if [[ "$MODE" == "safe" ]]; then
-      export VLLM_INT8KV_FA_FIRST_CHUNK_DEQUANT=${VLLM_INT8KV_FA_FIRST_CHUNK_DEQUANT:-1}
-    else
-      export VLLM_INT8KV_FA_FIRST_CHUNK_DEQUANT=${VLLM_INT8KV_FA_FIRST_CHUNK_DEQUANT:-0}
-    fi
-    export VLLM_INT8KV_FA_CONTINUATION_DEQUANT=${VLLM_INT8KV_FA_CONTINUATION_DEQUANT:-1}
-    export VLLM_INT8KV_FA_CASCADE_DEQUANT=${VLLM_INT8KV_FA_CASCADE_DEQUANT:-1}
-    export VLLM_INT8KV_FA_CASCADE_TILE_TOKENS=${VLLM_INT8KV_FA_CASCADE_TILE_TOKENS:-65536}
-  fi
-  if [[ "${KV_CACHE_DTYPE:-}" == turboquant_* ]]; then
-    local tq_continuation_reserve_default=65536
-    if [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]]; then
-      local tq_max_model_len=${MAX_MODEL_LEN:-0}
-      local tq_max_num_seqs=${MAX_NUM_SEQS:-1}
-      if [[ "$tq_max_model_len" =~ ^[0-9]+$ && "$tq_max_num_seqs" =~ ^[0-9]+$ ]] \
-        && (( tq_max_model_len >= 240000 )) \
-        && (( tq_max_num_seqs <= 1 )); then
-        # Long single-seq TQ continuation/prefix-cache lanes need the larger
-        # workspace reserved up front; otherwise the first large continuation
-        # grows the workspace at runtime and can trip OOM or bad split paths.
-        tq_continuation_reserve_default=262144
-      fi
-    fi
-    export VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL=${VLLM_TURBOQUANT_USE_FLASHINFER_PREFILL:-1}
-    export VLLM_TURBOQUANT_FLASHINFER_BACKEND=${VLLM_TURBOQUANT_FLASHINFER_BACKEND:-fa2}
-    export VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS=${VLLM_TURBOQUANT_CONTINUATION_WORKSPACE_RESERVE_TOKENS:-$tq_continuation_reserve_default}
-    export VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE=${VLLM_TURBOQUANT_CUDAGRAPH_SPEC_DECODE_SAFE:-1}
-    export VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE=${VLLM_TURBOQUANT_SPEC_DECODE_CHUNK_SIZE:-1}
-    export VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK=${VLLM_TURBOQUANT_CONTINUATION_SDPA_Q_CHUNK:-512}
-    export VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS=${VLLM_TURBOQUANT_CONTINUATION_SDPA_MAX_QK_CELLS:-16777216}
-    export VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH=${VLLM_TURBOQUANT_SPEC_CONTINUATION_DECODE_FASTPATH:-1}
-  fi
-  # Keep generated kernels inside this runtime tree. Reusing cache dirs from
-  # experiment worktrees can leave absolute paths to deleted environments.
-  export TORCHINDUCTOR_CACHE_DIR="$MANAGER_ROOT/torchinductor-cache"
-  export TRITON_CACHE_DIR="$MANAGER_ROOT/triton-cache"
-  export PYTHONUNBUFFERED=1
-  if [[ "${ENABLE_AUTO_TOOL_CHOICE:-0}" == "1" ]]; then
-    export VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-1}
-  fi
-  if [[ -n "${REASONING_BUDGET:-}" ]]; then
-    export VLLM_DEFAULT_THINKING_TOKEN_BUDGET="$REASONING_BUDGET"
-  else
-    unset VLLM_DEFAULT_THINKING_TOKEN_BUDGET
   fi
 }
 
 build_args() {
   local host_arg=$1
   local custom_all_reduce_mode dtype=half
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "$MODEL_FAMILY" == inkling2 ]]; then
+  if [[ "$MODEL_FAMILY" == inkling2 ]]; then
     dtype=bfloat16
   fi
 
@@ -5093,16 +4840,13 @@ build_args() {
     --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
   )
 
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker && "${MODEL_FAMILY:-}" == inkling2 ]] ||
+  if [[ "${MODEL_FAMILY:-}" == inkling2 ]] ||
      { [[ -z "${KV_DISK_CACHE_DIR:-}" ]] && is_docker_tp4_t10_qwen_profile; }; then
     VLLM_ARGS+=(--no-enable-extensible-kv-cache)
   fi
 
   if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
     VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
-  fi
-  if [[ "$VLLM_RUNTIME_BACKEND" == native && "${PREFILL_BATCH_BARRIER:-0}" == "1" ]]; then
-    VLLM_ARGS+=(--prefill-batch-barrier)
   fi
 
   [[ -n "${PP_SIZE:-}" ]] && VLLM_ARGS+=(--pipeline-parallel-size "$PP_SIZE")
@@ -5164,7 +4908,7 @@ build_args() {
   fi
   [[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE_FILE")
 
-  local spec_method spec_tokens capture_sizes capture_max generated_speculative_config
+  local spec_method spec_tokens generated_speculative_config
   spec_method=$(effective_speculative_method)
   spec_tokens=$(effective_speculative_tokens)
   if [[ "$spec_tokens" =~ ^[0-9]+$ ]] && (( spec_tokens > 0 )) && \
@@ -5180,55 +4924,17 @@ build_args() {
   fi
 
   local cudagraph_mode
-  case "$MODE" in
-    safe)
-      cudagraph_mode=PIECEWISE
-      ;;
-    normal)
-      if (( spec_tokens > 0 )) || [[ -n "${SPECULATIVE_CONFIG:-}" ]]; then
-        cudagraph_mode=PIECEWISE
-      else
-        cudagraph_mode=FULL_AND_PIECEWISE
-      fi
-      ;;
-    fast|aggressive)
-      cudagraph_mode=FULL_AND_PIECEWISE
-      ;;
-    *)
-      cudagraph_mode=PIECEWISE
-      ;;
-  esac
-
   if [[ -n "${COMPILATION_CONFIG_JSON:-}" ]]; then
     VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG_JSON")
-  elif [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
+  else
     cudagraph_mode=$(docker_default_cudagraph_mode "$spec_tokens" "$spec_method")
     if [[ -n "$cudagraph_mode" ]]; then
       VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"$cudagraph_mode\"}")
     fi
-  elif [[ -n "${SPECULATIVE_CONFIG:-}" || "$spec_tokens" -gt 0 ]]; then
-    capture_sizes=$(speculative_cudagraph_capture_sizes "$spec_tokens" "$MAX_NUM_SEQS") || \
-      die "Unable to derive speculative CUDA graph capture sizes."
-    capture_max=$((MAX_NUM_SEQS * (spec_tokens + 1)))
-    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[${capture_sizes}],\"max_cudagraph_capture_size\":${capture_max}}")
-  else
-    VLLM_ARGS+=(--compilation-config "{\"cudagraph_mode\":\"${cudagraph_mode}\",\"cudagraph_capture_sizes\":[1],\"max_cudagraph_capture_size\":1}")
-  fi
-}
-
-launcher_python() {
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    python3 "$@"
-  else
-    "$RUNTIME_ROOT/.venv/bin/python" "$@"
   fi
 }
 
 run_performance_helper() {
-  if [[ "$VLLM_RUNTIME_BACKEND" == native ]]; then
-    launcher_python "$@"
-    return
-  fi
   docker_runtime_options || return 1
   docker_runtime_mount "$1" readonly || return 1
   docker_runtime_mount "$MODEL_DIR" readonly || return 1
@@ -5237,42 +4943,31 @@ run_performance_helper() {
 }
 
 start_server_process() {
-  local pid_file=$1 log_file=$2 token=$3 container
-  shift 3
+  local pid_file=$1 log_file=$2 container
   local -a detach=(nohup)
   if command -v setsid >/dev/null 2>&1; then
     detach+=(setsid)
   fi
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    docker_server_options || return 1
-    if [[ -e "${pid_file}.container" ]]; then
-      docker_stop_service "$pid_file" || return 1
-    fi
-    container=$("$VLLM_DOCKER_COMMAND" create "${DOCKER_RUNTIME_OPTIONS[@]}" \
-      "$VLLM_DOCKER_IMAGE" "${VLLM_ARGS[@]}" 2>>"$log_file") || {
-      tail -n 20 "$log_file" >&2
-      return 1
-    }
-    printf '%s\n' "$container" >"${pid_file}.container" || {
-      "$VLLM_DOCKER_COMMAND" rm "$container" >/dev/null
-      return 1
-    }
-    "${detach[@]}" "$VLLM_DOCKER_COMMAND" start --attach "$container" >>"$log_file" 2>&1 &
-  else
-    "${detach[@]}" env "VLLM_LAUNCH_TOKEN=$token" "$@" "$RUNTIME_ROOT/.venv/bin/python" \
-      -m vllm.entrypoints.openai.api_server "${VLLM_ARGS[@]}" >>"$log_file" 2>&1 &
-    printf '%s\n' "$token" >"${pid_file}.token"
+  docker_server_options || return 1
+  if [[ -e "${pid_file}.container" ]]; then
+    docker_stop_service "$pid_file" || return 1
   fi
+  container=$("$VLLM_DOCKER_COMMAND" create "${DOCKER_RUNTIME_OPTIONS[@]}" \
+    "$VLLM_DOCKER_IMAGE" "${VLLM_ARGS[@]}" 2>>"$log_file") || {
+    tail -n 20 "$log_file" >&2
+    return 1
+  }
+  printf '%s\n' "$container" >"${pid_file}.container" || {
+    "$VLLM_DOCKER_COMMAND" rm "$container" >/dev/null
+    return 1
+  }
+  "${detach[@]}" "$VLLM_DOCKER_COMMAND" start --attach "$container" >>"$log_file" 2>&1 &
   CURRENT_SERVER_PID=$!
   printf '%s\n' "$CURRENT_SERVER_PID" >"$pid_file"
 }
 
 server_command_summary() {
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    printf '%q ' "$VLLM_DOCKER_COMMAND" run --network host "$VLLM_DOCKER_IMAGE"
-  else
-    printf '%q ' "$RUNTIME_ROOT/.venv/bin/python" -m vllm.entrypoints.openai.api_server
-  fi
+  printf '%q ' "$VLLM_DOCKER_COMMAND" run --network host "$VLLM_DOCKER_IMAGE"
   printf '%q ' "${VLLM_ARGS[@]}"
 }
 
@@ -5500,7 +5195,7 @@ run_compile_prewarm() {
   local original_len=$MAX_MODEL_LEN
   local original_name=$SERVED_NAME
   local original_pid=${CURRENT_SERVER_PID:-}
-  local prewarm_name prewarm_safe prewarm_log prewarm_pid_file ready_rc=0 cleanup_rc=0 launch_token
+  local prewarm_name prewarm_safe prewarm_log prewarm_pid_file ready_rc=0 cleanup_rc=0
 
   prewarm_name="${SERVED_NAME}-compile-prewarm-${prewarm_len}"
   prewarm_safe=$(printf '%s' "$prewarm_name" | tr -c 'A-Za-z0-9_.-' '_' | sed 's/_*$//')
@@ -5533,8 +5228,7 @@ run_compile_prewarm() {
   echo "Running compile prewarm at max_model_len=$prewarm_len, then retrying the original $original_len context."
   echo "  Prewarm log: $prewarm_log"
 
-  launch_token="prewarm-$$-$STAMP-$RANDOM$RANDOM"
-  start_server_process "$prewarm_pid_file" "$prewarm_log" "$launch_token" || {
+  start_server_process "$prewarm_pid_file" "$prewarm_log" || {
     MAX_MODEL_LEN=$original_len
     SERVED_NAME=$original_name
     return 1
@@ -5568,7 +5262,7 @@ run_compile_prewarm() {
 smoke_test() {
   local url_host=$1
   local model_id model_output
-  model_output=$(launcher_python - "$url_host" "$PORT" <<'PY'
+  model_output=$(python3 - "$url_host" "$PORT" <<'PY'
 import json
 import sys
 import urllib.request
@@ -5585,7 +5279,7 @@ PY
   # Runtime sitecustomize hooks may print diagnostic lines on Python startup.
   model_id=$(printf '%s\n' "$model_output" | tail -n 1)
 
-  launcher_python - "$url_host" "$PORT" "$model_id" <<'PY'
+  python3 - "$url_host" "$PORT" "$model_id" <<'PY'
 import json
 import sys
 import urllib.request
@@ -5652,10 +5346,6 @@ startup_performance_eligibility_reason() {
     printf '%s\n' "unavailable: MAX_MODEL_LEN must be at least 4224 for the fixed 4K/128 lane"
     return 1
   fi
-  if [[ "$VLLM_RUNTIME_BACKEND" == native && ! -x "$RUNTIME_ROOT/.venv/bin/python" ]]; then
-    printf '%s\n' "unavailable: runtime Python is missing: $RUNTIME_ROOT/.venv/bin/python"
-    return 1
-  fi
   if ! helper=$(startup_performance_helper_path); then
     printf '%s\n' "unavailable: tools/profile_request.py was not found under RUNTIME_ROOT or the launcher root"
     return 1
@@ -5675,7 +5365,7 @@ startup_performance_sample_values() {
   local expected_prompt=${2:-4096}
   local expected_completion=${3:-128}
 
-  printf '%s' "$result" | launcher_python -c '
+  printf '%s' "$result" | python3 -c '
 import json
 import math
 import sys
@@ -5718,7 +5408,7 @@ print(f"{prefill:.6f}\t{decode:.6f}")
 }
 
 startup_performance_statistics() {
-  launcher_python - "$@" <<'PY'
+  python3 - "$@" <<'PY'
 import statistics
 import sys
 
@@ -5879,8 +5569,7 @@ maybe_run_startup_performance_test() {
 
 launch_server() {
   mkdir -p "$LOG_DIR"
-  local safe_name log_file pid_file host_arg url_host launch_token
-  local -a server_env=()
+  local safe_name log_file pid_file host_arg url_host
   if [[ -z "${SERVED_NAME:-}" ]]; then
     SERVED_NAME=$(basename "$MODEL_DIR")
   fi
@@ -5914,7 +5603,6 @@ launch_server() {
     echo "  MTP graph policy: $(spec_graph_policy_label)"
     echo "  VLLM_DISABLE_TILELANG=${VLLM_DISABLE_TILELANG:-0}"
     echo "  VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}"
-    echo "  VLLM_DEFAULT_THINKING_TOKEN_BUDGET=${VLLM_DEFAULT_THINKING_TOKEN_BUDGET:-}"
     echo "Command:"
     echo "  $(server_command_summary)"
     return 0
@@ -5929,28 +5617,18 @@ launch_server() {
   fi
 
   configure_dflash_download_route || return 1
-  [[ -n "${HF_ACTIVE_ENDPOINT:-}" ]] && server_env+=("HF_ENDPOINT=$HF_ACTIVE_ENDPOINT")
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    "$VLLM_DOCKER_COMMAND" image inspect "$VLLM_DOCKER_IMAGE" >/dev/null || {
-      echo "ERROR: Docker runtime image unavailable. Run ./build.sh first." >&2
-      return 1
-    }
-  else
-    check_checkpoint_mmap_policy || return 1
-  fi
+  "$VLLM_DOCKER_COMMAND" image inspect "$VLLM_DOCKER_IMAGE" >/dev/null || {
+    echo "ERROR: Docker runtime image unavailable. Run ./build.sh first." >&2
+    return 1
+  }
   warn_display_gpu_occupancy || true
 
   {
     echo "============================================================"
     echo "$PROJECT_NAME v$VERSION"
-    echo "Runtime identity: $RUNTIME_IDENTITY"
-    echo "Base vLLM: $BASE_VLLM_VERSION"
-    if [[ "$VLLM_RUNTIME_BACKEND" == native ]]; then
-      echo "Validated CUDA/Torch: CUDA $VALIDATED_CUDA_VERSION / torch $VALIDATED_TORCH_VERSION"
-      echo "Reference NVIDIA driver: $VALIDATED_NVIDIA_DRIVER_VERSION"
-    else
-      echo "Image: $VLLM_DOCKER_IMAGE"
-    fi
+    echo "Runtime identity: $DOCKER_RUNTIME_IDENTITY"
+    echo "Base vLLM: $DOCKER_VLLM_VERSION"
+    echo "Image: $VLLM_DOCKER_IMAGE"
     echo "Launch time: $(date '+%F %T %Z')"
     echo "Served name: $SERVED_NAME"
     echo "Model: $MODEL_DIR"
@@ -5983,11 +5661,7 @@ launch_server() {
   echo "  Model: $MODEL_DIR"
   echo "  Bind: $host_arg:$PORT"
 
-  launch_token="launch-$$-$STAMP-$RANDOM$RANDOM"
-  start_server_process "$pid_file" "$log_file" "$launch_token" "${server_env[@]}" || {
-    restore_overcommit_memory || true
-    return 1
-  }
+  start_server_process "$pid_file" "$log_file" || return 1
 
   local ready_rc=0
   wait_for_ready "$log_file" "$url_host" || ready_rc=$?
@@ -5996,10 +5670,8 @@ launch_server() {
     if [[ "$ready_rc" == "130" ]]; then
       echo "Startup cancelled; cleaning up server processes."
       if ! cleanup_cancelled_launch "$pid_file"; then
-        restore_overcommit_memory || true
         return 131
       fi
-      restore_overcommit_memory || true
       return 130
     fi
     if cold_compile_admission_failure "$log_file"; then
@@ -6019,7 +5691,6 @@ launch_server() {
         else
           retry_rc=$?
           if [[ "$retry_rc" == "130" || "$retry_rc" == "131" ]]; then
-            restore_overcommit_memory || true
             return "$retry_rc"
           fi
         fi
@@ -6031,7 +5702,6 @@ launch_server() {
     tail -n 120 "$log_file" || true
     echo "Cleaning up failed server processes..."
     cleanup_failed_launch "$pid_file"
-    restore_overcommit_memory || true
     return 1
   fi
 
@@ -6039,11 +5709,9 @@ launch_server() {
   if ! validate_configured_kv_concurrency "$log_file"; then
     echo "Cleaning up service that cannot satisfy configured concurrency..."
     cleanup_failed_launch "$pid_file"
-    restore_overcommit_memory || true
     return 1
   fi
   if [[ "${SKIP_STARTUP_SMOKE:-0}" == "1" ]]; then
-    restore_overcommit_memory || true
 
     local api_local="http://127.0.0.1:${PORT}/v1"
     local api_lan=""
@@ -6083,11 +5751,8 @@ launch_server() {
     echo "Log: $log_file"
     echo "Cleaning up failed server processes..."
     cleanup_failed_launch "$pid_file"
-    restore_overcommit_memory || true
     return 1
   fi
-
-  restore_overcommit_memory || true
 
   local api_local="http://127.0.0.1:${PORT}/v1"
   local api_lan=""
@@ -6123,127 +5788,6 @@ launch_server() {
   fi
 }
 
-set_overcommit_memory_one() {
-  if [[ -w /proc/sys/vm/overcommit_memory ]]; then
-    echo 1 >/proc/sys/vm/overcommit_memory
-    return 0
-  fi
-  if command -v sudo >/dev/null 2>&1; then
-    sudo sysctl -w vm.overcommit_memory=1 >/dev/null
-    return 0
-  fi
-  return 1
-}
-
-restore_overcommit_memory() {
-  local value=${OVERCOMMIT_RESTORE_VALUE:-}
-  [[ "${OVERCOMMIT_CHANGED:-0}" == "1" && -n "$value" ]] || return 0
-
-  if [[ -w /proc/sys/vm/overcommit_memory ]]; then
-    echo "$value" >/proc/sys/vm/overcommit_memory
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo sysctl -w "vm.overcommit_memory=$value" >/dev/null
-  else
-    echo "WARNING: could not restore vm.overcommit_memory=$value; missing sudo/root permission." >&2
-    return 1
-  fi
-
-  OVERCOMMIT_CHANGED=0
-  OVERCOMMIT_RESTORE_VALUE=""
-  echo "INFO: Restored vm.overcommit_memory=$value."
-}
-
-trap 'restore_overcommit_memory >/dev/null 2>&1 || true' EXIT
-
-meminfo_kib() {
-  local key=$1
-  awk -v key="$key:" '$1 == key { print $2; exit }' /proc/meminfo 2>/dev/null
-}
-
-commit_headroom_bytes() {
-  local limit_kib committed_kib
-  limit_kib=$(meminfo_kib CommitLimit)
-  committed_kib=$(meminfo_kib Committed_AS)
-  [[ "$limit_kib" =~ ^[0-9]+$ && "$committed_kib" =~ ^[0-9]+$ ]] || return 1
-  if (( limit_kib <= committed_kib )); then
-    echo 0
-  else
-    echo $(((limit_kib - committed_kib) * 1024))
-  fi
-}
-
-bytes_to_gib() {
-  local bytes=${1:-0}
-  awk -v bytes="$bytes" 'BEGIN { printf "%.2f GiB", bytes / 1024 / 1024 / 1024 }'
-}
-
-largest_safetensors_file() {
-  find "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -printf '%s\t%p\n' 2>/dev/null |
-    sort -nr |
-    head -n 1
-}
-
-check_checkpoint_mmap_policy() {
-  local overcommit largest_line largest_bytes largest_path headroom_bytes answer
-
-  [[ -r /proc/sys/vm/overcommit_memory ]] || return 0
-  overcommit=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || true)
-  [[ "$overcommit" == "0" ]] || return 0
-
-  largest_line=$(largest_safetensors_file)
-  [[ -n "$largest_line" ]] || return 0
-  largest_bytes=${largest_line%%$'\t'*}
-  largest_path=${largest_line#*$'\t'}
-  [[ "$largest_bytes" =~ ^[0-9]+$ ]] || return 0
-  headroom_bytes=$(commit_headroom_bytes 2>/dev/null || true)
-  [[ "$headroom_bytes" =~ ^[0-9]+$ ]] || return 0
-  (( largest_bytes > headroom_bytes )) || return 0
-
-  echo
-  echo "Checkpoint mmap preflight"
-  echo "  Largest safetensors: $(bytes_to_gib "$largest_bytes")"
-  echo "  Commit headroom:     $(bytes_to_gib "$headroom_bytes")"
-  echo "  File:                $largest_path"
-  echo
-  echo "This host is using vm.overcommit_memory=0, and the largest checkpoint"
-  echo "file is bigger than the current commit headroom. vLLM may fail with:"
-  echo "  unable to mmap ... Cannot allocate memory (12)"
-  echo
-
-  if is_tty; then
-    answer=$(read_line_with_esc "Enable vm.overcommit_memory=1 with sudo now? [y/N]: ") || return 1
-    case "$answer" in
-      y|Y)
-        ;;
-      *)
-        echo "Start cancelled. vm.overcommit_memory was not changed." >&2
-        return 1
-        ;;
-    esac
-  elif ! [[ -w /proc/sys/vm/overcommit_memory ]]; then
-    echo "ERROR: checkpoint mmap needs vm.overcommit_memory=1, but non-interactive launcher cannot prompt for sudo." >&2
-    return 1
-  fi
-
-  if set_overcommit_memory_one; then
-    OVERCOMMIT_RESTORE_VALUE="$overcommit"
-    OVERCOMMIT_CHANGED=1
-    echo "INFO: Enabled vm.overcommit_memory=1 temporarily for this launch."
-    return 0
-  fi
-
-  echo "ERROR: could not enable vm.overcommit_memory=1. The current user needs sudo/root permission." >&2
-  return 1
-}
-
-configure_automatic_prefill_batch_barrier() {
-  if [[ "${MAX_NUM_SEQS:-1}" =~ ^[1-9][0-9]*$ ]] && (( 10#$MAX_NUM_SEQS > 1 )); then
-    PREFILL_BATCH_BARRIER=1
-  else
-    PREFILL_BATCH_BARRIER=0
-  fi
-}
-
 prepare_runtime_defaults() {
   if [[ -z "${MODEL_DIR:-}" ]]; then
     echo "ERROR: MODEL_DIR is required. Choose item 1 first." >&2
@@ -6269,7 +5813,6 @@ prepare_runtime_defaults() {
   GPU_UTIL=${GPU_UTIL:-$(default_gpu_util)}
   MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-2048}
   MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
-  configure_automatic_prefill_batch_barrier
   MTP_K=${MTP_K:-0}
   SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH=${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}
   SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION=${SPECULATIVE_USE_LOCAL_ARGMAX_REDUCTION:-0}
@@ -6299,17 +5842,14 @@ prepare_runtime_defaults() {
     fi
   fi
   PORT=${PORT:-8000}
-  if [[ "$VLLM_RUNTIME_BACKEND" == docker ]]; then
-    PREFILL_BATCH_BARRIER=0
-    if [[ -n "${REASONING_BUDGET:-}" ]]; then
-      echo "ERROR: a server-wide thinking budget requires the native runtime. The Docker API accepts thinking_token_budget per request." >&2
-      return 1
-    fi
-    if [[ "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" == 1 ]] || \
-      [[ "$(json_config_field "${SPECULATIVE_CONFIG:-}" disable_padded_drafter_batch 2>/dev/null || true)" == true ]]; then
-      echo "ERROR: vLLM $DOCKER_VLLM_VERSION removed disable_padded_drafter_batch." >&2
-      return 1
-    fi
+  if config_key_has_override REASONING_BUDGET && [[ -n "${REASONING_BUDGET:-}" ]]; then
+    echo "ERROR: Set thinking_token_budget per request in the Docker API." >&2
+    return 1
+  fi
+  if [[ "${SPECULATIVE_DISABLE_PADDED_DRAFTER_BATCH:-0}" == 1 ]] || \
+    [[ "$(json_config_field "${SPECULATIVE_CONFIG:-}" disable_padded_drafter_batch 2>/dev/null || true)" == true ]]; then
+    echo "ERROR: vLLM $DOCKER_VLLM_VERSION removed disable_padded_drafter_batch." >&2
+    return 1
   fi
   MODE=${MODE:-fast}
   normalize_mode
@@ -6357,8 +5897,8 @@ print_review() {
   cat <<EOF
 Launch summary:
   Fork release:         v$VERSION
-  Runtime identity:     $RUNTIME_IDENTITY
-  Base vLLM:            $BASE_VLLM_VERSION
+  Runtime identity:     $DOCKER_RUNTIME_IDENTITY
+  Base vLLM:            $DOCKER_VLLM_VERSION
   Model directory:      $MODEL_DIR
   Draft model:          ${SPECULATIVE_MODEL:-not selected}
   Served name:          $SERVED_NAME
@@ -6382,7 +5922,6 @@ Launch summary:
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
   Prefill threshold:    ${LONG_PREFILL_TOKEN_THRESHOLD:-auto}
-  Prefill batch barrier: ${PREFILL_BATCH_BARRIER:-0}
   CUDA graph captures:  $(current_cudagraph_capture_label)
   Spec decode:          $(current_speculative_label)
   Spec metrics:         ${PER_REQUEST_SPEC_DECODE_METRICS:-none}
@@ -6795,16 +6334,6 @@ main() {
   apply_launcher_path_defaults
   NON_INTERACTIVE=$(normalize_bool "${NON_INTERACTIVE:-0}")
   PRINT_CONFIG=$(normalize_bool "${PRINT_CONFIG:-0}")
-
-  case "$VLLM_RUNTIME_BACKEND" in
-    docker) ;;
-    native) ;;
-    *) die "VLLM_RUNTIME_BACKEND must be docker or native." ;;
-  esac
-  if [[ "$VLLM_RUNTIME_BACKEND" == native && ! -x "$RUNTIME_ROOT/.venv/bin/python" && "$PRINT_CONFIG" != 1 ]]; then
-    banner
-    die ".venv is missing under RUNTIME_ROOT=$RUNTIME_ROOT. Run ./build.sh first or set RUNTIME_ROOT."
-  fi
 
   mkdir -p "$LOG_DIR"
 

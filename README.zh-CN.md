@@ -8,20 +8,20 @@
 面向双 RTX 2080 Ti 及其他 SM75 GPU 的 vLLM 专用推理运行时，包括 Tesla
 T10/T40/T4、TITAN RTX 和 Quadro RTX 6000/8000。
 
-这个硬件定向 fork 保留了复现上述 Turing 推理栈所需的 SM75 专用源码修改、launcher
-profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须保留上游许可证、上游署名以及
+这个硬件定向 fork 维护复现上述 Turing 推理栈所需的 SM75 补丁、launcher
+profile 和验证资料。它基于上游 vLLM。再发布派生版本时必须保留上游许可证、上游署名以及
 `github.com/weicj` 的项目署名。
 
 欢迎在 [Discord 交流群](https://discord.gg/VFqVVySdMS) 分享使用体验、提出功能请求，
 以及交流部署和运行问题。
 
 当前开发版本为 `v0.3.0.dev0`，分支为 `vllm-2080ti-definitive-0.3.x`。
-**默认使用 Docker 部署。** `./build.sh` 在官方 vLLM v0.34.0 镜像上应用 SM75
+**0.3.x 使用 Docker 部署。** `./build.sh` 在官方 vLLM v0.34.0 镜像上应用 SM75
 补丁并加入 FlashQLA 扩展。`./launcher.sh` 启动构建好的镜像，从宿主机挂载模型权重。
 容器运行的是镜像里安装的那一套 vLLM。[官方 vLLM 发行版](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)
 
-仓库中的 `vllm/` 和 `csrc/` 源码用于可选的原生构建。Docker 构建只取
-Dockerfile、补丁、FlashQLA 扩展源码和许可证文件。[构建脚本](build.sh)
+仓库维护 SM75 补丁、FlashQLA 扩展、启动脚本和硬件 profile。
+需要宿主机原生构建的用户可使用 [0.2.x 发行版](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)。
 
 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
@@ -57,7 +57,7 @@ Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10�
 
 ## 🚀 构建与启动
 
-1. 在 0.3.x 工作树中运行 `./build.sh`。默认构建使用官方镜像提供的 Torch 和 CUDA，
+1. 在 0.3.x 工作树中运行 `./build.sh`。Docker 构建使用官方镜像提供的 Torch 和 CUDA，
    [镜像配置](PROJECT_RELEASE.env) 用 digest 锁定官方 linux/amd64 镜像。
    构建时应用 SM75 GDN prefill 补丁，并将编译好的 FlashQLA 扩展装入镜像。
 
@@ -116,22 +116,10 @@ profile，将 `TP_SIZE` 设为 `4`，并选择四张支持 PCIe P2P 的 GPU。
 [上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
 [社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)
 
-### 可选的原生构建
-
-原生构建使用仓库源码，安装到宿主机的 `.venv`。服务级思考预算和 prefill barrier
-可通过这条路径使用。目标环境为 Ubuntu 26.04 及以上、Linux kernel 7 及以上、
-GCC/G++ 15、CUDA 13.0 和 PyTorch 2.13。已停止维护的 `0.1.x` 使用 CUDA 12.8、
-PyTorch 2.11 及较早的内核和编译器。
-
-```bash
-VLLM_RUNTIME_BACKEND=native ./build.sh
-VLLM_RUNTIME_BACKEND=native ./launcher.sh
-```
-
 ## 🧭 Profile 与推荐路线
 
 目录结构和路线字段见 [Profile 指南](profiles/README.zh-CN.md)。
-双 RTX 2080 Ti 的原生路线见 [2x2080Ti Profile](profiles/2x2080Ti/README.zh-CN.md)。
+双 RTX 2080 Ti 的待验证配置见 [2x2080Ti Profile](profiles/2x2080Ti/README.zh-CN.md)。
 
 Profile 按扁平路径 `profiles/<硬件>/<模型>/<权重>/<路线>.env` 组织。启动模式由
 launcher 选择，默认 `MODE=fast`；也可以由 launcher 或 profile 显式设置。
@@ -152,8 +140,6 @@ reasoning 默认值由 launcher 统一管理。
 - 两张通过 PCIe 连接的 16 GiB Tesla T10（TP=2 Profile）
 - 四张通过 PCIe 连接的 16 GiB Tesla T10（TP=4 Profile）
 - NVIDIA Turing / SM75，已验证的 tensor parallel size 为 2 和 4
-- 原生运行时目标：CUDA 13.0、PyTorch 2.13、Python 3.12
-- 原生构建主机：Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15
 
 其它 Turing 显卡仍需针对显存容量、PCIe/NVLink 拓扑、模型 head dimension、
 KV cache dtype 和 CUDA Graph 行为独立验证。
@@ -178,9 +164,7 @@ KV cache dtype 和 CUDA Graph 行为独立验证。
 
 **应该使用哪些 CUDA 和 PyTorch 版本？**
 
-原生运行时使用 CUDA 13.0 + PyTorch 2.13。使用旧的 CUDA 12.8 + PyTorch 2.11
-时，可参考已停止维护的 `v0.1.x` 兼容路线。PyTorch CUDA 构建、toolkit、FlashInfer/
-FlashQLA 构建和启动 profile 必须保持一致，不能混用运行时假设。
+0.3.x 使用官方镜像内的 CUDA 13.0 和 PyTorch。宿主机需要兼容的 NVIDIA 驱动、Docker、NVIDIA Container Toolkit 和 Python 3。性能表记录了具体的测试版本。
 
 **还有哪些硬件风险？**
 
@@ -195,9 +179,8 @@ CUDA Graph/AOT 编译时降频很容易被误判为软件性能回退。
 
 ## 🙏 致谢 / 上游项目
 
-本仓库是基于上游 [vLLM](https://github.com/vllm-project/vllm) 的硬件定向 fork，
-遵循 Apache-2.0 license，保留上游项目结构，并加入面向双 2080 Ti 的 SM75 runtime
-补丁和启动 profile。
+本仓库是基于上游 vLLM 的硬件定向 fork，遵循 Apache-2.0 许可证，提供 SM75 运行时
+补丁、启动 profile 和验证资料。[上游 vLLM](https://github.com/vllm-project/vllm)
 
 当前使用或集成的加速组件包括：
 
