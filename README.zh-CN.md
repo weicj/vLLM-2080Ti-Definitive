@@ -16,8 +16,12 @@ profile 和验证资料。它基于上游 vLLM；再发布派生版本时必须�
 以及交流部署和运行问题。
 
 当前开发版本为 `v0.3.0.dev0`，分支为 `vllm-2080ti-definitive-0.3.x`。
-Docker 运行时使用官方 [vLLM v0.34.0](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)。
-本轮的实测版本、测试环境和性能数据记录在各硬件的 profile 说明中。
+**默认使用 Docker 部署。** `./build.sh` 在官方 vLLM v0.34.0 镜像上应用 SM75
+补丁并加入 FlashQLA 扩展。`./launcher.sh` 启动构建好的镜像，从宿主机挂载模型权重。
+容器运行的是镜像里安装的那一套 vLLM。[官方 vLLM 发行版](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)
+
+仓库中的 `vllm/` 和 `csrc/` 源码用于可选的原生构建。Docker 构建只取
+Dockerfile、补丁、FlashQLA 扩展源码和许可证文件。[构建脚本](build.sh)
 
 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
@@ -41,10 +45,6 @@ Graph，把这些硬件资源转成可用的 serving 栈。
 
 ## 🧩 支持状态
 
-原生构建的目标环境是 Ubuntu 26.04 及以上、Linux kernel 7 及以上、GCC/G++ 15、CUDA 13.0 与 PyTorch 2.13。如果使用 CUDA 12.8、PyTorch 2.11、较早 kernel 或 GCC 12/13/14，可参考已不再持续维护的 `0.1.x` 版本线。
-
-支持的模型路线和实测数据以对应硬件组的 profile 说明为准。
-
 Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10（TP=2）和四 T10（TP=4）的 Qwen 与 Inkling 验证。
 
 ## 🧪 已验证模型与 Profile
@@ -62,8 +62,7 @@ Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10�
    构建时应用 SM75 GDN prefill 补丁，并将编译好的 FlashQLA 扩展装入镜像。
 
    宿主机需要 Docker、NVIDIA Container Toolkit 和兼容 CUDA 13.0 的 NVIDIA 驱动。
-   原生构建和启动仍可分别通过 `VLLM_RUNTIME_BACKEND=native ./build.sh` 和
-   `VLLM_RUNTIME_BACKEND=native ./launcher.sh` 使用。
+   Python、PyTorch 和 CUDA 用户态依赖由镜像提供。
 
 2. 运行 `./update.sh` 更新。Git 工作树对跟踪分支执行快进更新，归档安装查找稳定的
    0.3.x Release。脚本保留本地缓存、虚拟环境、日志和 `profiles/local`，
@@ -93,8 +92,7 @@ NON_INTERACTIVE=1 ./launcher.sh
 
 Docker launcher 继续使用本地权重路径、profile、GPU 顺序和服务配置。
 `fast` 模式采用上游调度与 CUDA Graph 默认配置。`normal` 模式的投机解码和双卡
-T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。服务级思考预算和
-prefill barrier 可通过原生运行时使用。
+T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。
 
 ### 在 SM75 上运行 Inkling 2 Mini
 
@@ -117,6 +115,18 @@ profile，将 `TP_SIZE` 设为 `4`，并选择四张支持 PCIe P2P 的 GPU。
 [官方权重](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
 [上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
 [社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)
+
+### 可选的原生构建
+
+原生构建使用仓库源码，安装到宿主机的 `.venv`。服务级思考预算和 prefill barrier
+可通过这条路径使用。目标环境为 Ubuntu 26.04 及以上、Linux kernel 7 及以上、
+GCC/G++ 15、CUDA 13.0 和 PyTorch 2.13。已停止维护的 `0.1.x` 使用 CUDA 12.8、
+PyTorch 2.11 及较早的内核和编译器。
+
+```bash
+VLLM_RUNTIME_BACKEND=native ./build.sh
+VLLM_RUNTIME_BACKEND=native ./launcher.sh
+```
 
 ## 🧭 Profile 与推荐路线
 

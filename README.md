@@ -18,8 +18,15 @@ For usage feedback, feature requests, and community discussion, join the
 [Discord community](https://discord.gg/VFqVVySdMS).
 
 Current development version is `v0.3.0.dev0` on `vllm-2080ti-definitive-0.3.x`.
-The Docker runtime uses the official [vLLM v0.34.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0).
-The hardware profile guides record the version, environment, and results of the current benchmarks.
+**Docker is the default deployment.** `./build.sh` applies the SM75 patches
+and adds the FlashQLA extension to the official vLLM v0.34.0 image.
+`./launcher.sh` starts the resulting image with your model weights mounted
+from the host. The container runs a single copy of vLLM, installed in the
+image. [Official vLLM release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)
+
+The repository's `vllm/` and `csrc/` source trees serve the optional native
+build. The Docker build context contains the Dockerfile, patches, FlashQLA
+extension sources, and license files. [Build script](build.sh)
 
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
@@ -44,11 +51,6 @@ Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph sup
 
 ## 🧩 Support Status
 
-The native build targets Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA 13.0, and PyTorch 2.13. For CUDA 12.8, PyTorch 2.11, older kernels, or GCC 12/13/14, refer to the `0.1.x` line, which is no longer actively maintained.
-
-Supported model routes and their measurements are listed in the corresponding
-hardware profile guides.
-
 The launcher supports TP, PP, and mixed TP/PP inference. The 0.3.x Docker
 runtime was validated with Qwen and Inkling on two T10s (TP=2) and four
 T10s (TP=4).
@@ -70,9 +72,8 @@ T10s (TP=4).
    into the image.
 
    The Docker runtime requires Docker with NVIDIA Container Toolkit and a
-   host driver compatible with CUDA 13.0. The existing native builder is
-   available with `VLLM_RUNTIME_BACKEND=native ./build.sh` and
-   `VLLM_RUNTIME_BACKEND=native ./launcher.sh`.
+   host driver compatible with CUDA 13.0. The image provides the Python,
+   PyTorch, and CUDA user-space dependencies.
 
 2. Run `./update.sh` to update. Git checkouts fast-forward their tracking
    branch. Archive installs look for a stable 0.3.x release. The updater
@@ -105,8 +106,7 @@ Use `./launcher.sh --print-config` to preview a route. See the
 The Docker launcher uses the same local checkpoint paths, profile files, GPU
 order, and service settings. It uses upstream scheduling and fast-mode graph
 defaults, with PIECEWISE graphs for speculative decoding in normal mode and
-for the dual T10 Qwen TurboQuant MTP text-image route. The server-wide
-thinking budget and the prefill barrier are available through the native runtime.
+for the dual T10 Qwen TurboQuant MTP text-image route.
 
 ### Inkling 2 Mini on SM75
 
@@ -131,6 +131,19 @@ The experimental image uses the upstream model implementation and the SM75
 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
 [Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
 [Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
+
+### Optional Native Build
+
+The native build uses the repository source and installs into a host `.venv`.
+This path provides the server-wide thinking budget and prefill barrier.
+It targets Ubuntu 26.04 or later, Linux kernel 7 or later, GCC/G++ 15, CUDA
+13.0, and PyTorch 2.13. The unmaintained `0.1.x` line used CUDA 12.8 and
+PyTorch 2.11 with older kernels and compilers.
+
+```bash
+VLLM_RUNTIME_BACKEND=native ./build.sh
+VLLM_RUNTIME_BACKEND=native ./launcher.sh
+```
 
 ## 🧭 Profiles
 
