@@ -843,13 +843,17 @@ ROUTE_PROFILE_KEYS=(
   MODEL_VARIANT
   QUANTIZATION
   KV_CACHE_DTYPE
+  VLLM_KV_CACHE_LAYOUT
   ENABLE_YARN
   MAX_MODEL_LEN
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
+  LONG_PREFILL_TOKEN_THRESHOLD
+  NO_ASYNC_SCHEDULING
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
+  SPECULATIVE_DRAFT_SAMPLE_METHOD
   MESSAGE_TYPE
 )
 
@@ -858,13 +862,17 @@ PROFILE_RESET_KEYS=(
   MODEL_VARIANT
   QUANTIZATION
   KV_CACHE_DTYPE
+  VLLM_KV_CACHE_LAYOUT
   ENABLE_YARN
   MAX_MODEL_LEN
   GPU_UTIL
   MAX_BATCHED_TOKENS
   MAX_NUM_SEQS
+  LONG_PREFILL_TOKEN_THRESHOLD
+  NO_ASYNC_SCHEDULING
   SPECULATIVE_METHOD
   SPECULATIVE_TOKENS
+  SPECULATIVE_DRAFT_SAMPLE_METHOD
   MESSAGE_TYPE
 )
 
@@ -885,6 +893,7 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   MODE
   PORT
   SERVICE_SCOPE
+  API_ALLOWED_ORIGINS
   GPU_DEVICES
   TP_SIZE
   PP_SIZE
@@ -907,7 +916,6 @@ NON_INTERACTIVE_CONFIG_KEYS=(
   VLLM_ENFORCE_STRICT_TOOL_CALLING
   MAMBA_CACHE_MODE
   ENFORCE_EAGER
-  NO_ASYNC_SCHEDULING
   CUSTOM_ALL_REDUCE_MODE
   DISABLE_LOG_STATS
   RUNTIME_ROOT
@@ -1181,8 +1189,9 @@ reset_route_profile_fields() {
 
 profile_key_is_allowed() {
   case "$1" in
-MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|MESSAGE_TYPE)
+MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|VLLM_KV_CACHE_LAYOUT|ENABLE_YARN|MAX_MODEL_LEN|GPU_UTIL|\
+MAX_BATCHED_TOKENS|MAX_NUM_SEQS|LONG_PREFILL_TOKEN_THRESHOLD|NO_ASYNC_SCHEDULING|\
+SPECULATIVE_METHOD|SPECULATIVE_TOKENS|SPECULATIVE_DRAFT_SAMPLE_METHOD|MESSAGE_TYPE)
       return 0
       ;;
     *)
@@ -1370,6 +1379,9 @@ resolve_profile_file() {
     "$PROFILE_DIR"/2x2080Ti/qwen35b/*)
       renamed="$PROFILE_DIR/2x2080Ti/qwen36-35b/${file#"$PROFILE_DIR"/2x2080Ti/qwen35b/}"
       ;;
+    "$PROFILE_DIR"/2xT10/inkling-2-mini/official/*|"$PROFILE_DIR"/4xT10/inkling-2-mini/official/*)
+      renamed="${file/\/inkling-2-mini\/official\//\/inkling-2-mini\/}"
+      ;;
   esac
   if [[ -n "$renamed" && -f "${renamed%.env}.env" ]]; then
     printf '%s\n' "${renamed%.env}.env"
@@ -1444,6 +1456,7 @@ save_manager_state() {
     printf 'PP_SIZE=%q\n' "${PP_SIZE:-}"
     printf 'QUANTIZATION=%q\n' "${QUANTIZATION:-}"
     printf 'KV_CACHE_DTYPE=%q\n' "${KV_CACHE_DTYPE:-}"
+    printf 'VLLM_KV_CACHE_LAYOUT=%q\n' "${VLLM_KV_CACHE_LAYOUT:-}"
     printf 'MAMBA_CACHE_MODE=%q\n' "${MAMBA_CACHE_MODE:-}"
     printf 'ENABLE_PREFIX_CACHING=%q\n' "${ENABLE_PREFIX_CACHING:-1}"
     printf 'KV_DISK_CACHE_DIR=%q\n' "${KV_DISK_CACHE_DIR:-}"
@@ -2229,6 +2242,7 @@ profile_summary() {
     PP_SIZE
     QUANTIZATION
     KV_CACHE_DTYPE
+    VLLM_KV_CACHE_LAYOUT
     MAX_MODEL_LEN
     GPU_UTIL
     MAX_BATCHED_TOKENS
@@ -2238,6 +2252,7 @@ profile_summary() {
     SPECULATIVE_METHOD
     SPECULATIVE_MODEL
   SPECULATIVE_TOKENS
+  SPECULATIVE_DRAFT_SAMPLE_METHOD
   SPECULATIVE_DRAFT_TP_SIZE
   SPECULATIVE_MAX_MODEL_LEN
   SPECULATIVE_ATTENTION_BACKEND
@@ -3194,12 +3209,16 @@ save_current_profile_menu() {
   write_profile_entry "$target_file.tmp" MODEL_VARIANT "${MODEL_VARIANT:-}"
   write_profile_entry "$target_file.tmp" QUANTIZATION "${QUANTIZATION:-}"
   write_profile_entry "$target_file.tmp" KV_CACHE_DTYPE "${KV_CACHE_DTYPE:-}"
+  write_profile_entry "$target_file.tmp" VLLM_KV_CACHE_LAYOUT "${VLLM_KV_CACHE_LAYOUT:-}"
   write_profile_entry "$target_file.tmp" MAX_MODEL_LEN "${MAX_MODEL_LEN:-}"
   write_profile_entry "$target_file.tmp" GPU_UTIL "${GPU_UTIL:-}"
   write_profile_entry "$target_file.tmp" MAX_BATCHED_TOKENS "${MAX_BATCHED_TOKENS:-}"
   write_profile_entry "$target_file.tmp" MAX_NUM_SEQS "${MAX_NUM_SEQS:-}"
+  write_profile_entry "$target_file.tmp" LONG_PREFILL_TOKEN_THRESHOLD "${LONG_PREFILL_TOKEN_THRESHOLD:-}"
+  write_profile_entry "$target_file.tmp" NO_ASYNC_SCHEDULING "${NO_ASYNC_SCHEDULING:-}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_METHOD "${SPECULATIVE_METHOD:-none}"
   write_profile_entry "$target_file.tmp" SPECULATIVE_TOKENS "$(effective_speculative_tokens)"
+  write_profile_entry "$target_file.tmp" SPECULATIVE_DRAFT_SAMPLE_METHOD "${SPECULATIVE_DRAFT_SAMPLE_METHOD:-}"
   write_profile_entry "$target_file.tmp" MESSAGE_TYPE "${MESSAGE_TYPE:-text-only}"
   mv "$target_file.tmp" "$target_file"
 
@@ -3642,8 +3661,6 @@ clear_speculative_decode_settings() {
   MTP_K=0
   SPECULATIVE_METHOD=""
   SPECULATIVE_TOKENS=""
-  VLLM_KV_CACHE_LAYOUT=""
-  LONG_PREFILL_TOKEN_THRESHOLD=""
   SPECULATIVE_DRAFT_TP_SIZE=""
   SPECULATIVE_MAX_MODEL_LEN=""
   SPECULATIVE_ATTENTION_BACKEND=""
@@ -4852,6 +4869,10 @@ build_args() {
     VLLM_ARGS+=(--no-enable-extensible-kv-cache)
   fi
 
+  if [[ -n "${API_ALLOWED_ORIGINS:-}" ]]; then
+    VLLM_ARGS+=(--allowed-origins "$API_ALLOWED_ORIGINS")
+  fi
+
   if [[ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]]; then
     VLLM_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
   fi
@@ -5337,7 +5358,8 @@ clear_startup_performance_state() {
 
 startup_performance_helper_path() {
   local candidate
-  for candidate in "$RUNTIME_ROOT/tools/profile_request.py" "$MANAGER_ROOT/tools/profile_request.py"; do
+  # The bundled helper implements this launcher's benchmark arguments.
+  for candidate in "$MANAGER_ROOT/tools/profile_request.py" "$RUNTIME_ROOT/tools/profile_request.py"; do
     if [[ -f "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0
@@ -5365,6 +5387,16 @@ startup_performance_prefix_cache_label() {
   else
     printf '%s\n' "prefix cache enabled (unique benchmark prefixes)"
   fi
+}
+
+run_startup_performance_sample() {
+  local helper=$1 url_host=$2 prompt_tokens=$3 generation_tokens=$4 label=$5 variant=$6
+  run_performance_helper "$helper" \
+    --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
+    --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
+    --prompt-tokens "$prompt_tokens" --gen-tokens "$generation_tokens" \
+    --label "$label" --prompt-variant "$variant" --out /dev/null \
+    --ignore-eos --repeat-text " 1 2 3 4"
 }
 
 startup_performance_sample_values() {
@@ -5402,8 +5434,8 @@ if record.get("prompt_tokens") != int(sys.argv[1]) or record.get("completion_tok
         .format(int(sys.argv[1]), int(sys.argv[2])) +
         "{}/{}".format(record.get("prompt_tokens"), record.get("completion_tokens"))
     )
-if not record.get("allowed_token_only"):
-    raise SystemExit("completion was not restricted to the fixed benchmark token")
+if record.get("repeat_text_matches") is not True:
+    raise SystemExit("completion did not continue the repeated 1 2 3 4 sequence")
 
 prefill = record.get("prefill_tok_s")
 decode = record.get("decode_tok_s")
@@ -5431,6 +5463,14 @@ print(
 PY
 }
 
+record_startup_performance_helper_error() {
+  local log_file="${LOG_DIR}/startup-performance-${STAMP}.log"
+  if printf '%s\n' "$1" >> "$log_file"; then
+    LAST_PERF_NOTE+=" (details in $log_file)"
+  fi
+  printf '  %s\n' "$LAST_PERF_NOTE"
+}
+
 run_startup_performance_test() {
   local url_host=$1
   local helper
@@ -5446,33 +5486,22 @@ run_startup_performance_test() {
   echo
   local cache_label
   cache_label=$(startup_performance_prefix_cache_label)
-  echo "Running 4K/128 performance test (3 sequential requests; ${cache_label})..."
+  echo "Running 4K/128 performance test (3 sequential requests, repeating 1 2 3 4, ${cache_label})..."
   for run in 1 2 3; do
     printf '  Sample %d/3... ' "$run"
-    if ! result=$(run_performance_helper "$helper" \
-      --model-dir "$MODEL_DIR" \
-      --served-name "$SERVED_NAME" \
-      --base-url "http://${url_host}:${PORT}/v1" \
-      --endpoint completions \
-      --prompt-tokens 4096 \
-      --gen-tokens 128 \
-      --label "launcher-startup-reference-$run" \
-      --prompt-variant "launcher-${STAMP}-${run}" \
-      --out /dev/null \
-      --ignore-eos \
-      --pure-filler \
-      --allowed-token-text " the" 2>&1); then
+    if ! result=$(run_startup_performance_sample "$helper" "$url_host" \
+      4096 128 "launcher-startup-reference-$run" "launcher-${STAMP}-${run}" 2>&1); then
       LAST_PERF_STATUS=failed
       LAST_PERF_NOTE="failed: benchmark helper exited during sample $run"
       echo "failed"
-      echo "  $LAST_PERF_NOTE"
+      record_startup_performance_helper_error "$result"
       return 1
     fi
     if ! values=$(startup_performance_sample_values "$result" 2>&1); then
       LAST_PERF_STATUS=failed
-      LAST_PERF_NOTE="failed: sample $run was not a complete fixed-token response"
+      LAST_PERF_NOTE="failed: sample $run: $values"
       echo "failed"
-      echo "  $values"
+      echo "  $LAST_PERF_NOTE"
       return 1
     fi
     IFS=$'\t' read -r prefill decode <<< "$values"
@@ -5492,24 +5521,21 @@ run_startup_performance_test() {
     LAST_PERF_DECODE_MEAN LAST_PERF_DECODE_MEDIAN <<< "$statistics"
   LAST_PERF_STATUS=completed
   LAST_PERF_NOTE=""
-  LAST_PERF_LABEL="synthetic 4K/128, 3 sequential runs (${cache_label})"
+  LAST_PERF_LABEL="synthetic 4K/128, 3 sequential runs, repeating 1 2 3 4 (${cache_label})"
   LAST_PERF_SAMPLES="${prefill_samples[0]},${decode_samples[0]};${prefill_samples[1]},${decode_samples[1]};${prefill_samples[2]},${decode_samples[2]}"
   echo
   echo "Running synthetic 32K/512 long-context performance test (${cache_label})..."
-  if ! result=$(run_performance_helper "$helper" \
-      --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
-      --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
-      --prompt-tokens 32768 --gen-tokens 512 \
-      --label "launcher-startup-long" --prompt-variant "launcher-${STAMP}-long" \
-      --out /dev/null --ignore-eos --pure-filler --allowed-token-text " the" 2>&1); then
+  if ! result=$(run_startup_performance_sample "$helper" "$url_host" \
+    32768 512 "launcher-startup-long" "launcher-${STAMP}-long" 2>&1); then
     LAST_PERF_STATUS=failed
     LAST_PERF_NOTE="failed: long-context benchmark helper exited"
+    record_startup_performance_helper_error "$result"
     return 1
   fi
   if ! values=$(startup_performance_sample_values "$result" 32768 512 2>&1); then
     LAST_PERF_STATUS=failed
-    LAST_PERF_NOTE="failed: long-context sample was not a complete fixed-token response"
-    echo "  $values"
+    LAST_PERF_NOTE="failed: 32K/512: $values"
+    echo "  $LAST_PERF_NOTE"
     return 1
   fi
   IFS=$'\t' read -r LAST_PERF_LONG_PREFILL LAST_PERF_LONG_DECODE <<< "$values"
@@ -5521,12 +5547,8 @@ run_startup_performance_warmup() {
   local url_host=$1
   local helper result
   helper=$(startup_performance_helper_path) || return 0
-  if ! result=$(run_performance_helper "$helper" \
-      --model-dir "$MODEL_DIR" --served-name "$SERVED_NAME" \
-      --base-url "http://${url_host}:${PORT}/v1" --endpoint completions \
-      --prompt-tokens 4096 --gen-tokens 128 \
-      --label "launcher-startup-warmup" --prompt-variant "launcher-${STAMP}-warmup" \
-      --out /dev/null --ignore-eos --pure-filler --allowed-token-text " the" 2>&1); then
+  if ! result=$(run_startup_performance_sample "$helper" "$url_host" \
+    4096 128 "launcher-startup-warmup" "launcher-${STAMP}-warmup" 2>&1); then
     echo "Startup benchmark warm-up failed; continuing without counting it in performance statistics." >&2
     return 0
   fi
@@ -5916,6 +5938,7 @@ Launch summary:
   Parallel layout:      TP${TP_SIZE} x PP${PP_SIZE:-1}
   TP/PP rank layout:    $(format_tp_rank_groups "${GPU_DEVICES:-$(detect_default_gpu_devices)}" "$TP_SIZE")
   KV precision:         ${KV_CACHE_DTYPE:-fp16}
+  KV page layout:       ${VLLM_KV_CACHE_LAYOUT:-auto}
   TQ diagnostics:       $(current_tq_diagnostics_label)
   Prefix cache:         $(current_prefix_cache_label)
   Disk KV cache:        ${KV_DISK_CACHE_DIR:-disabled}
@@ -5929,6 +5952,7 @@ Launch summary:
   Max batched tokens:   $MAX_BATCHED_TOKENS
   Max sequences:        $MAX_NUM_SEQS
   Prefill threshold:    ${LONG_PREFILL_TOKEN_THRESHOLD:-auto}
+  No async scheduling:  ${NO_ASYNC_SCHEDULING:-0}
   CUDA graph captures:  $(current_cudagraph_capture_label)
   Spec decode:          $(current_speculative_label)
   Spec metrics:         ${PER_REQUEST_SPEC_DECODE_METRICS:-none}
@@ -5943,6 +5967,7 @@ Launch summary:
   Strict tool calling:  VLLM_ENFORCE_STRICT_TOOL_CALLING=${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}
   Port:                 $PORT
   Scope:                $SERVICE_SCOPE
+  API CORS origins:     ${API_ALLOWED_ORIGINS:-vLLM default}
 EOF
   echo
 }

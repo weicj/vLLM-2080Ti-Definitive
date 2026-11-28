@@ -2,7 +2,7 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
-## v0.3.0.dev0
+## v0.3.0
 
 - Adds an experimental Docker runtime based on the official vLLM v0.34.0
   release image with the SM75 FlashQLA prefill extension, FlashInfer FP8 KV
@@ -18,12 +18,15 @@ This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately fro
 - Groups TP4 Qwen DFlash2 target layers independently of the draft layer
   count to recover usable KV capacity on SM75.
 - Includes Inkling 2 Mini support in the default Docker build, using the
-  upstream model implementation and lvb-s's SM75 port. Adds pure AR and
-  DSpark/7 profiles validated with the official checkpoint on 2xT10 and 4xT10
-  over PCIe P2P.
-- Adapts Inkling 2 Mini image preprocessing and vision profiling to vLLM
-  v0.34.0. Validates DSpark/7 with FP8 KV and two concurrent image requests
-  at 12,000 tokens per request on 2xT10 and 34,000 on 4xT10.
+  upstream model implementation and lvb-s's SM75 port. Adapts image
+  preprocessing and vision profiling to vLLM v0.34.0, and adds DFlash2/7
+  draft support.
+- Records Inkling 2 Mini AR, DFlash2/7 and DSpark/7 profile results in the
+  hardware guides for T10 and dual RTX 2080 Ti. The dual 2080 Ti results
+  cover one to four concurrent image requests per route and use the
+  patched runtime extracted from the Docker image.
+- Uses repeated `1 2 3 4` continuation for launcher startup benchmarks and
+  reports failed benchmark requests in the startup performance log.
 - Renames the Qwen3.8-27B and Qwen3.6-35B profile directories to `qwen38-27b`
   and `qwen36-35b`. The launcher resolves the previous paths. The hardware
   guides report the current Docker measurements and test environment.

@@ -282,6 +282,27 @@ class LauncherInteractiveTest(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("RESULT:no", output)
 
+    def test_startup_benchmark_prefers_bundled_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools = Path(directory) / "tools"
+            tools.mkdir()
+            (tools / "profile_request.py").touch()
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "source ./launcher.sh; startup_performance_helper_path",
+                ],
+                cwd=ROOT,
+                env={**os.environ, "RUNTIME_ROOT": directory},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                Path(result.stdout.strip()), ROOT / "tools" / "profile_request.py"
+            )
+
     def test_topology_groups_preserve_p2p(self):
         matrix = "\x1b[4mGPU0 GPU1 GPU2 GPU3 CPU Affinity\x1b[0m\n"
         matrix += "GPU0 X PHB PIX PHB 0-3\nGPU1 PHB X PHB PIX 0-3\n"

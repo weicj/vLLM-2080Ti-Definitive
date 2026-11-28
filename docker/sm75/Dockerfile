@@ -36,8 +36,12 @@ RUN --mount=type=bind,source=docker/sm75/patches,target=/vllm-sm75-patches \
 FROM scratch AS inkling-sources
 ADD --checksum=sha256:0a9c5e743c075c728dea20c2d3fca1b23ac7da09324bcc4e74302c1a036ec6f1 \
     https://codeload.github.com/lvb-s/vllm-inkling-sm75/tar.gz/811e9b7f40fd9c6990a6b7ed2a1016ef050f0c36 /community.tar.gz
-ADD --checksum=sha256:a80232fce11e29c643f8e26604bb8740db40861ef193fb1ea2e94bb57a79ca99 \
-    https://codeload.github.com/vllm-project/vllm/tar.gz/a289c722dd59a0e74bf77e005a7077676c320f5c /upstream.tar.gz
+ADD --checksum=sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 \
+    https://raw.githubusercontent.com/vllm-project/vllm/a289c722dd59a0e74bf77e005a7077676c320f5c/LICENSE /upstream/LICENSE
+ADD --checksum=sha256:3a2e4fb5da0bbd22fff2e79e94eaee799f31bb1716d572716122fa79806e9edc \
+    https://raw.githubusercontent.com/vllm-project/vllm/a289c722dd59a0e74bf77e005a7077676c320f5c/vllm/models/inkling2/nvidia/ops/trtllm_bmm.cu /upstream/trtllm_bmm.cu
+ADD --checksum=sha256:3a61c82dfb35c386e125dd96354b8ee600df7788cf9874e7af8169cb8764c018 \
+    https://raw.githubusercontent.com/vllm-project/vllm/a289c722dd59a0e74bf77e005a7077676c320f5c/vllm/models/inkling2/speculator_config.py /upstream/speculator_config.py
 ADD --checksum=sha256:d4747cae223f81bb8d18bee766a5f41e67484a65bd665534fdbc8dc7adabd7c1 \
     https://files.pythonhosted.org/packages/53/b5/19eaeed76d26248b8fe9276d2f9a4346e250fd7d2cfb0784ae4929d7efcc/humming_kernels-0.1.20-cp310-abi3-manylinux_2_28_x86_64.whl /
 
@@ -51,14 +55,13 @@ RUN --mount=type=bind,from=inkling-sources,source=/,target=/inkling-sources \
     site=$(python3 -c 'import importlib.metadata as m; print(m.distribution("vllm").locate_file(""))'); \
     authors=/usr/share/doc/vllm-sm75; \
     community=vllm-inkling-sm75-811e9b7f40fd9c6990a6b7ed2a1016ef050f0c36; \
-    upstream=vllm-a289c722dd59a0e74bf77e005a7077676c320f5c; \
     tar -xf /inkling-sources/community.tar.gz -C "$site" --strip-components=2 \
         "$community/overlay/vllm/models/inkling2"; \
-    tar -xf /inkling-sources/upstream.tar.gz -C "$site" --strip-components=1 \
-        "$upstream/vllm/models/inkling2/nvidia/ops/trtllm_bmm.cu" \
-        "$upstream/vllm/models/inkling2/speculator_config.py"; \
+    install -m 0644 /inkling-sources/upstream/trtllm_bmm.cu "$site/vllm/models/inkling2/nvidia/ops/"; \
+    install -m 0644 /inkling-sources/upstream/speculator_config.py "$site/vllm/models/inkling2/"; \
     tar -xOf /inkling-sources/community.tar.gz "$community/LICENSE" > "$authors/inkling-sm75-LICENSE"; \
-    tar -xOf /inkling-sources/upstream.tar.gz "$upstream/LICENSE" > "$authors/inkling-upstream-LICENSE"; \
+    install -m 0644 /inkling-sources/upstream/LICENSE "$authors/inkling-upstream-LICENSE"; \
     patch --directory="$site" --strip=1 --batch --forward --fuzz=0 < /inkling-patches/inkling-v0.34.0.patch; \
+    patch --directory="$site" --strip=1 --batch --forward --fuzz=0 < /inkling-patches/inkling-dflash2.patch; \
     python3 -m pip install --no-deps --no-index --no-cache-dir /inkling-sources/humming_kernels-*.whl; \
     python3 -m compileall -q "$site/vllm/models/inkling2"

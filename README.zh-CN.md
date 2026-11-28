@@ -15,53 +15,80 @@ profile 和验证资料。它基于上游 vLLM。再发布派生版本时必须�
 欢迎在 [Discord 交流群](https://discord.gg/VFqVVySdMS) 分享使用体验、提出功能请求，
 以及交流部署和运行问题。
 
-当前开发版本为 `v0.3.0.dev0`，分支为 `vllm-2080ti-definitive-0.3.x`。
-**0.3.x 使用 Docker 部署。** `./build.sh` 在官方 vLLM v0.34.0 镜像上应用 SM75
-补丁并加入 FlashQLA 扩展。`./launcher.sh` 启动构建好的镜像，从宿主机挂载模型权重。
-容器运行的是镜像里安装的那一套 vLLM。[官方 vLLM 发行版](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)
+![0.2.x 单请求推理速度演示](docs/assets/vllmspeed_dflash.gif)
+
+当前版本为 `v0.3.0`，分支为 `0.3.x`。
 
 仓库维护 SM75 补丁、FlashQLA 扩展、启动脚本和硬件 profile。
-需要宿主机原生构建的用户可使用 [0.2.x 发行版](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)。
+
+0.3.x 分支起，使用 Docker 部署。需要宿主机原生构建的用户可使用 [0.2.x 发行版](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3)。
 
 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
-## 💡 为什么用 RTX 2080 Ti 做 LLM 推理？
+## 💡 主要支持架构
 
-这个项目的判断很实际：两张通过 NVLink 连接的 22 GB RTX 2080 Ti 提供 44 GB
-显存、较高的显存带宽和 136 个 Turing SM。经过针对 SM75 的 vLLM 适配后，这套
-硬件不只是运行小模型，也足以承载严肃的本地 27B 与 35B 级模型服务。
+本项目的运行时覆盖 NVIDIA Turing（SM75，CUDA 计算能力 7.5）全系列显卡。
+可按单卡显存和卡数选用已有实测的 Profile 作为起点。
 
-| 指标 | 2x RTX 2080 Ti 22 GB + NVLink | RTX 3090 Ti 24 GB 基线 | 倍率 |
+- **单卡 16 GiB** 包括 Tesla T10、Tesla T4 和 Quadro RTX 5000。按卡数参考 T10 的配置指南。[2 x T10](profiles/2xT10/README.zh-CN.md) · [4 x T10](profiles/4xT10/README.zh-CN.md)
+- **单卡 24 GiB** 包括 TITAN RTX、Quadro RTX 6000 和 24 GiB 版 Tesla T40。双卡可参考 [2 x 2080 Ti Profile 指南](profiles/2x2080Ti/README.zh-CN.md)。
+
+| 指标 | 2 x 2080Ti 22G | 2 x T10 16G | 4 x T10 16G |
 | --- | ---: | ---: | ---: |
-| 专用 FP32 datapath | 8,704 | 5,376 | 1.62x |
-| SM 数量 | 136 | 84 | 1.62x |
-| Tensor Core | 1,088 | 336 | 3.24x |
-| Dense FP16 矩阵吞吐 | 228 TFLOPS | 160 TFLOPS | 1.43x |
-| 总显存带宽 | 1,232 GB/s | 1,008 GB/s | 1.22x |
-| 总显存 | 44 GB | 24 GB | 1.83x |
+| 张量并行 | TP2 | TP2 | TP4 |
+| CUDA 核心总数 | 8,704 | 7,168 | 14,336 |
+| Tensor Core 总数 | 1,088 | 896 | 1,792 |
+| 理论稠密 FP16 Tensor 算力 | 227.7 TFLOPS | 182.4 TFLOPS | 364.7 TFLOPS |
+| 总显存 | 44 GiB | 32 GiB | 64 GiB |
+| 总显存带宽（理论） | 1,232 GB/s | 806.5 GB/s | 1,613.1 GB/s |
+| Ring All-Reduce 理论累计带宽 | 100 GB/s（NVLink NV2） | 31.5 GB/s（PCIe 3.0 x16 P2P） | 63.0 GB/s（PCIe 3.0 x16 P2P） |
+| Qwen3.8-27B 每解码 token 的总归约流量 | 2.50 MiB | 2.50 MiB | 7.50 MiB |
+| 每 token 的链路传输时间下限 | 26.2 µs | 83.2 µs | 124.8 µs |
+| 每 token 的 FP16 归约加法时间下限 | 23 ns | 29 ns | 43 ns |
+| 推荐配置 | [Profile 指南](profiles/2x2080Ti/README.zh-CN.md) | [Profile 指南](profiles/2xT10/README.zh-CN.md) | [Profile 指南](profiles/4xT10/README.zh-CN.md) |
 
-本 fork 通过 Marlin、FlashInfer/FlashQLA、TurboQuant/INT8 KV、MTP/DFlash2 和 CUDA
-Graph，把这些硬件资源转成可用的 serving 栈。
+## ⚡ 性能亮点
 
-## 🧩 支持状态
+### Qwen3.8-27B-NVFP4
 
-Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10（TP=2）和四 T10（TP=4）的 Qwen 与 Inkling 验证。
+| 硬件 | 上下文 | 测速并发 | 4K/128 吞吐 | 32K/512 吞吐 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 x 2080Ti 22G | **1 x 262K** | 1 | 1370.18 / 220.84 | 1264.66 / 209.35 |
+| 4 x T10 16G | **4 x 220K** | 1 | 1517.36 / 304.25 | 1424.45 / 275.50 |
+| 4 x T10 16G | **4 x 220K** | 4 | 1585.96 / 797.18 | 1540.44 / 711.94 |
 
-## 🧪 已验证模型与 Profile
+### Inkling 2 Mini
 
-| 硬件 | 模型 | 权重 | Profile 说明 |
-| --- | --- | --- | --- |
-| 2×T10 | Qwen3.8-27B | INT4（W4A16） | [Qwen3.8-27B-INT4](profiles/2xT10/README.zh-CN.md#qwen38-27b-int4) |
-| 4×T10 | Qwen3.8-27B | FP8（W8A16）、NVFP4（W4A16） | [FP8](profiles/4xT10/README.zh-CN.md#qwen38-27b-fp8) · [NVFP4](profiles/4xT10/README.zh-CN.md#qwen38-27b-nvfp4) |
-| 2×T10、4×T10 | Inkling 2 Mini | 官方权重 | [2×T10 纯 AR 与 DSpark/7](profiles/2xT10/README.zh-CN.md#inkling-2-mini) · [4×T10 纯 AR 与 DSpark/7](profiles/4xT10/README.zh-CN.md#inkling-2-mini) |
+| 硬件 | 上下文 | 测速并发 | 4K/128 吞吐 | 32K/512 吞吐 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 x 2080Ti 22G | **1 x 870K** | 1 | 2793.98 / 275.03 | 2580.39 / 207.40 |
+| 2 x 2080Ti 22G | **4 x 140K** | 4 | 2736.95 / 594.34 | 2427.26 / 369.16 |
+| 2 x T10 16G | **1 x 262K** | 1 | 2465.67 / 237.90 | 2418.85 / 174.58 |
+| 2 x T10 16G | **2 x 176K** | 2 | 2370.57 / 384.04 | 2108.90 / 238.03 |
+| 4 x T10 16G | **1 x 1M** | 1 | 3729.50 / 290.63 | 3480.09 / 232.84 |
+| 4 x T10 16G | **2 x 512K** | 2 | 3398.49 / 444.66 | 3353.87 / 338.78 |
+| 4 x T10 16G | **4 x 250K** | 4 | 2966.63 / 653.72 | 2992.04 / 427.90 |
+
+吞吐按 prefill / decode 显示，单位为 tok/s。并发解码统计共同解码窗口内的总吞吐。
+以上数据均使用 DFlash2（`n=7`），在草稿持续高接受率的合成输入下测得。真实任务中
+草稿接受率下降时，解码吞吐可能低于表中结果。
 
 ## 🚀 构建与启动
 
-1. 在 0.3.x 工作树中运行 `./build.sh`。Docker 构建使用官方镜像提供的 Torch 和 CUDA，
+1. 克隆 0.3.x 分支并构建 Docker 镜像。
+
+   ```bash
+   git clone --branch 0.3.x https://github.com/weicj/vLLM-2080Ti-Definitive.git
+   cd vLLM-2080Ti-Definitive
+   ./build.sh
+   ```
+
+   Docker 构建使用官方镜像提供的 Torch 和 CUDA，
    [镜像配置](PROJECT_RELEASE.env) 用 digest 锁定官方 linux/amd64 镜像。
    构建时应用 SM75 补丁、编译 FlashQLA，并在同一镜像中加入 Inkling 2 Mini 支持。
 
-   宿主机需要 Docker、NVIDIA Container Toolkit 和兼容 CUDA 13.0 的 NVIDIA 驱动。
+   构建镜像需要启用 BuildKit 的 Docker 和 Buildx 插件。运行镜像需要
+   NVIDIA Container Toolkit 和兼容 CUDA 13.0 的 NVIDIA 驱动。
    Python、PyTorch 和 CUDA 用户态依赖由镜像提供。
 
 2. 运行 `./update.sh` 更新。Git 工作树对跟踪分支执行快进更新，归档安装查找稳定的
@@ -78,6 +105,8 @@ Launcher 支持 TP、PP 和 TP/PP 混合推理。0.3.x Docker 已完成双 T10�
 TP/PP 拓扑、选择启动模式与网络配置，并在启动时自动完成健康检查和 smoke 测试；
 也可以在菜单中停止已启动的服务。
 
+![0.2.x launcher.sh 交互式主菜单](docs/assets/launcher-main-menu.png)
+
 自动化部署可使用非交互参数：
 
 ```bash
@@ -90,39 +119,12 @@ NON_INTERACTIVE=1 ./launcher.sh
 使用 `./launcher.sh --print-config` 预览路线。自动化部署见
 [非交互启动说明](docs/non-interactive-launch.zh-CN.md)。
 
-Docker launcher 继续使用本地权重路径、profile、GPU 顺序和服务配置。
-`fast` 模式采用上游调度与 CUDA Graph 默认配置。`normal` 模式的投机解码和双卡
-T10 的 Qwen TurboQuant MTP 图文路线使用 PIECEWISE。
-
-### 在 SM75 上运行 Inkling 2 Mini
-
-更新后运行 `./build.sh`，将 Inkling 2 Mini 支持装入本地镜像。启动时选择权重和
-profile。下面的示例使用支持 PCIe P2P 的两张 T10。
-
-```bash
-MODEL_DIR=/path/to/Inkling-2-Mini \
-PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env \
-GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
-NON_INTERACTIVE=1 ./launcher.sh
-```
-
-上述图文 profile 支持两路各 12,000 token。四卡图文 profile 支持两路各 34,000 token，
-将 `TP_SIZE` 设为 `4` 并选择四张支持 PCIe P2P 的 GPU。纯文本 AR 和 DSpark/7
-配置见各硬件的 profile 指南。[2×T10](profiles/2xT10/README.zh-CN.md#inkling-2-mini) ·
-[4×T10](profiles/4xT10/README.zh-CN.md#inkling-2-mini)
-
-Inkling 支持将上游模型实现移植到 vLLM v0.34.0，并采用 lvb-s 的 SM75 适配。
-[官方权重](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
-[上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
-[社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)
-
 ## 🧭 Profile 与推荐路线
 
 目录结构和路线字段见 [Profile 指南](profiles/README.zh-CN.md)。
-双 RTX 2080 Ti 的待验证配置见 [2x2080Ti Profile](profiles/2x2080Ti/README.zh-CN.md)。
 
-Profile 按扁平路径 `profiles/<硬件>/<模型>/<权重>/<路线>.env` 组织。启动模式由
-launcher 选择，默认 `MODE=fast`；也可以由 launcher 或 profile 显式设置。
+有多个权重版本的模型使用 `profiles/<硬件>/<模型>/<权重>/`。
+启动模式默认为 `MODE=fast`，可以由 launcher 或 profile 显式设置。
 
 可用模式：
 
@@ -192,5 +194,9 @@ CUDA Graph/AOT 编译时降频很容易被误判为软件性能回退。
 - [weicj/FlashQLA-SM70-SM75](https://github.com/weicj/FlashQLA-SM70-SM75)：
   SM70/SM75 适配版本，用于已验证的 Qwen prefill 路线。
 - TurboQuant、Marlin、CUTLASS、Triton 以及 vLLM 相关 kernel。
+
+本项目将 Inkling 2 Mini 的上游实现移植到 vLLM v0.34.0，并采用 lvb-s 的 SM75 适配。
+[上游实现](https://github.com/vllm-project/vllm/pull/69028) ·
+[社区 SM75 移植](https://github.com/lvb-s/vllm-inkling-sm75)
 
 上游更新合入后，仍会在本 fork 的 SM75 范围内重新验证。

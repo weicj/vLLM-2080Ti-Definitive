@@ -16,61 +16,88 @@ based on upstream vLLM. Retain both the upstream license and attribution to
 For usage feedback, feature requests, and community discussion, join the
 [Discord community](https://discord.gg/VFqVVySdMS).
 
-Current development version is `v0.3.0.dev0` on `vllm-2080ti-definitive-0.3.x`.
-**The 0.3.x branch runs on Docker.** `./build.sh` applies the SM75 patches
-and adds the FlashQLA extension to the official vLLM v0.34.0 image.
-`./launcher.sh` starts the resulting image with your model weights mounted
-from the host. The container runs a single copy of vLLM, installed in the
-image. [Official vLLM release](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)
+![Single-request throughput demo from 0.2.x](docs/assets/vllmspeed_dflash.gif)
+
+Current version is `v0.3.0` on `0.3.x`.
 
 This repository maintains the SM75 patches, FlashQLA extension, launcher,
-and hardware profiles. Native builds are available in the [0.2.x release](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3).
+and hardware profiles.
+
+Starting with 0.3.x, deployments use Docker. Native builds are available in the [0.2.x release](https://github.com/weicj/vLLM-2080Ti-Definitive/releases/tag/v0.2.2-post3).
 
 Release history: [CHANGELOG.md](CHANGELOG.md)
 
-## 💡 Why RTX 2080 Ti For LLM Inference?
+## 💡 Primary GPU Architecture
 
-The project is built around a practical cost/performance premise: two 22 GB
-RTX 2080 Ti cards joined by NVLink provide 44 GB of VRAM, substantial memory
-bandwidth, and 136 Turing SMs. With an SM75-aware vLLM route, that is enough
-for serious local 27B and 35B-class serving rather than only small-model use.
+The runtime targets the full NVIDIA Turing GPU family (SM75, CUDA compute
+capability 7.5). Choose a tested Profile as a starting point based on VRAM
+per GPU and the number of cards.
 
-| Metric | 2x RTX 2080 Ti 22 GB + NVLink | RTX 3090 Ti 24 GB baseline | Ratio |
+- **16 GiB per GPU** includes Tesla T10, Tesla T4, and Quadro RTX 5000. Use the
+  T10 Profile guide for your card count. [2 x T10](profiles/2xT10/README.md) · [4 x T10](profiles/4xT10/README.md)
+- **24 GiB per GPU** includes TITAN RTX, Quadro RTX 6000, and the 24 GiB Tesla T40.
+  For a dual-GPU setup, start with the [2 x 2080 Ti Profile guide](profiles/2x2080Ti/README.md).
+
+| Metric | 2 x 2080Ti 22G | 2 x T10 16G | 4 x T10 16G |
 | --- | ---: | ---: | ---: |
-| Dedicated FP32 datapaths | 8,704 | 5,376 | 1.62x |
-| SM count | 136 | 84 | 1.62x |
-| Tensor Cores | 1,088 | 336 | 3.24x |
-| Dense FP16 matrix throughput | 228 TFLOPS | 160 TFLOPS | 1.43x |
-| Total memory bandwidth | 1,232 GB/s | 1,008 GB/s | 1.22x |
-| Total VRAM | 44 GB | 24 GB | 1.83x |
+| Tensor parallelism | TP2 | TP2 | TP4 |
+| Total CUDA cores | 8,704 | 7,168 | 14,336 |
+| Total Tensor Cores | 1,088 | 896 | 1,792 |
+| Theoretical dense FP16 Tensor throughput | 227.7 TFLOPS | 182.4 TFLOPS | 364.7 TFLOPS |
+| Total VRAM | 44 GiB | 32 GiB | 64 GiB |
+| Theoretical total VRAM bandwidth | 1,232 GB/s | 806.5 GB/s | 1,613.1 GB/s |
+| Theoretical aggregate Ring All-Reduce bandwidth | 100 GB/s (NVLink NV2) | 31.5 GB/s (PCIe 3.0 x16 P2P) | 63.0 GB/s (PCIe 3.0 x16 P2P) |
+| Qwen3.8-27B total All-Reduce traffic per decoded token | 2.50 MiB | 2.50 MiB | 7.50 MiB |
+| Link transfer time lower bound per token | 26.2 µs | 83.2 µs | 124.8 µs |
+| FP16 reduction arithmetic lower bound per token | 23 ns | 29 ns | 43 ns |
+| Recommended configurations | [Profile guide](profiles/2x2080Ti/README.md) | [Profile guide](profiles/2xT10/README.md) | [Profile guide](profiles/4xT10/README.md) |
 
-The fork turns those hardware properties into a usable serving stack through
-Marlin, FlashInfer/FlashQLA, TurboQuant/INT8 KV, MTP/DFlash2, and CUDA Graph support.
+## ⚡ Highlights
 
-## 🧩 Support Status
+### Qwen3.8-27B-NVFP4
 
-The launcher supports TP, PP, and mixed TP/PP inference. The 0.3.x Docker
-runtime was validated with Qwen and Inkling on two T10s (TP=2) and four
-T10s (TP=4).
+| Hardware | Context | Test concurrency | 4K/128 Throughput | 32K/512 Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| 2 x 2080Ti 22G | **1 x 262K** | 1 | 1370.18 / 220.84 | 1264.66 / 209.35 |
+| 4 x T10 16G | **4 x 220K** | 1 | 1517.36 / 304.25 | 1424.45 / 275.50 |
+| 4 x T10 16G | **4 x 220K** | 4 | 1585.96 / 797.18 | 1540.44 / 711.94 |
 
-## 🧪 Validated Models And Profiles
+### Inkling 2 Mini
 
-| Hardware | Model | Weights | Profile guide |
-| --- | --- | --- | --- |
-| 2×T10 | Qwen3.8-27B | INT4 (W4A16) | [Qwen3.8-27B-INT4](profiles/2xT10/README.md#qwen38-27b-int4) |
-| 4×T10 | Qwen3.8-27B | FP8 (W8A16), NVFP4 (W4A16) | [FP8](profiles/4xT10/README.md#qwen38-27b-fp8) · [NVFP4](profiles/4xT10/README.md#qwen38-27b-nvfp4) |
-| 2×T10, 4×T10 | Inkling 2 Mini | Official checkpoint | [2×T10 AR and DSpark/7](profiles/2xT10/README.md#inkling-2-mini) · [4×T10 AR and DSpark/7](profiles/4xT10/README.md#inkling-2-mini) |
+| Hardware | Context | Test concurrency | 4K/128 Throughput | 32K/512 Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| 2 x 2080Ti 22G | **1 x 870K** | 1 | 2793.98 / 275.03 | 2580.39 / 207.40 |
+| 2 x 2080Ti 22G | **4 x 140K** | 4 | 2736.95 / 594.34 | 2427.26 / 369.16 |
+| 2 x T10 16G | **1 x 262K** | 1 | 2465.67 / 237.90 | 2418.85 / 174.58 |
+| 2 x T10 16G | **2 x 176K** | 2 | 2370.57 / 384.04 | 2108.90 / 238.03 |
+| 4 x T10 16G | **1 x 1M** | 1 | 3729.50 / 290.63 | 3480.09 / 232.84 |
+| 4 x T10 16G | **2 x 512K** | 2 | 3398.49 / 444.66 | 3353.87 / 338.78 |
+| 4 x T10 16G | **4 x 250K** | 4 | 2966.63 / 653.72 | 2992.04 / 427.90 |
+
+Throughput is reported as prefill / decode in tok/s. Concurrent decode sums
+tokens generated during the shared decode window. All results use DFlash2
+(`n=7`) with synthetic inputs that sustain high draft acceptance. Decode throughput
+can be lower on real tasks with lower draft acceptance.
 
 ## 🚀 Build And Launch
 
-1. Run `./build.sh` in the 0.3.x checkout. The Docker build takes the Torch
-   and CUDA stack from the upstream release image. The
+1. Clone the 0.3.x branch and build the Docker image.
+
+   ```bash
+   git clone --branch 0.3.x https://github.com/weicj/vLLM-2080Ti-Definitive.git
+   cd vLLM-2080Ti-Definitive
+   ./build.sh
+   ```
+
+   The Docker build takes the Torch and CUDA stack from the upstream release
+   image. The
    [image lock](PROJECT_RELEASE.env) pins the official linux/amd64 image by
    digest. The build applies the SM75 patches, compiles FlashQLA, and includes
    Inkling 2 Mini support in the same image used for Qwen.
 
-   The Docker runtime requires Docker with NVIDIA Container Toolkit and a
-   host driver compatible with CUDA 13.0. The image provides the Python,
+   Building the image requires Docker with BuildKit and the Buildx plugin.
+   Running it requires NVIDIA Container Toolkit and a host driver compatible
+   with CUDA 13.0. The image provides the Python,
    PyTorch, and CUDA user-space dependencies.
 
 2. Run `./update.sh` to update. Git checkouts fast-forward their tracking
@@ -89,6 +116,8 @@ profile, configures GPU and TP/PP topology, chooses the launch mode and network
 settings, starts the service with health and smoke checks, and stops a running
 service.
 
+![launcher.sh interactive main menu from 0.2.x](docs/assets/launcher-main-menu.png)
+
 For automated deployment, pass the configuration non-interactively:
 
 ```bash
@@ -101,44 +130,12 @@ NON_INTERACTIVE=1 ./launcher.sh
 Use `./launcher.sh --print-config` to preview a route. See the
 [non-interactive launch guide](docs/non-interactive-launch.md) for automation.
 
-The Docker launcher uses the same local checkpoint paths, profile files, GPU
-order, and service settings. It uses upstream scheduling and fast-mode graph
-defaults, with PIECEWISE graphs for speculative decoding in normal mode and
-for the dual T10 Qwen TurboQuant MTP text-image route.
-
-### Inkling 2 Mini on SM75
-
-Run `./build.sh` after updating to include Inkling 2 Mini support in the local
-image. Then select the model checkpoint and profile. This example uses two
-T10s with PCIe P2P.
-
-```bash
-MODEL_DIR=/path/to/Inkling-2-Mini \
-PROFILE=2xT10/inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env \
-GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
-NON_INTERACTIVE=1 ./launcher.sh
-```
-
-The example supports two concurrent multimodal requests of 12,000 tokens each.
-The four-card profile supports two requests of 34,000 tokens each. Set
-`TP_SIZE=4` and select four GPUs with PCIe P2P for that profile. The guides also
-list the text-only AR and DSpark/7 profiles. [2×T10](profiles/2xT10/README.md#inkling-2-mini) ·
-[4×T10](profiles/4xT10/README.md#inkling-2-mini)
-
-Inkling support backports the upstream model implementation to vLLM v0.34.0
-and uses the SM75 port by lvb-s. [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) ·
-[Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
-[Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
-
 ## 🧭 Profiles
 
 The [Profile Guide](profiles/README.md) explains the layout and route fields.
-The [2x2080Ti guide](profiles/2x2080Ti/README.md) lists the dual RTX 2080 Ti profiles pending
-Docker validation.
 
-Profiles use the flat layout `profiles/<hardware>/<model>/<weight>/<route>.env`.
-The launcher selects the startup mode and defaults to `MODE=fast`; the mode can
-also be set explicitly by the launcher or profile.
+Models with multiple weight variants use `profiles/<hardware>/<model>/<weight>/`.
+The launcher selects the startup mode and defaults to `MODE=fast`. The launcher or profile can also set the mode explicitly.
 
 Available modes:
 
@@ -218,5 +215,9 @@ Acceleration components used or integrated by this runtime include:
 - [weicj/FlashQLA-SM70-SM75](https://github.com/weicj/FlashQLA-SM70-SM75):
   SM70/SM75 adaptation used by the validated Qwen prefill route.
 - TurboQuant, Marlin, CUTLASS, Triton, and related vLLM kernels.
+
+Inkling 2 Mini support backports the upstream model implementation to vLLM v0.34.0
+and uses the SM75 port by lvb-s. [Upstream implementation](https://github.com/vllm-project/vllm/pull/69028) ·
+[Community SM75 port](https://github.com/lvb-s/vllm-inkling-sm75)
 
 Upstream updates are re-evaluated within the SM75-specific scope of this fork.

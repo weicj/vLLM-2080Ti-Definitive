@@ -30,6 +30,8 @@ fits every machine. Capacity and performance are promoted only after the
 external audit records startup, 4K/128, 32K/512, concurrency, and image
 correctness evidence.
 
+For browser clients hosted on a different origin, set `API_ALLOWED_ORIGINS` to a JSON list of origins when starting the service. For example, add `--set 'API_ALLOWED_ORIGINS=["https://weicj.github.io"]'` for LLM Speed Chat. Use the scheme, host and optional port, without a URL path. If the browser prompts for Local Network Access, grant it to the client site.
+
 ## Experimental SSD Prefix Cache
 
 The launcher can opt into vLLM's built-in `OffloadingConnector` with a CPU

@@ -39,8 +39,9 @@ required_keys=(
 
 allowed_key() {
   case "$1" in
-    MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|MAX_MODEL_LEN|GPU_UTIL|\
-MAX_BATCHED_TOKENS|MAX_NUM_SEQS|MESSAGE_TYPE|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|ENABLE_YARN)
+    MODE|MODEL_FAMILY|MODEL_VARIANT|QUANTIZATION|KV_CACHE_DTYPE|VLLM_KV_CACHE_LAYOUT|MAX_MODEL_LEN|GPU_UTIL|\
+MAX_BATCHED_TOKENS|MAX_NUM_SEQS|LONG_PREFILL_TOKEN_THRESHOLD|NO_ASYNC_SCHEDULING|\
+MESSAGE_TYPE|SPECULATIVE_METHOD|SPECULATIVE_TOKENS|SPECULATIVE_DRAFT_SAMPLE_METHOD|ENABLE_YARN)
       return 0
       ;;
     *)
@@ -53,13 +54,29 @@ total=0
 errors=0
 
 expected_profiles=(
-  2xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
-  2xT10/inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env
-  2xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
+  2xT10/inkling-2-mini/dflash2-fp8kv-1x262K-text-image.env
+  2xT10/inkling-2-mini/dflash2-fp8kv-2x128K-text-image.env
+  2xT10/inkling-2-mini/dflash2-fp8kv-2x176K-text-only.env
+  2xT10/inkling-2-mini/dspark7-fp8kv-1x262K-text-image.env
+  2xT10/inkling-2-mini/dspark7-fp8kv-2x200K-text-only.env
+  2xT10/inkling-2-mini/nomtp-fp8kv-1x522K-text-image.env
+  2xT10/inkling-2-mini/nomtp-fp8kv-2x203K-text-image.env
   2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env
   2xT10/qwen38-27b/w4a16/mtp3-tq4nc-2x220K-text-only.env
   2xT10/qwen38-27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env
   2xT10/qwen38-27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env
+  2x2080Ti/inkling-2-mini/dflash2-fp8kv-1x870K-text-image.env
+  2x2080Ti/inkling-2-mini/dflash2-fp8kv-2x410K-text-image.env
+  2x2080Ti/inkling-2-mini/dflash2-fp8kv-3x220K-text-image.env
+  2x2080Ti/inkling-2-mini/dflash2-fp8kv-4x140K-text-image.env
+  2x2080Ti/inkling-2-mini/dspark7-fp8kv-1x900K-text-image.env
+  2x2080Ti/inkling-2-mini/dspark7-fp8kv-2x430K-text-image.env
+  2x2080Ti/inkling-2-mini/dspark7-fp8kv-3x270K-text-image.env
+  2x2080Ti/inkling-2-mini/dspark7-fp8kv-4x190K-text-image.env
+  2x2080Ti/inkling-2-mini/nomtp-fp8kv-1x1048K-text-image.env
+  2x2080Ti/inkling-2-mini/nomtp-fp8kv-2x530K-text-image.env
+  2x2080Ti/inkling-2-mini/nomtp-fp8kv-3x320K-text-image.env
+  2x2080Ti/inkling-2-mini/nomtp-fp8kv-4x210K-text-image.env
   2x2080Ti/qwen38-27b/w8a16/nomtp-fp16kv-1x121K-text-image.env
   2x2080Ti/qwen38-27b/w8a16/nomtp-fp16kv-1x176K-text-only.env
   2x2080Ti/qwen38-27b/w8a16/mtp4-fp16kv-1x148K-text-only.env
@@ -73,9 +90,12 @@ expected_profiles=(
   2x2080Ti/qwen38-27b/w4a16/mtp4-tq4nc-3x262K-text-only.env
   2x2080Ti/qwen36-35b/w8a16/nomtp-fp16kv-1x262K-text-only.env
   2x2080Ti/qwen36-35b/w8a16/nomtp-fp8kv-1x221K-text-image.env
-  4xT10/inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env
-  4xT10/inkling-2-mini/official/dspark7-fp8kv-2x34K-text-image.env
-  4xT10/inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env
+  4xT10/inkling-2-mini/dflash2-fp8kv-1x1048K-text-image.env
+  4xT10/inkling-2-mini/dflash2-fp8kv-2x512K-text-image.env
+  4xT10/inkling-2-mini/dflash2-fp8kv-4x250K-text-image.env
+  4xT10/inkling-2-mini/dspark7-fp8kv-1x1048K-text-image.env
+  4xT10/inkling-2-mini/dspark7-fp8kv-2x500K-text-image.env
+  4xT10/inkling-2-mini/dspark7-fp8kv-4x250K-text-image.env
   4xT10/qwen38-27b/w4a16/mtp4-fp16kv-1x262K-text-image.env
   4xT10/qwen38-27b/w4a16/dflash2-fp16kv-1x262K-text-only.env
   4xT10/qwen38-27b/w4a16/dflash2-fp8kv-2x262K-text-only.env
@@ -146,6 +166,18 @@ while IFS= read -r -d '' file; do
       ;;
   esac
 
+  layout=$(read_profile_value "$file" VLLM_KV_CACHE_LAYOUT)
+  case "$layout" in
+    ""|LBHNC|LBNHC|LHBNC|BLHNC|BLNHC|BHLNC) ;;
+    *) profile_error "$rel" "unsupported VLLM_KV_CACHE_LAYOUT=$layout" ;;
+  esac
+
+  draft_sampling=$(read_profile_value "$file" SPECULATIVE_DRAFT_SAMPLE_METHOD)
+  case "$draft_sampling" in
+    ""|greedy|probabilistic) ;;
+    *) profile_error "$rel" "unsupported SPECULATIVE_DRAFT_SAMPLE_METHOD=$draft_sampling" ;;
+  esac
+
   for key in MAX_MODEL_LEN MAX_NUM_SEQS; do
     value=$(read_profile_value "$file" "$key")
     if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
@@ -155,6 +187,16 @@ while IFS= read -r -d '' file; do
   max_batched_tokens=$(read_profile_value "$file" MAX_BATCHED_TOKENS)
   if [[ -n "$max_batched_tokens" && ! "$max_batched_tokens" =~ ^[1-9][0-9]*$ ]]; then
     profile_error "$rel" "MAX_BATCHED_TOKENS must be a positive integer when present"
+  fi
+
+  prefill_threshold=$(read_profile_value "$file" LONG_PREFILL_TOKEN_THRESHOLD)
+  if [[ -n "$prefill_threshold" && ! "$prefill_threshold" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    profile_error "$rel" "LONG_PREFILL_TOKEN_THRESHOLD must be a nonnegative integer when present"
+  fi
+
+  no_async_scheduling=$(read_profile_value "$file" NO_ASYNC_SCHEDULING)
+  if [[ -n "$no_async_scheduling" && "$no_async_scheduling" != 0 && "$no_async_scheduling" != 1 ]]; then
+    profile_error "$rel" "NO_ASYNC_SCHEDULING must be 0 or 1 when present"
   fi
 
   gpu_util=$(read_profile_value "$file" GPU_UTIL)

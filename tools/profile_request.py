@@ -225,6 +225,10 @@ def main() -> None:
     parser.add_argument("--prompt-variant", default="")
     parser.add_argument("--allowed-token-text", default="")
     parser.add_argument(
+        "--repeat-text",
+        help="Continue this repeated token sequence in completions mode.",
+    )
+    parser.add_argument(
         "--pure-filler",
         action="store_true",
         help='Use only repeated " the" tokens. This is for synthetic throughput, not correctness.',
@@ -243,21 +247,36 @@ def main() -> None:
     is_image = args.endpoint == "chat-image"
     if args.pure_filler and args.endpoint != "completions":
         raise SystemExit("--pure-filler is only valid with --endpoint completions")
-    prompt, prompt_tokens = build_exact_prompt(
-        tokenizer,
-        args.prompt_tokens,
-        image=is_image,
-        pure_filler=args.pure_filler,
-    )
-    # The launcher passes a per-sample variant so its reference requests do
-    # not accidentally share a prefix-cache entry. Keep the requested token
-    # count exact after adding that marker.
-    if args.prompt_variant:
-        variant_prompt = f"{args.prompt_variant}\n{prompt}"
-        variant_ids = tokenizer.encode(variant_prompt, add_special_tokens=False)
-        variant_ids = variant_ids[:prompt_tokens]
-        prompt = tokenizer.decode(variant_ids, skip_special_tokens=False)
-        prompt_tokens = len(tokenizer.encode(prompt, add_special_tokens=False))
+    expected_ids = None
+    if args.repeat_text:
+        if args.endpoint != "completions" or args.allowed_token_text or args.pure_filler:
+            parser.error("--repeat-text requires completions without fixed-token options")
+        pattern = tokenizer.encode(args.repeat_text, add_special_tokens=False)
+        prefix = tokenizer.encode(
+            f"{args.prompt_variant}\n", add_special_tokens=False
+        ) if args.prompt_variant else []
+        prompt_tokens = args.prompt_tokens
+        filler_tokens = prompt_tokens - len(prefix)
+        if not pattern or filler_tokens < len(pattern):
+            parser.error("--repeat-text requires room for a repeated sequence after the variant")
+        count = filler_tokens + args.gen_tokens
+        repeated = (pattern * ((count + len(pattern) - 1) // len(pattern)))[:count]
+        prompt = prefix + repeated[:filler_tokens]
+        expected_ids = repeated[filler_tokens:]
+    else:
+        prompt, prompt_tokens = build_exact_prompt(
+            tokenizer,
+            args.prompt_tokens,
+            image=is_image,
+            pure_filler=args.pure_filler,
+        )
+        # Match the requested length after adding a unique prefix for Prefix Cache.
+        if args.prompt_variant:
+            variant_prompt = f"{args.prompt_variant}\n{prompt}"
+            variant_ids = tokenizer.encode(variant_prompt, add_special_tokens=False)
+            variant_ids = variant_ids[:prompt_tokens]
+            prompt = tokenizer.decode(variant_ids, skip_special_tokens=False)
+            prompt_tokens = len(tokenizer.encode(prompt, add_special_tokens=False))
     prepare_s = time.perf_counter() - prepare_start
 
     if args.endpoint == "completions":
@@ -271,13 +290,13 @@ def main() -> None:
             "ignore_eos": args.ignore_eos,
             "return_token_ids": True,
         }
-        allowed_token_id = None
+        if expected_ids is not None:
+            payload["add_special_tokens"] = False
         if args.allowed_token_text:
             allowed_ids = tokenizer.encode(args.allowed_token_text, add_special_tokens=False)
             if len(allowed_ids) != 1:
                 raise SystemExit("--allowed-token-text must encode to exactly one token")
-            allowed_token_id = allowed_ids[0]
-            payload["allowed_token_ids"] = [allowed_token_id]
+            payload["allowed_token_ids"] = allowed_ids
         endpoint_path = "completions"
     elif args.endpoint == "chat-text":
         payload = {
@@ -388,6 +407,13 @@ def main() -> None:
             len(allowed_id) == 1
             and len(token_ids) == completion_tokens
             and all(token_id == allowed_id[0] for token_id in token_ids)
+        )
+    if expected_ids is not None:
+        usage = result["usage"] or {}
+        record["repeat_text_matches"] = (
+            result["completion_token_ids"] == expected_ids
+            and usage.get("prompt_tokens") == prompt_tokens
+            and usage.get("completion_tokens") == args.gen_tokens
         )
     if args.expect_image_card:
         record["image_card_correct"] = image_card_correct(text)

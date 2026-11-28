@@ -8,52 +8,40 @@ Checkpoint [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-2
 
 | Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
 | --- | ---: | --- | --- | --- | ---: | ---: | ---: |
-| [`qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env`](qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env) | 262,144 | FP8 | MTP/3 | text-only | 293,422 | 1176.34 / 87.28 | 1107.18 / 81.90 |
-| [`qwen38-27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env`](qwen38-27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env) | 2 × 155,648 | TQK8V4 | MTP/3 | text-only | 351,112 | 1059.92 / 95.09 | 1069.71 / 107.12 |
-| [`qwen38-27b/w4a16/mtp3-tq4nc-2x220K-text-only.env`](qwen38-27b/w4a16/mtp3-tq4nc-2x220K-text-only.env) | 2 × 220,000 | TQ4NC | MTP/3 | text-only | 511,566 | 1164.18 / 85.29 | 1122.17 / 73.27 |
-| [`qwen38-27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env`](qwen38-27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env) | 196,000 | TQK8V4 | MTP/3 | text+image | 253,866 | 1191.44 / 82.76 | 1124.64 / 60.87 |
+| [mtp3-fp8kv-1x262K-text-only.env](qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env) | 262,144 | FP8 | MTP/3 | text-only | 293,422 | 1176.34 / 87.28 | 1107.18 / 81.90 |
+| [mtp3-tqk8v4-2x155K-text-only.env](qwen38-27b/w4a16/mtp3-tqk8v4-2x155K-text-only.env) | 2 × 155,648 | TQK8V4 | MTP/3 | text-only | 351,112 | 1059.92 / 95.09 | 1069.71 / 107.12 |
+| [mtp3-tq4nc-2x220K-text-only.env](qwen38-27b/w4a16/mtp3-tq4nc-2x220K-text-only.env) | 2 × 220,000 | TQ4NC | MTP/3 | text-only | 511,566 | 1164.18 / 85.29 | 1122.17 / 73.27 |
+| [mtp3-tqk8v4-1x196K-text-image.env](qwen38-27b/w4a16/mtp3-tqk8v4-1x196K-text-image.env) | 196,000 | TQK8V4 | MTP/3 | text+image | 253,866 | 1196.41 / 87.30 | 1136.75 / 60.36 |
 
 ## Inkling 2 Mini
 
-Official checkpoint [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+Weights and draft [Official checkpoint](https://huggingface.co/thinkingmachines/Inkling-2-Mini) · [DFlash2 BF16 draft](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2/tree/4f9088ea66c21f2b99ed657d1941c306b03e84d2)
 
-DSpark/7 loads `mtp.safetensors` from the official checkpoint and uses probabilistic draft sampling.
+All profiles use FP8 target KV. DSpark/7 loads `mtp.safetensors` from the official checkpoint. DFlash2/7 uses FP16 draft KV and the LBNHC layout.
 
-| Profile | Context | KV | Speculative decoding | Messages | GPU KV tokens |
-| --- | ---: | --- | --- | --- | ---: |
-| [`inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env`](inkling-2-mini/official/nomtp-fp8kv-1x8K-text-only.env) | 8,192 | FP8 | AR | text-only | 12,602 |
-| [`inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env`](inkling-2-mini/official/dspark7-fp8kv-1x8K-text-only.env) | 8,192 | FP8 | DSpark/7 | text-only | 10,833 |
+| Profile | Context | Test concurrency | Startup KV tokens | 4K/128 prefill / decode | 32K/512 prefill / decode |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [dspark7-fp8kv-2x200K-text-only.env](inkling-2-mini/dspark7-fp8kv-2x200K-text-only.env) | 2 × 200,000 | 2 | 411,276 | 2003.21 / 338.11 | 1911.51 / 202.07 |
+| [dspark7-fp8kv-1x262K-text-image.env](inkling-2-mini/dspark7-fp8kv-1x262K-text-image.env) | 1 × 262,144 | 1 | 306,544 | 2480.39 / 249.43 | 2419.47 / 165.72 |
+| [dflash2-fp8kv-1x262K-text-image.env](inkling-2-mini/dflash2-fp8kv-1x262K-text-image.env) | 1 × 262,144 | 1 | 317,129 | 2465.67 / 237.90 | 2418.85 / 174.58 |
+| [dflash2-fp8kv-2x128K-text-image.env](inkling-2-mini/dflash2-fp8kv-2x128K-text-image.env) | 2 × 128,000 | 2 | 267,636 | 2009.46 / 376.91 | 2113.50 / 236.45 |
+| [dflash2-fp8kv-2x176K-text-only.env](inkling-2-mini/dflash2-fp8kv-2x176K-text-only.env) | 2 × 176,000 | 2 | 369,278 | 2370.57 / 384.04 | 2108.90 / 238.03 |
+| [nomtp-fp8kv-1x522K-text-image.env](inkling-2-mini/nomtp-fp8kv-1x522K-text-image.env) | 1 × 522,000 | 1 | 523,533 | 3217.41 / 48.47 | 2858.22 / 46.10 |
+| [nomtp-fp8kv-2x203K-text-image.env](inkling-2-mini/nomtp-fp8kv-2x203K-text-image.env) | 2 × 203,000 | 2 | 409,366 | 1923.62 / 87.11 | 2257.81 / 78.92 |
 
-| Prompt | AR 4K/128 prefill / decode | DSpark/7 4K/128 prefill / decode | Draft acceptance |
-| --- | ---: | ---: | ---: |
-| Prose | 3644.31 / 63.67 | 3556.14 / 175.24 | 76.4–81.2% |
-| Code | 3615.24 / 63.40 | 3540.27 / 183.17 | 86.5% |
-| Repetitive | 3673.90 / 62.98 | 3594.91 / 278.34 | 100% |
+Dual-GPU DSpark/7 text-image launch example
 
-### DSpark/7 with text and images
+```bash
+MODEL_DIR=/path/to/Inkling-2-Mini \
+PROFILE=2xT10/inkling-2-mini/dspark7-fp8kv-1x262K-text-image.env \
+GPU_DEVICES=0,1 TP_SIZE=2 NCCL_P2P_DISABLE=0 DISABLE_PREFIX_CACHING=1 \
+NON_INTERACTIVE=1 ./launcher.sh
+```
 
-| Profile | Concurrent context | GPU KV tokens | KV memory per GPU | 4K/128 prefill / decode |
-| --- | ---: | ---: | ---: | ---: |
-| [inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env](inkling-2-mini/official/dspark7-fp8kv-2x12K-text-image.env) | 2 × 12,000 | 28,675 | 4.21 GiB | 3063.20 / 92.81 |
+## Test Notes
 
-The capacity test sent two simultaneous requests, each with one 480 × 480 image, 11,872 input tokens including the image and chat framing, and 128 output tokens. Server metrics showed both requests running simultaneously with zero preemptions. A separate two-image request identified the blue square, orange circle, green square, and purple circle.
-
-The image runs used the default Docker build, FP8 KV, fast mode, and NCCL over PCIe P2P. Vision memory profiling was enabled and Prefix Cache was disabled. GPU memory utilization was 0.97, with a 1,024-token batch limit. Throughput is in tok/s for one streamed multimodal request at a time. The 4K/128 figures are medians of three requests. vLLM calculates equivalent KV capacity at the configured context and reported 2.39 full-context requests at startup.
-
-## Capacity and feature checks
-
-The FP8 KV capacity request completed 262,143 input tokens
-and one output token in 476.5 seconds. The TQK8V4 capacity request completed
-155,647 input tokens and one output token in 205.4 seconds. With prefix caching
-enabled on the FP8 KV profile, the launcher
-passed its smoke test, reported 288,504 GPU KV tokens, and a repeated request
-hit 3,200 of 4,096 prompt tokens with identical output token IDs. The
-text-image profile uses PIECEWISE CUDA graphs by default on Docker. With
-MTP/3 enabled, it identified the blue square and orange circle in the
-image smoke test.
-
-## Test version and environment
-
-- 2026-11-27, vLLM 2080 Ti Definitive Edition `v0.3.0.dev0`. The image uses official vLLM `v0.34.0`, CUDA 13.0, PyTorch `2.14.0+cu130`, and NVIDIA driver 610.43.03.
-- 2 Tesla T10 GPUs with 16 GiB each, TP2, and PCIe P2P within one NUMA node. Tests used `fast` mode. Text-only throughput runs used a 2,048-token batch limit. Inkling used NCCL PCIe P2P.
-- Throughput is in tok/s. For the text-only throughput tables, Prefix Cache was disabled and requests ran one at a time after warmup. 4K/128 is the median of three requests. The Qwen 32K/512 lane ran one request to completion. The two lanes used exactly 4,096 input and 128 output tokens, or 32,768 input and 512 output tokens. Image understanding was checked separately for multimodal profiles.
+- **Environment** for tests run November 27–28, 2026. vLLM 2080 Ti Definitive Edition `v0.3.0` on the official vLLM `v0.34.0` Docker base. CUDA 13.0, PyTorch `2.14.0+cu130`, NVIDIA driver 610.43.03, and 2 × 16 GiB Tesla T10 in TP2 with PCIe P2P. Tests used fast mode with Prefix Cache disabled. Inkling used NCCL, with vLLM custom all-reduce enabled for pure AR.
+- **Throughput** is in tok/s. 4K/128 and 32K/512 use 4,096/128 and 32,768/512 input/output tokens per request. Concurrent prefill ends at the latest first token. Concurrent decode counts output only in the shared decode window, trimmed by 10% at each end up to 250 ms.
+- **Qwen** uses one text request at a time and a 2,048-token batch limit. The 4K/128 result is a three-run median. The 32K/512 test ran once. The 196K profile used `1 2 3 4` with 100% draft acceptance. Other rows used the fixed token ` the`. The 262K FP8 KV and 155K TQK8V4 profiles completed full-context tests.
+- **Inkling** DSpark/7 and DFlash2/7 runs use high-acceptance `1 2 3 4` continuation, with one 480 × 480 image for each multimodal request. 4K/128 uses three-round medians. At 32K/512, DSpark/7 uses two rounds and DFlash2/7 uses three. The DSpark/7 1 × 262K multimodal profile passed a separate full-context test. DFlash2/7 had 100% draft acceptance and zero preemptions.
+- **Pure AR** uses LBNHC and 97% GPU memory utilization. Context limits are sized from startup KV capacity with a small margin. 4K/128 and 32K/512 are three-run medians at the listed concurrency with one image per request.

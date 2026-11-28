@@ -2,54 +2,30 @@
 
 语言：[English](README.md) | 简体中文
 
-Profile 是只保存路线参数的 `.env` 预设，不负责选择 checkpoint、GPU、端口、chat
-template 或 reasoning 默认值；target 权重通过 `MODEL_DIR` 选择，DFlash draft
-权重通过 `SPECULATIVE_MODEL` 单独选择。
+Inkling 的 Profile 位于 `profiles/<硬件>/inkling-2-mini/<路线>.env`。
+有多个权重版本的模型使用 `profiles/<硬件>/<模型>/<权重>/<路线>.env`。
+模型权重、配置文件和吞吐数据见硬件指南。
 
-Profile 按硬件、模型和权重格式分组。每个硬件/模型/权重目录下的文件直接平铺；
-启动模式由 launcher 选择，默认使用 `fast`。
+- [2xT10](2xT10/README.zh-CN.md)
+- [4xT10](4xT10/README.zh-CN.md)
+- [2x2080Ti](2x2080Ti/README.zh-CN.md)
 
-- [2xT10](2xT10/README.zh-CN.md) 包含 `qwen38-27b/w4a16` 和 `inkling-2-mini/official`。
-- [4xT10](4xT10/README.zh-CN.md) 包含 `qwen38-27b/w8a16`、`qwen38-27b/w4a16` 和 `inkling-2-mini/official`。
-- [2x2080Ti](2x2080Ti/README.zh-CN.md) 列出待验证的 Docker profile。
+通过 `./launcher.sh` 选择模型、GPU 拓扑、端口、聊天模板、思考设置和模式，默认模式为
+`fast`。主模型权重使用 `MODEL_DIR`，DFlash 草稿使用 `SPECULATIVE_MODEL`。
+可用 `./launcher.sh --print-config` 预览生效参数。[非交互启动说明](../docs/non-interactive-launch.zh-CN.md)
 
-Inkling 和 Qwen profiles 使用同一套 Docker 镜像。
-DSpark/7 路线使用 `SPECULATIVE_METHOD=dspark` 和 `SPECULATIVE_TOKENS=7`，
-从官方权重目录加载草稿权重。
+在 launcher 中设置 `PER_REQUEST_SPEC_DECODE_METRICS=none|summary|detailed`，选择逐请求投机解码指标的详细程度。
 
-Profile 文件名统一使用 `<解码类型>-<KV精度>-<并发数><上下文>-<消息类型>.env`。
-例如 `dflash2-tqk8v4-4x220K-text-only.env` 表示 DFlash2、TQK8V4 KV、四并发、
-每路 220K（十进制 token）上下文、纯文本消息。文件名中的上下文标签取
-`MAX_MODEL_LEN / 1000` 的整数部分，例如 262144 标记为 262K。投机解码通过
-`SPECULATIVE_METHOD=none|mtp|dflash|dspark` 路由，token 数由 `SPECULATIVE_TOKENS` 设置。逐请求投机指标由 launcher 设置：
-`PER_REQUEST_SPEC_DECODE_METRICS=none|summary|detailed`。
+## Profile 格式
 
-手写 Profile 时，每行使用一个 `KEY=value` 赋值。必需的路线字段为
-`MODEL_FAMILY`、`MODEL_VARIANT`、`QUANTIZATION`、`KV_CACHE_DTYPE`、
-`MAX_MODEL_LEN`、`GPU_UTIL`、`MAX_NUM_SEQS`、`MESSAGE_TYPE`、
-`SPECULATIVE_METHOD` 和 `SPECULATIVE_TOKENS`。可选路线字段为 `MODE`、
-`MAX_BATCHED_TOKENS` 和 `ENABLE_YARN`。
+文件名为 `<解码类型>-<KV 精度>-<并发数>x<每路上下文>-<消息类型>.env`，与配置值对应。
+上下文按十进制千位标记，例如 `MAX_MODEL_LEN=262144` 写作 `262K`。
+`SPECULATIVE_METHOD` 可选 `none`、`mtp`、`dflash` 或 `dspark`，草稿长度由
+`SPECULATIVE_TOKENS` 设置。DSpark 从 Inkling 官方权重目录加载草稿。
 
-例如，将下面内容保存为
-`2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env`：
+每行写一个 `KEY=value`。必填字段为 `MODEL_FAMILY`、`MODEL_VARIANT`、
+`QUANTIZATION`、`KV_CACHE_DTYPE`、`MAX_MODEL_LEN`、`GPU_UTIL`、
+`MAX_NUM_SEQS`、`MESSAGE_TYPE`、`SPECULATIVE_METHOD` 和
+`SPECULATIVE_TOKENS`。[Profile 示例](2xT10/qwen38-27b/w4a16/mtp3-fp8kv-1x262K-text-only.env)
 
-```dotenv
-MODEL_FAMILY=qwen35
-MODEL_VARIANT=int4
-QUANTIZATION=compressed-tensors
-KV_CACHE_DTYPE=fp8
-MAX_MODEL_LEN=262144
-GPU_UTIL=0.93
-MAX_NUM_SEQS=1
-SPECULATIVE_METHOD=mtp
-SPECULATIVE_TOKENS=3
-MESSAGE_TYPE=text-only
-```
-
-文件名和字段值必须保持一致：`nomtp`、`mtpN`、`dflash` 和 `dsparkN` 要分别匹配投机方法和
-token 数；文件名中的并发数和 `K` 形式的上下文要分别匹配 `MAX_NUM_SEQS` 和
-`MAX_MODEL_LEN`；KV 与消息类型后缀也要匹配对应字段。手写完成后，先运行
-`bash tools/validate_profiles.sh` 校验，再使用该 Profile。
-
-选择 profile 后，可执行 `./launcher.sh --print-config` 检查最终生效的路线参数，
-然后再启动服务。
+运行 `bash tools/validate_profiles.sh` 校验本地 Profile。可选字段也由脚本列出。[校验脚本](../tools/validate_profiles.sh)

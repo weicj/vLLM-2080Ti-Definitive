@@ -1,0 +1,178 @@
+--- a/vllm/v1/worker/gpu/spec_decode/eagle/eagle3_utils.py
++++ b/vllm/v1/worker/gpu/spec_decode/eagle/eagle3_utils.py
+@@ -110,8 +110,27 @@
+     if not layer_ids:
+         dflash_config = getattr(hf_config, "dflash_config", None)
+         if dflash_config and isinstance(dflash_config, dict):
+-            # Add 1 to convert DFlash's aux layer id semantics
+-            layer_ids = [i + 1 for i in (dflash_config.get("target_layer_ids") or [])]
++            layer_ids = dflash_config.get("target_layer_ids") or []
++            target = spec_config.target_model_config
++            if (
++                spec_config.method == "dflash"
++                and target is not None
++                and target.hf_config.model_type == "inkling2_loop"
++            ):
++                # Inkling counts loop visits and appends the final norm itself.
++                num_visits = target.hf_text_config.num_layer_visits
++                if (
++                    len(layer_ids) < 2
++                    or layer_ids != sorted(set(layer_ids))
++                    or layer_ids[0] < 0
++                    or layer_ids[-1] != num_visits
++                ):
++                    raise ValueError(
++                        "Inkling DFlash target_layer_ids must be sorted loop "
++                        "visits ending at the final norm"
++                    )
++            else:
++                layer_ids = [i + 1 for i in layer_ids]
+     if not layer_ids:
+         dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+         if dspark_layer_ids:
+--- a/vllm/model_executor/models/qwen3_dflash2.py
++++ b/vllm/model_executor/models/qwen3_dflash2.py
+@@ -532,6 +532,7 @@
+     ) -> None:
+         super().__init__()
+         self.top_k = top_k
++        self.post_softcap: float | None = None
+         self.predecessor_codebook = nn.Parameter(
+             torch.empty(vocab_size, rank, dtype=params_dtype), requires_grad=False
+         )
+@@ -556,7 +557,7 @@
+         anchor_token_ids: torch.Tensor,
+     ) -> torch.Tensor:
+         hidden = self.hidden_projection(hidden_states)
+-        return _score_edges(
++        scores = _score_edges(
+             self.predecessor_codebook,
+             self.successor_codebook,
+             candidate_ids,
+@@ -565,6 +566,10 @@
+             anchor_token_ids,
+             self.top_k,
+         )
++        if self.post_softcap is not None:
++            cap = self.post_softcap
++            scores = torch.tanh(scores / cap) * cap
++        return scores
+
+
+ class DFlash2Qwen3Model(DFlashQwen3Model):
+@@ -592,6 +597,7 @@
+             )
+             logger.info("Enabled native DFlash2 BF16 transport for SM75.")
+         draft_config = self.config.dflash_config
++        self.target_embed_norm: nn.Module | None = None
+         self.input_embedding_scale = float(
+             draft_config.get("input_embedding_scale", 1.0)
+         )
+@@ -607,7 +613,10 @@
+             )
+
+     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+-        return super().embed_input_ids(input_ids) * self.input_embedding_scale
++        embeddings = super().embed_input_ids(input_ids)
++        if self.target_embed_norm is not None:
++            embeddings = self.target_embed_norm(embeddings).to(self.mask_embedding.dtype)
++        return embeddings * self.input_embedding_scale
+
+
+     def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
+@@ -633,13 +642,30 @@
+         super().__init__(vllm_config=vllm_config, prefix=prefix)
+         draft_config = self.config.dflash_config
+         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
+-        # Candidates index the selector codebooks, which have the draft's
+-        # vocabulary; the target's vocabulary can be larger.
+-        self.candidate_logits_processor = LogitsProcessor(
+-            min(vllm_config.model_config.get_vocab_size(), self.config.vocab_size),
++        softcap_mode = draft_config.get("selector_softcap_mode", "before_correction")
++        if softcap_mode not in ("before_correction", "after_correction"):
++            raise ValueError(f"Unknown DFlash2 selector_softcap_mode: {softcap_mode}")
++        if softcap > 0 and softcap_mode == "after_correction":
++            self.model.candidate_selector.post_softcap = softcap
++
++        # Candidates index the selector codebooks and must be valid target IDs.
++        target = vllm_config.model_config
++        vocab_size = target.get_vocab_size()
++        processor_cls = LogitsProcessor
++        if target.hf_config.model_type == "inkling2_loop":
++            from vllm.models.inkling2.nvidia.model import Inkling2LogitsProcessor
++
++            vocab_size = target.hf_text_config.vocab_size
++            processor_cls = Inkling2LogitsProcessor
++        self.candidate_logits_processor = processor_cls(
++            min(vocab_size, self.config.vocab_size),
+             scale=float(draft_config.get("output_multiplier", 1.0)),
+-            soft_cap=softcap if softcap > 0 else None,
++            soft_cap=(
++                softcap if softcap > 0 and softcap_mode == "before_correction" else None
++            ),
+         )
++        if target.hf_config.model_type == "inkling2_loop":
++            self.candidate_logits_processor.head_dtype = target.head_dtype
+
+     def compute_candidates(
+         self, hidden_states: torch.Tensor
+--- a/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py
+@@ -1,12 +1,14 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
++import copy
+ from typing import Any
+
+ import torch
+
+ from vllm.config import VllmConfig
+ from vllm.config.compilation import CUDAGraphMode
++from vllm.platforms import current_platform
+ from vllm.triton_utils import tl, triton
+ from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
+ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+@@ -198,7 +200,26 @@
+     _candidate_top_k_key = "selector_top_k"
+
+     def __init__(self, vllm_config: VllmConfig, device: torch.device):
++        target = vllm_config.model_config
++        if (
++            target.hf_config.model_type == "inkling2_loop"
++            and target.dtype == torch.bfloat16
++            and current_platform.is_device_capability(75)
++        ):
++            # The target uses Inkling's BF16 kernels. The generic drafter runs
++            # on FP16 tensor cores with the SM75 DFlash2 transport.
++            vllm_config = copy.copy(vllm_config)
++            vllm_config.model_config = copy.copy(target)
++            vllm_config.model_config.dtype = torch.float16
++            spec = copy.copy(vllm_config.speculative_config)
++            spec.draft_model_config = copy.copy(spec.draft_model_config)
++            spec.draft_model_config.dtype = torch.float16
++            vllm_config.speculative_config = spec
+         super().__init__(vllm_config, device)
++        if self._aux_staging is not None and self.dtype != target.dtype:
++            # Leave the loop's residual features in FP32 until the FC projects
++            # them. Some of the captured streams already use FP32.
++            self._aux_staging = self._aux_staging.float()
+         draft_config = self.draft_model_config.hf_config.dflash_config
+         self.top_k = int(draft_config[self._candidate_top_k_key])
+         self.candidate_sampler = CandidateSampler(
+--- a/vllm/v1/worker/gpu/spec_decode/dflash/utils.py
++++ b/vllm/v1/worker/gpu/spec_decode/dflash/utils.py
+@@ -58,6 +58,13 @@
+     draft_inner = dflash_model.model
+
+     maybe_share_target_embed(dflash_model, draft_inner, target_inner)
++    if (
++        vllm_config.model_config.hf_config.model_type == "inkling2_loop"
++        and hasattr(draft_inner, "target_embed_norm")
++    ):
++        # Inkling's DFlash2 checkpoint consumes the normalized target embedding
++        # for both the anchor and the mask tokens.
++        draft_inner.target_embed_norm = target_inner.embed_norm
+
+     target_lm_head = get_target_lm_head(target_model, target_language_model)
+     draft_lm_head = getattr(dflash_model, "lm_head", None)

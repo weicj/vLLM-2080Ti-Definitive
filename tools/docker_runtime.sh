@@ -34,8 +34,8 @@ docker_runtime_options() {
   # Pass exported vLLM settings by name so credentials are not printed in argv.
   while IFS= read -r var; do
     case "$var" in
-      VLLM_USE_V2_MODEL_RUNNER|VLLM_SM75_SPEC_SYNC_MODE|VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_DOCKER_*|VLLM_RUNTIME_BACKEND) ;;
-      VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC|VLLM_USE_BREAKABLE_CUDAGRAPH|VLLM_KV_CACHE_LAYOUT)
+      VLLM_USE_V2_MODEL_RUNNER|VLLM_SM75_SPEC_SYNC_MODE|VLLM_ALLOW_MAMBA_SPEC_FULL_CUDAGRAPH|VLLM_KV_CACHE_LAYOUT|VLLM_DOCKER_*|VLLM_RUNTIME_BACKEND) ;;
+      VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC|VLLM_USE_BREAKABLE_CUDAGRAPH)
         DOCKER_RUNTIME_OPTIONS+=(--env "$var=${!var}") ;;
       VLLM_*) DOCKER_RUNTIME_OPTIONS+=(--env "$var") ;;
     esac
@@ -56,7 +56,8 @@ docker_server_options() {
   local draft file cache_dir gpu_uuids gpu uuid layout spec_method
   local -a indices=() uuids=()
   docker_runtime_options || return 1
-  if [[ -z "${VLLM_KV_CACHE_LAYOUT:-}" ]]; then
+  layout=${VLLM_KV_CACHE_LAYOUT:-}
+  if [[ -z "$layout" ]]; then
     spec_method=$(effective_speculative_method)
     if is_docker_tp4_t10_qwen_profile &&
        [[ "${KV_CACHE_DTYPE:-}" != turboquant_* || "$spec_method" != dflash ]]; then
@@ -66,9 +67,9 @@ docker_server_options() {
       # Keep the target and draft page sizes independent.
       layout=BLHNC
     fi
-    if [[ -n "${layout:-}" ]]; then
-      DOCKER_RUNTIME_OPTIONS+=(--env "VLLM_KV_CACHE_LAYOUT=$layout")
-    fi
+  fi
+  if [[ -n "$layout" ]]; then
+    DOCKER_RUNTIME_OPTIONS+=(--env "VLLM_KV_CACHE_LAYOUT=$layout")
   fi
   if [[ ! -v VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC &&
         "${NCCL_P2P_DISABLE:-0}" != 1 &&

@@ -1,17 +1,8 @@
 # Chat Template Presets
 
-These templates are optional launcher presets. Select them from
-`launcher.sh` -> `Profile` -> `Chat template preset`.
+In `launcher.sh`, open `Profile` → `Chat template preset`. The template,
+reasoning and thinking budget, and tool-calling defaults are service settings.
 
-Route profiles do not store chat-template paths. A template, reasoning default,
-default thinking budget, and tool-calling defaults are global service settings
-so the same FP8/INT4/KV route can be reused with different prompt rendering
-behavior.
-
-## Presets
-
-- `qwen-froggeric-v22.5.jinja`: Qwen 3.5/3.6/3.8 fixed chat template from
-  <https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates>. Useful when you
-  want its tool/reasoning/KV-cache-safe rendering behavior.
-
-Use `model default` in the launcher to avoid passing `--chat-template`.
+- `qwen-froggeric-v22.5.jinja` sets tool and reasoning formatting for Qwen
+  3.5/3.6/3.8 with KV cache reuse. [Qwen Fixed Chat Templates](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)
+- `model default` uses the checkpoint's own template.
